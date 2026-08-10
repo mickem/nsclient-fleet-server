@@ -26,6 +26,9 @@ pub async fn put_tag(
     Path((host_id, key)): Path<(String, String)>,
     Json(body): Json<PutTagBody>,
 ) -> Response {
+    if !who.role.can_write_config() {
+        return crate::auth::forbidden("change configuration");
+    }
     if !host_belongs_to(&state, who.tenant_id, &host_id).await {
         return (StatusCode::NOT_FOUND, "host not found").into_response();
     }
@@ -54,6 +57,9 @@ pub async fn delete_tag(
     who: AuthedUser,
     Path((host_id, key)): Path<(String, String)>,
 ) -> Response {
+    if !who.role.can_write_config() {
+        return crate::auth::forbidden("change configuration");
+    }
     if !host_belongs_to(&state, who.tenant_id, &host_id).await {
         return (StatusCode::NOT_FOUND, "host not found").into_response();
     }
@@ -100,6 +106,9 @@ pub async fn create_group(
     who: AuthedUser,
     Json(body): Json<CreateGroupBody>,
 ) -> Response {
+    if !who.role.can_write_config() {
+        return crate::auth::forbidden("change configuration");
+    }
     if body.name.trim().is_empty() || body.name.len() > 128 {
         return (StatusCode::BAD_REQUEST, "invalid name").into_response();
     }
@@ -151,6 +160,9 @@ pub async fn patch_group(
     Path(group_id): Path<String>,
     Json(body): Json<PatchGroupBody>,
 ) -> Response {
+    if !who.role.can_write_config() {
+        return crate::auth::forbidden("change configuration");
+    }
     let selector_json = match &body.selector {
         Some(v) => match Selector::from_json(v) {
             Ok(s) => Some(serde_json::to_string(&s).unwrap_or_else(|_| "{}".to_string())),
@@ -197,6 +209,9 @@ pub async fn delete_group(
     who: AuthedUser,
     Path(group_id): Path<String>,
 ) -> Response {
+    if !who.role.can_write_config() {
+        return crate::auth::forbidden("change configuration");
+    }
     let groups = GroupsRepo::new(&state.db);
     match groups.delete(who.tenant_id, &group_id).await {
         Ok(true) => {
@@ -312,6 +327,9 @@ pub async fn put_override(
     Path(host_id): Path<String>,
     Json(body): Json<PutOverrideBody>,
 ) -> Response {
+    if !who.role.can_write_config() {
+        return crate::auth::forbidden("change configuration");
+    }
     if !host_belongs_to(&state, who.tenant_id, &host_id).await {
         return (StatusCode::NOT_FOUND, "host not found").into_response();
     }
@@ -356,6 +374,9 @@ pub async fn delete_override(
     who: AuthedUser,
     Path(host_id): Path<String>,
 ) -> Response {
+    if !who.role.can_write_config() {
+        return crate::auth::forbidden("change configuration");
+    }
     if !host_belongs_to(&state, who.tenant_id, &host_id).await {
         return (StatusCode::NOT_FOUND, "host not found").into_response();
     }

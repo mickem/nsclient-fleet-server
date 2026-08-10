@@ -8,6 +8,7 @@ import { HostDetailPage } from "./HostDetailPage";
 import { GroupsPage } from "./GroupsPage";
 import { BundlesPage } from "./BundlesPage";
 import { AuditPage } from "./AuditPage";
+import { UsersPage } from "./UsersPage";
 
 const drawerWidth = 240;
 
@@ -41,6 +42,7 @@ export function Dashboard({ me, onLogout }: Props) {
     <Box sx={{ display: "flex" }}>
       <AppNavbar me={me} onLogout={onLogout} handleDrawerToggle={handleDrawerToggle} />
       <SideBar
+        me={me}
         page={page}
         onNavigate={navigate}
         mobileOpen={mobileOpen}
@@ -58,13 +60,14 @@ export function Dashboard({ me, onLogout }: Props) {
         <Toolbar />
         {page === "hosts" &&
           (hostId ? (
-            <HostDetailPage hostId={hostId} onBack={() => setHostId(null)} />
+            <HostDetailPage me={me} hostId={hostId} onBack={() => setHostId(null)} />
           ) : (
-            <HostsPage onOpen={setHostId} />
+            <HostsPage me={me} onOpen={setHostId} />
           ))}
-        {page === "groups" && <GroupsPage />}
-        {page === "bundles" && <BundlesPage />}
+        {page === "groups" && <GroupsPage me={me} />}
+        {page === "bundles" && <BundlesPage me={me} />}
         {page === "audit" && <AuditPage />}
+        {page === "users" && <UsersPage me={me} />}
       </Box>
     </Box>
   );

@@ -195,7 +195,7 @@ async fn exchange_burns_link_sets_cookie_and_me_works() {
     let links = MagicLinkRepo::new(&s.db);
     let t = tenants.create("acme", "Acme", "free", None).await.unwrap();
     let u = users
-        .create(t.id, "alice@example.com", "owner")
+        .create(t.id, "alice@example.com", fleet_core::user::Role::Owner)
         .await
         .unwrap();
     let token = "test-token-abcdefghij";
@@ -256,7 +256,7 @@ async fn exchange_expired_token_rejected() {
     let links = MagicLinkRepo::new(&s.db);
     let t = tenants.create("acme", "Acme", "free", None).await.unwrap();
     let u = users
-        .create(t.id, "alice@example.com", "owner")
+        .create(t.id, "alice@example.com", fleet_core::user::Role::Owner)
         .await
         .unwrap();
     let token = "expired-xxxxxxxxx";

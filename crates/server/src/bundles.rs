@@ -95,6 +95,9 @@ pub async fn upload(
     who: AuthedUser,
     mut form: Multipart,
 ) -> Response {
+    if !who.role.can_write_config() {
+        return crate::auth::forbidden("change configuration");
+    }
     let mut name: Option<String> = None;
     let mut version: Option<String> = None;
     let mut bytes: Option<Vec<u8>> = None;
@@ -249,6 +252,9 @@ pub async fn compose(
     who: AuthedUser,
     Json(body): Json<ComposeBody>,
 ) -> Response {
+    if !who.role.can_write_config() {
+        return crate::auth::forbidden("change configuration");
+    }
     let name = body.name.trim();
     let version = body.version.trim();
     if !valid_bundle_token(name) {
@@ -489,6 +495,9 @@ pub async fn assign_to_group(
     Path(group_id): Path<String>,
     Json(body): Json<AssignBody>,
 ) -> Response {
+    if !who.role.can_write_config() {
+        return crate::auth::forbidden("change configuration");
+    }
     if GroupsRepo::new(&state.db)
         .get(who.tenant_id, &group_id)
         .await
@@ -590,6 +599,9 @@ pub async fn unassign_from_group(
     who: AuthedUser,
     Path((group_id, bundle_id)): Path<(String, String)>,
 ) -> Response {
+    if !who.role.can_write_config() {
+        return crate::auth::forbidden("change configuration");
+    }
     match BundleAssignmentsRepo::new(&state.db)
         .unassign(who.tenant_id, &group_id, &bundle_id)
         .await

@@ -17,6 +17,8 @@ import {
   apiGet,
   apiSend,
   AssignmentView,
+  canWriteConfig,
+  Me,
   BundleView,
   GroupView,
   PreviewMatch,
@@ -25,7 +27,7 @@ import {
 import { describeSelector, SelectorEditor } from "./SelectorBuilder";
 import { RefreshButton } from "./RefreshButton";
 
-export function GroupsPage() {
+export function GroupsPage({ me }: { me: Me }) {
   const [groups, setGroups] = useState<GroupView[] | null>(null);
   const [bundles, setBundles] = useState<BundleView[]>([]);
   const [creating, setCreating] = useState(false);
@@ -50,7 +52,7 @@ export function GroupsPage() {
         <Typography variant="h4">Groups</Typography>
         <Stack direction="row" spacing={1} alignItems="center">
           <RefreshButton refreshing={refreshing} onClick={refresh} />
-          {!creating && (
+          {!creating && canWriteConfig(me.role) && (
             <Button variant="contained" startIcon={<AddIcon />} onClick={() => setCreating(true)}>
               New group
             </Button>
@@ -89,7 +91,13 @@ export function GroupsPage() {
       ) : (
         <Stack spacing={2}>
           {groups.map((g) => (
-            <GroupCard key={g.id} group={g} bundles={bundles} onChanged={refresh} />
+            <GroupCard
+              key={g.id}
+              group={g}
+              bundles={bundles}
+              canWrite={canWriteConfig(me.role)}
+              onChanged={refresh}
+            />
           ))}
         </Stack>
       )}
@@ -100,10 +108,12 @@ export function GroupsPage() {
 function GroupCard({
   group,
   bundles,
+  canWrite,
   onChanged,
 }: {
   group: GroupView;
   bundles: BundleView[];
+  canWrite: boolean;
   onChanged: () => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -124,14 +134,16 @@ function GroupCard({
       <CardContent>
         <Stack direction="row" justifyContent="space-between" alignItems="center">
           <Typography variant="h5">{group.name}</Typography>
-          <Stack direction="row" spacing={1}>
-            <Button size="small" onClick={() => setEditing(!editing)}>
-              {editing ? "Close" : "Edit"}
-            </Button>
-            <Button size="small" color="error" onClick={remove}>
-              Delete
-            </Button>
-          </Stack>
+          {canWrite && (
+            <Stack direction="row" spacing={1}>
+              <Button size="small" onClick={() => setEditing(!editing)}>
+                {editing ? "Close" : "Edit"}
+              </Button>
+              <Button size="small" color="error" onClick={remove}>
+                Delete
+              </Button>
+            </Stack>
+          )}
         </Stack>
         {error && (
           <Alert severity="error" sx={{ my: 1 }}>

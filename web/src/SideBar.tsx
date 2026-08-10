@@ -8,8 +8,10 @@ import DnsIcon from "@mui/icons-material/Dns";
 import WorkspacesIcon from "@mui/icons-material/Workspaces";
 import Inventory2Icon from "@mui/icons-material/Inventory2";
 import HistoryIcon from "@mui/icons-material/History";
+import GroupIcon from "@mui/icons-material/Group";
+import { canManageUsers, Me } from "./api";
 
-export type Page = "hosts" | "groups" | "bundles" | "audit";
+export type Page = "hosts" | "groups" | "bundles" | "audit" | "users";
 
 const drawerWidth = 240;
 
@@ -24,20 +26,39 @@ const Drawer = styled(MuiDrawer)({
   },
 });
 
-const MENU: { id: Page; label: string; icon: JSX.Element }[][] = [
-  [{ id: "hosts", label: "Hosts", icon: <DnsIcon /> }],
-  [
-    { id: "groups", label: "Groups", icon: <WorkspacesIcon /> },
-    { id: "bundles", label: "Bundles", icon: <Inventory2Icon /> },
-  ],
-  [{ id: "audit", label: "Audit log", icon: <HistoryIcon /> }],
-];
+type MenuItemDef = { id: Page; label: string; icon: JSX.Element };
 
-function SideMenu({ page, onNavigate }: { page: Page; onNavigate: (p: Page) => void }) {
+/// Groups are rendered with a divider between them. The last group is hidden entirely for
+/// roles that cannot manage users — the API refuses them anyway, so a visible-but-broken
+/// entry would only be a dead end.
+function menuFor(me: Me): MenuItemDef[][] {
+  const groups: MenuItemDef[][] = [
+    [{ id: "hosts", label: "Hosts", icon: <DnsIcon /> }],
+    [
+      { id: "groups", label: "Groups", icon: <WorkspacesIcon /> },
+      { id: "bundles", label: "Bundles", icon: <Inventory2Icon /> },
+    ],
+    [{ id: "audit", label: "Audit log", icon: <HistoryIcon /> }],
+  ];
+  if (canManageUsers(me.role)) {
+    groups.push([{ id: "users", label: "Users", icon: <GroupIcon /> }]);
+  }
+  return groups;
+}
+
+function SideMenu({
+  me,
+  page,
+  onNavigate,
+}: {
+  me: Me;
+  page: Page;
+  onNavigate: (p: Page) => void;
+}) {
   return (
     <div>
       <Toolbar />
-      {MENU.map((group, i) => (
+      {menuFor(me).map((group, i) => (
         <div key={i}>
           {i > 0 && <Divider />}
           <List>
@@ -57,6 +78,7 @@ function SideMenu({ page, onNavigate }: { page: Page; onNavigate: (p: Page) => v
 }
 
 type Props = {
+  me: Me;
   page: Page;
   onNavigate: (p: Page) => void;
   mobileOpen: boolean;
@@ -64,7 +86,7 @@ type Props = {
   onClose: () => void;
 };
 
-export function SideBar({ page, onNavigate, mobileOpen, onTransitionEnd, onClose }: Props) {
+export function SideBar({ me, page, onNavigate, mobileOpen, onTransitionEnd, onClose }: Props) {
   return (
     <Box component="nav" sx={{ width: { sm: drawerWidth }, flexShrink: { sm: 0 } }}>
       <Toolbar />
@@ -79,7 +101,7 @@ export function SideBar({ page, onNavigate, mobileOpen, onTransitionEnd, onClose
           "& .MuiDrawer-paper": { boxSizing: "border-box", width: drawerWidth },
         }}
       >
-        <SideMenu page={page} onNavigate={onNavigate} />
+        <SideMenu me={me} page={page} onNavigate={onNavigate} />
       </Drawer>
       <Drawer
         variant="permanent"
@@ -89,7 +111,7 @@ export function SideBar({ page, onNavigate, mobileOpen, onTransitionEnd, onClose
         }}
         open
       >
-        <SideMenu page={page} onNavigate={onNavigate} />
+        <SideMenu me={me} page={page} onNavigate={onNavigate} />
       </Drawer>
     </Box>
   );

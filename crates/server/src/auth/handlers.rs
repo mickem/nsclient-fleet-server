@@ -49,7 +49,7 @@ pub struct OnPremLoginBody {
 pub struct MeResponse {
     pub user_id: i64,
     pub email: String,
-    pub role: String,
+    pub role: fleet_core::user::Role,
     pub tenant_id: i64,
     pub tenant_slug: String,
     pub tenant_name: String,
@@ -116,7 +116,10 @@ pub async fn signup(
     )
     .await;
 
-    let user = match users.create(tenant.id, &email, "owner").await {
+    let user = match users
+        .create(tenant.id, &email, fleet_core::user::Role::Owner)
+        .await
+    {
         Ok(u) => u,
         Err(e) => {
             tracing::error!(error = %e, "user create failed");
@@ -177,7 +180,9 @@ pub async fn send_link(
     StatusCode::NO_CONTENT.into_response()
 }
 
-async fn issue_and_send_link(
+/// Mint a single-use magic link and mail it. Shared with `crate::users::invite`, which is
+/// the same operation for a user who has just been created.
+pub(crate) async fn issue_and_send_link(
     state: &AppState,
     email: &str,
     tenant_id: i64,

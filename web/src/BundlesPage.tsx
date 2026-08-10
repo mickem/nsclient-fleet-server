@@ -21,13 +21,13 @@ import {
 import AddIcon from "@mui/icons-material/Add";
 import EditIcon from "@mui/icons-material/Edit";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
-import { apiGet, apiUpload, BundleView, fmtBytes, fmtTime } from "./api";
+import { apiGet, apiUpload, BundleView, canWriteConfig, fmtBytes, fmtTime, Me } from "./api";
 import { BundleEditor } from "./BundleEditor";
 import { RefreshButton } from "./RefreshButton";
 
 type EditorState = null | { editBundleId: string | null };
 
-export function BundlesPage() {
+export function BundlesPage({ me }: { me: Me }) {
   const [bundles, setBundles] = useState<BundleView[] | null>(null);
   const [editor, setEditor] = useState<EditorState>(null);
   const [name, setName] = useState("");
@@ -76,7 +76,7 @@ export function BundlesPage() {
         <Typography variant="h4">Bundles</Typography>
         <Stack direction="row" spacing={1} alignItems="center">
           <RefreshButton refreshing={refreshing} onClick={refresh} />
-          {!editor && (
+          {!editor && canWriteConfig(me.role) && (
             <Button
               variant="contained"
               startIcon={<AddIcon />}
@@ -144,13 +144,15 @@ export function BundlesPage() {
                     </Typography>
                   </TableCell>
                   <TableCell align="right">
-                    <Button
-                      size="small"
-                      startIcon={<EditIcon />}
-                      onClick={() => setEditor({ editBundleId: b.id })}
-                    >
-                      Edit
-                    </Button>
+                    {canWriteConfig(me.role) && (
+                      <Button
+                        size="small"
+                        startIcon={<EditIcon />}
+                        onClick={() => setEditor({ editBundleId: b.id })}
+                      >
+                        Edit
+                      </Button>
+                    )}
                   </TableCell>
                 </TableRow>
               ))}
@@ -159,6 +161,7 @@ export function BundlesPage() {
         </TableContainer>
       )}
 
+      {canWriteConfig(me.role) && (
       <Accordion sx={{ mt: 3 }} disableGutters>
         <AccordionSummary expandIcon={<ExpandMoreIcon />}>
           <Typography color="text.secondary">Upload a pre-built zip</Typography>
@@ -188,6 +191,7 @@ export function BundlesPage() {
           </Stack>
         </AccordionDetails>
       </Accordion>
+      )}
     </Box>
   );
 }

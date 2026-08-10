@@ -3,7 +3,7 @@ use fleet_core::host::{new_host_id, Host};
 use fleet_core::session::Session;
 use fleet_core::tenant::Tenant;
 use fleet_core::time::now_unix;
-use fleet_core::user::User;
+use fleet_core::user::{Role, User};
 use sqlx::Row;
 
 use crate::Db;
@@ -1134,14 +1134,14 @@ impl<'a> UserRepo<'a> {
         Self { db }
     }
 
-    pub async fn create(&self, tenant_id: i64, email: &str, role: &str) -> Result<User> {
+    pub async fn create(&self, tenant_id: i64, email: &str, role: Role) -> Result<User> {
         let now = now_unix();
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO users (tenant_id, email, role, created_at) VALUES (?, ?, ?, ?) RETURNING id",
         )
         .bind(tenant_id)
         .bind(email)
-        .bind(role)
+        .bind(role.as_db())
         .bind(now)
         .fetch_one(&self.db.write)
         .await?;
@@ -1150,9 +1150,73 @@ impl<'a> UserRepo<'a> {
             id,
             tenant_id,
             email: email.to_owned(),
-            role: role.to_owned(),
+            role,
             created_at: now,
         })
+    }
+
+    pub async fn list(&self, tenant_id: i64) -> Result<Vec<User>> {
+        let rows = sqlx::query(
+            "SELECT id, tenant_id, email, role, created_at
+             FROM users WHERE tenant_id = ? ORDER BY created_at ASC",
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.db.read)
+        .await?;
+        Ok(rows.into_iter().map(map_user).collect())
+    }
+
+    pub async fn set_role(&self, tenant_id: i64, user_id: i64, role: Role) -> Result<bool> {
+        let res = sqlx::query("UPDATE users SET role = ? WHERE tenant_id = ? AND id = ?")
+            .bind(role.as_db())
+            .bind(tenant_id)
+            .bind(user_id)
+            .execute(&self.db.write)
+            .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// Remove a user and everything that would dangle behind them.
+    ///
+    /// Sessions and outstanding magic links are deleted, which signs the user out
+    /// immediately. Audit entries and host overrides they authored are kept but lose their
+    /// attribution (`user_id`/`updated_by_user` set to NULL) — the record of *what* happened
+    /// outlives the account, and both columns are nullable for exactly this reason.
+    pub async fn delete(&self, tenant_id: i64, user_id: i64) -> Result<bool> {
+        let mut tx = self.db.write.begin().await?;
+
+        sqlx::query("DELETE FROM sessions WHERE tenant_id = ? AND user_id = ?")
+            .bind(tenant_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM magic_links WHERE tenant_id = ? AND user_id = ?")
+            .bind(tenant_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE audit_log SET user_id = NULL WHERE tenant_id = ? AND user_id = ?")
+            .bind(tenant_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "UPDATE host_overrides SET updated_by_user = NULL
+             WHERE tenant_id = ? AND updated_by_user = ?",
+        )
+        .bind(tenant_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+        let res = sqlx::query("DELETE FROM users WHERE tenant_id = ? AND id = ?")
+            .bind(tenant_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(res.rows_affected() == 1)
     }
 
     pub async fn get(&self, tenant_id: i64, user_id: i64) -> Result<Option<User>> {
@@ -1183,7 +1247,7 @@ fn map_user(r: sqlx::sqlite::SqliteRow) -> User {
         id: r.get("id"),
         tenant_id: r.get("tenant_id"),
         email: r.get("email"),
-        role: r.get("role"),
+        role: Role::from_db(&r.get::<String, _>("role")),
         created_at: r.get("created_at"),
     }
 }
@@ -1403,7 +1467,10 @@ mod tests {
         let links = MagicLinkRepo::new(&db);
 
         let t = tenants.create("acme", "Acme", "free", None).await.unwrap();
-        let u = users.create(t.id, "a@b", "owner").await.unwrap();
+        let u = users
+            .create(t.id, "a@b", fleet_core::user::Role::Owner)
+            .await
+            .unwrap();
 
         let now = now_unix();
         links.create("hash1", t.id, u.id, now + 900).await.unwrap();
@@ -1423,7 +1490,10 @@ mod tests {
         let links = MagicLinkRepo::new(&db);
 
         let t = tenants.create("acme", "Acme", "free", None).await.unwrap();
-        let u = users.create(t.id, "a@b", "owner").await.unwrap();
+        let u = users
+            .create(t.id, "a@b", fleet_core::user::Role::Owner)
+            .await
+            .unwrap();
 
         links
             .create("hash_expired", t.id, u.id, now_unix() - 1)
@@ -1440,7 +1510,10 @@ mod tests {
         let sessions = SessionRepo::new(&db);
 
         let t = tenants.create("acme", "Acme", "free", None).await.unwrap();
-        let u = users.create(t.id, "a@b", "owner").await.unwrap();
+        let u = users
+            .create(t.id, "a@b", fleet_core::user::Role::Owner)
+            .await
+            .unwrap();
 
         let s = sessions
             .create("session_hash", t.id, u.id, 3600)

@@ -48,6 +48,31 @@ Repo root is the Cargo workspace. Crates under `crates/`, frontend under `web/`.
 | [docs/agent-integration.md](docs/agent-integration.md) | The post-enrollment contract: config sync, state reporting, certificate renewal |
 | [docs/ca-rotation-playbook.md](docs/ca-rotation-playbook.md) | Rotating a tenant CA or bundle-signing key, planned or after compromise |
 
+## Users and roles
+
+The account that signs up owns the tenant. Owners and admins can invite colleagues from
+**Users** in the sidebar; an invitation creates the account and emails a magic link, which is
+the only way the invitee signs in — the link is never shown to the inviter.
+
+| role         | fleet | add hosts | configuration | users |
+|--------------|-------|-----------|---------------|-------|
+| `owner`      | read  | yes       | yes           | yes   |
+| `admin`      | read  | yes       | yes           | yes   |
+| `add_hosts`  | read  | yes       | no            | no    |
+| `view_only`  | read  | no        | no            | no    |
+
+"Configuration" is groups, bundles, assignments, host tags and overrides, and deleting hosts.
+Roles are enforced server-side (`crates/core/src/user.rs` defines them; every handler asks a
+`can_*` method); the UI only hides controls a role cannot use. A role change applies on the
+user's next request, without them signing in again.
+
+The owner cannot be re-roled or removed, and nobody can change their own role or delete their
+own account — together that keeps a tenant from locking itself out. Deleting a user signs them
+out immediately and leaves their audit entries in place, without attribution.
+
+Invitations are unavailable when `ON_PREM=true`: that mode disables magic links and
+authenticates a single administrator from `ON_PREM_ADMIN_EMAIL` / `ON_PREM_ADMIN_PASSWORD`.
+
 ## Dev environment variables
 
 `MASTER_KEY` is required for any startup that touches encryption (tenant CAs, host overrides). For dev:

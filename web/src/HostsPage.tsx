@@ -18,14 +18,23 @@ import {
 import AddIcon from "@mui/icons-material/Add";
 import CloseIcon from "@mui/icons-material/Close";
 import DeleteIcon from "@mui/icons-material/Delete";
-import { apiGet, apiSend, CreateHostResponse, fmtAgo, HostView } from "./api";
+import {
+  apiGet,
+  apiSend,
+  canAddHosts,
+  canWriteConfig,
+  CreateHostResponse,
+  fmtAgo,
+  HostView,
+  Me,
+} from "./api";
 import { ConfirmDeleteHostDialog } from "./ConfirmDeleteHostDialog";
 import { HostStatusChip } from "./HostStatusChip";
 import { RefreshButton } from "./RefreshButton";
 
-type Props = { onOpen: (hostId: string) => void };
+type Props = { me: Me; onOpen: (hostId: string) => void };
 
-export function HostsPage({ onOpen }: Props) {
+export function HostsPage({ me, onOpen }: Props) {
   const [hosts, setHosts] = useState<HostView[] | null>(null);
   const [issued, setIssued] = useState<CreateHostResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -64,9 +73,11 @@ export function HostsPage({ onOpen }: Props) {
         <Typography variant="h4">Hosts</Typography>
         <Stack direction="row" spacing={1} alignItems="center">
           <RefreshButton refreshing={refreshing} onClick={refresh} />
-          <Button variant="contained" startIcon={<AddIcon />} onClick={addHost} disabled={busy}>
-            {busy ? "Issuing token…" : "Add host"}
-          </Button>
+          {canAddHosts(me.role) && (
+            <Button variant="contained" startIcon={<AddIcon />} onClick={addHost} disabled={busy}>
+              {busy ? "Issuing token…" : "Add host"}
+            </Button>
+          )}
         </Stack>
       </Stack>
 
@@ -153,16 +164,18 @@ export function HostsPage({ onOpen }: Props) {
                     </Typography>
                   </TableCell>
                   <TableCell align="right">
-                    <IconButton
-                      size="small"
-                      title="Delete host"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setToDelete(h);
-                      }}
-                    >
-                      <DeleteIcon fontSize="small" />
-                    </IconButton>
+                    {canWriteConfig(me.role) && (
+                      <IconButton
+                        size="small"
+                        title="Delete host"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setToDelete(h);
+                        }}
+                      >
+                        <DeleteIcon fontSize="small" />
+                      </IconButton>
+                    )}
                   </TableCell>
                 </TableRow>
               ))}

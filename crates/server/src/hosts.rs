@@ -43,6 +43,9 @@ pub async fn create(
     who: AuthedUser,
     Json(_body): Json<CreateHostBody>,
 ) -> Response {
+    if !who.role.can_add_hosts() {
+        return crate::auth::forbidden("add hosts");
+    }
     let tenants_repo = TenantRepo::new(&state.db);
     let hosts_repo = HostRepo::new(&state.db);
 
@@ -245,6 +248,9 @@ pub async fn delete_host(
     who: AuthedUser,
     Path(host_id): Path<String>,
 ) -> Response {
+    if !who.role.can_write_config() {
+        return crate::auth::forbidden("change configuration");
+    }
     let host = match HostRepo::new(&state.db).get(who.tenant_id, &host_id).await {
         Ok(Some(h)) => h,
         Ok(None) => return (StatusCode::NOT_FOUND, "host not found").into_response(),

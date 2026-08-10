@@ -22,9 +22,18 @@ import DeleteIcon from "@mui/icons-material/Delete";
 import { ConfirmDeleteHostDialog } from "./ConfirmDeleteHostDialog";
 import { HostStatusChip } from "./HostStatusChip";
 import { RefreshButton } from "./RefreshButton";
-import { apiGet, apiSend, DesiredStateView, fmtAgo, fmtTime, HostDetail } from "./api";
+import {
+  apiGet,
+  apiSend,
+  canWriteConfig,
+  DesiredStateView,
+  fmtAgo,
+  fmtTime,
+  HostDetail,
+  Me,
+} from "./api";
 
-type Props = { hostId: string; onBack: () => void };
+type Props = { me: Me; hostId: string; onBack: () => void };
 
 /** The enrolment clause of the summary line — what happened, or what still needs to. */
 function enrollmentSummary(host: HostDetail): string {
@@ -40,7 +49,7 @@ function enrollmentSummary(host: HostDetail): string {
   }
 }
 
-export function HostDetailPage({ hostId, onBack }: Props) {
+export function HostDetailPage({ me, hostId, onBack }: Props) {
   const [host, setHost] = useState<HostDetail | null>(null);
   const [desired, setDesired] = useState<DesiredStateView | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -100,14 +109,16 @@ export function HostDetailPage({ hostId, onBack }: Props) {
           <HostStatusChip host={host} />
         </Stack>
         <RefreshButton refreshing={refreshing} onClick={refresh} />
-        <Button
-          color="error"
-          variant="outlined"
-          startIcon={<DeleteIcon />}
-          onClick={() => setConfirmDelete(true)}
-        >
-          Delete host
-        </Button>
+        {canWriteConfig(me.role) && (
+          <Button
+            color="error"
+            variant="outlined"
+            startIcon={<DeleteIcon />}
+            onClick={() => setConfirmDelete(true)}
+          >
+            Delete host
+          </Button>
+        )}
       </Stack>
       <ConfirmDeleteHostDialog
         host={confirmDelete ? { id: host.id, hostname: host.hostname } : null}
@@ -129,10 +140,10 @@ export function HostDetailPage({ hostId, onBack }: Props) {
           <DesiredCard desired={desired} />
         </Grid>
         <Grid size={{ xs: 12, md: 6 }}>
-          <TagsCard host={host} onChanged={refresh} />
+          <TagsCard host={host} canWrite={canWriteConfig(me.role)} onChanged={refresh} />
         </Grid>
         <Grid size={{ xs: 12, md: 6 }}>
-          <OverrideCard host={host} onChanged={refresh} />
+          <OverrideCard host={host} canWrite={canWriteConfig(me.role)} onChanged={refresh} />
         </Grid>
       </Grid>
     </Box>
@@ -197,7 +208,15 @@ function DesiredCard({ desired }: { desired: DesiredStateView | null }) {
   );
 }
 
-function TagsCard({ host, onChanged }: { host: HostDetail; onChanged: () => void }) {
+function TagsCard({
+  host,
+  canWrite,
+  onChanged,
+}: {
+  host: HostDetail;
+  canWrite: boolean;
+  onChanged: () => void;
+}) {
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -260,11 +279,12 @@ function TagsCard({ host, onChanged }: { host: HostDetail; onChanged: () => void
                 label={`${t.key}=${t.value}`}
                 size="small"
                 color="primary"
-                onDelete={() => remove(t.key)}
+                onDelete={canWrite ? () => remove(t.key) : undefined}
               />
             ),
           )}
         </Stack>
+        {canWrite && (
         <Stack direction="row" spacing={1}>
           <TextField
             size="small"
@@ -284,6 +304,7 @@ function TagsCard({ host, onChanged }: { host: HostDetail; onChanged: () => void
             Set
           </Button>
         </Stack>
+        )}
         <Typography variant="caption" color="text.secondary">
           Outlined chips are agent-reported (read-only); solid chips are manual.
         </Typography>
@@ -292,7 +313,15 @@ function TagsCard({ host, onChanged }: { host: HostDetail; onChanged: () => void
   );
 }
 
-function OverrideCard({ host, onChanged }: { host: HostDetail; onChanged: () => void }) {
+function OverrideCard({
+  host,
+  canWrite,
+  onChanged,
+}: {
+  host: HostDetail;
+  canWrite: boolean;
+  onChanged: () => void;
+}) {
   const [editing, setEditing] = useState(false);
   const [patch, setPatch] = useState("{}");
   const [priority, setPriority] = useState("1000");
@@ -351,18 +380,27 @@ function OverrideCard({ host, onChanged }: { host: HostDetail; onChanged: () => 
               color="secondary"
               size="small"
             />
-            <Button size="small" onClick={() => setEditing(true)}>
-              Replace
-            </Button>
-            <IconButton size="small" onClick={remove} title="Delete override">
-              <DeleteIcon fontSize="small" />
-            </IconButton>
+            {canWrite && (
+              <>
+                <Button size="small" onClick={() => setEditing(true)}>
+                  Replace
+                </Button>
+                <IconButton size="small" onClick={remove} title="Delete override">
+                  <DeleteIcon fontSize="small" />
+                </IconButton>
+              </>
+            )}
           </Stack>
         )}
-        {!host.override_meta && !editing && (
+        {!host.override_meta && !editing && canWrite && (
           <Button variant="outlined" size="small" onClick={() => setEditing(true)}>
             Add override
           </Button>
+        )}
+        {!host.override_meta && !editing && !canWrite && (
+          <Typography variant="body2" color="text.secondary">
+            No override set.
+          </Typography>
         )}
         {editing && (
           <Stack spacing={1}>

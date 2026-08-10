@@ -12,6 +12,7 @@ pub mod mtls;
 pub mod mux;
 pub mod tenant_setup;
 pub mod trial_expiry;
+pub mod users;
 
 use std::sync::Arc;
 
@@ -111,7 +112,9 @@ pub async fn ensure_on_prem_admin(db: &Db, cfg: &Config) -> anyhow::Result<()> {
         None => tenants.create("default", "On-Prem", "onprem", None).await?,
     };
     if users.find_by_email(&email).await?.is_none() {
-        users.create(tenant.id, &email, "owner").await?;
+        users
+            .create(tenant.id, &email, fleet_core::user::Role::Owner)
+            .await?;
         tracing::info!(%email, tenant_id = tenant.id, "on-prem admin user created");
     }
     Ok(())
@@ -172,6 +175,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/bundles/compose", post(bundles::compose))
         .route("/api/bundles/:id/config", get(bundles::get_config))
         .route("/api/audit", get(audit::list))
+        .route("/api/users", get(users::list).post(users::invite))
+        .route(
+            "/api/users/:id",
+            axum::routing::patch(users::set_role).delete(users::delete_user),
+        )
         .route("/enroll/v1", post(hosts::enroll))
         // Layers wrap the inner service; later .layer() = outer = runs first on the request.
         // We want session_layer to run FIRST (so AuthedUser is in extensions), then trial_expiry.

@@ -6,13 +6,18 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::CookieJar;
-use fleet_storage::SessionRepo;
+use fleet_storage::{SessionRepo, UserRepo};
 
 use super::{tokens::hash_token, AuthedUser, SESSION_COOKIE};
 use crate::AppState;
 
 /// Reads the session cookie and, if valid, attaches `AuthedUser` to the request extensions.
 /// Does not reject — let the route's `AuthedUser` extractor decide whether auth is required.
+///
+/// The user row is re-read on every request to pick up the current role. That costs one
+/// indexed lookup, and buys two things: a demotion takes effect immediately rather than at
+/// the victim's convenience, and a session whose user has been deleted stops authenticating
+/// even if a row somehow outlived `UserRepo::delete`.
 pub async fn session_layer(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -23,10 +28,14 @@ pub async fn session_layer(
         let hash = hash_token(cookie.value());
         let sessions = SessionRepo::new(&state.db);
         if let Ok(Some(session)) = sessions.touch(&hash).await {
-            req.extensions_mut().insert(AuthedUser {
-                user_id: session.user_id,
-                tenant_id: session.tenant_id,
-            });
+            let users = UserRepo::new(&state.db);
+            if let Ok(Some(user)) = users.get(session.tenant_id, session.user_id).await {
+                req.extensions_mut().insert(AuthedUser {
+                    user_id: session.user_id,
+                    tenant_id: session.tenant_id,
+                    role: user.role,
+                });
+            }
         }
     }
     next.run(req).await

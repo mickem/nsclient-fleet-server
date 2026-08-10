@@ -1,13 +1,46 @@
 // Shared fetch helpers + wire types for the control-plane API.
 
+/** Mirrors `Role` in `crates/core/src/user.rs`. The server is the authority — these are used
+ *  to hide controls the caller cannot use, never as the check itself. */
+export type Role = "owner" | "admin" | "add_hosts" | "view_only";
+
+/** Roles an admin can hand out. `owner` is established at signup and never assigned. */
+export const ASSIGNABLE_ROLES: Role[] = ["admin", "add_hosts", "view_only"];
+
+export const ROLE_LABELS: Record<Role, string> = {
+  owner: "Owner",
+  admin: "Admin",
+  add_hosts: "Add hosts",
+  view_only: "View only",
+};
+
+export const ROLE_DESCRIPTIONS: Record<Role, string> = {
+  owner: "Full control. Created the tenant; cannot be removed or re-roled.",
+  admin: "Full control, including managing users.",
+  add_hosts: "Can see everything and add hosts. No configuration or user changes.",
+  view_only: "Read-only.",
+};
+
+export const canManageUsers = (r: Role) => r === "owner" || r === "admin";
+export const canWriteConfig = (r: Role) => r === "owner" || r === "admin";
+export const canAddHosts = (r: Role) => r === "owner" || r === "admin" || r === "add_hosts";
+
 export type Me = {
   user_id: number;
   email: string;
-  role: string;
+  role: Role;
   tenant_id: number;
   tenant_slug: string;
   tenant_name: string;
   on_prem: boolean;
+};
+
+export type UserView = {
+  id: number;
+  email: string;
+  role: Role;
+  created_at: number;
+  is_self: boolean;
 };
 
 /** Derived server-side from `enrolled_at` + the bootstrap deadline. See `HostStatus` in
