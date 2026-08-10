@@ -3,10 +3,10 @@ use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 
+use fleet_core::time::now_unix;
 use governor::clock::DefaultClock;
 use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter as Governor};
-use fleet_core::time::now_unix;
 
 type DirectLimiter = Governor<NotKeyed, InMemoryState, DefaultClock>;
 type KeyedLimiter<K> = Governor<K, governor::state::keyed::DefaultKeyedStateStore<K>, DefaultClock>;

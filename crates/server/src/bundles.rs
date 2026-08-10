@@ -14,7 +14,9 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use ed25519_dalek::pkcs8::DecodePrivateKey;
 use ed25519_dalek::{Signer, SigningKey};
-use fleet_storage::{BundleAssignmentsRepo, BundlesRepo, GroupsRepo, TenantRepo, TenantSecretsRepo};
+use fleet_storage::{
+    BundleAssignmentsRepo, BundlesRepo, GroupsRepo, TenantRepo, TenantSecretsRepo,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
