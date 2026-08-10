@@ -1,0 +1,304 @@
+name: Release
+
+# Builds the frontend once, then the server for every supported target, and attaches the
+# binaries — plus a checksum file — to a GitHub Release.
+#
+# Targets:
+#   x86_64-unknown-linux-musl    Linux x64,     static (most Linux hosts)
+#   aarch64-unknown-linux-musl   Linux ARM64,   static (ARM cloud instances)
+#   x86_64-pc-windows-msvc       Windows x64    (on-prem alongside NSClient itself)
+#   aarch64-pc-windows-msvc      Windows ARM64
+#
+# What each trigger produces:
+#
+#   push to main   →  a release candidate: DRAFT prerelease `v<version>-rc.<run>`.
+#                     Every commit (in practice every merge) gets one, so there is always
+#                     a built, downloadable artifact set for the tip of main.
+#   push of v*     →  the real thing: a published, non-draft release at that tag.
+#   manual run     →  builds the whole matrix and stops. A rehearsal; publishes nothing.
+#
+# A draft release does not create its git tag — GitHub only does that when someone
+# publishes it. RC drafts therefore never pollute the tag namespace, and they are visible
+# to collaborators only, not to the public.
+#
+# Versions come from git tags, not from Cargo.toml: `codacy/git-version` reads the last
+# tag and bumps it (patch by default; `feature:` or `breaking:` in a commit message bumps
+# minor or major). The computed version is resolved once, up front, and then used for BOTH
+# the release name and the version compiled into the binary — so `nsclient-fleet --version`
+# always matches the release it came from. `Cargo.toml`'s version is only the fallback for
+# local builds.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Resolved before anything is built, because the version is compiled into the binary as
+  # well as used to name the release.
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.compute.outputs.build }}
+      tag: ${{ steps.compute.outputs.tag }}
+      name: ${{ steps.compute.outputs.name }}
+      draft: ${{ steps.compute.outputs.draft }}
+      prerelease: ${{ steps.compute.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # git-version walks back to the last tag; a shallow clone has no tags to find.
+          fetch-depth: 0
+
+      # Skipped on tag pushes: there the tag *is* the answer, and asking a tool to derive
+      # a version while sitting on a detached tag ref only invites disagreement.
+      - name: Derive version from tags
+        id: gitversion
+        if: github.ref_type != 'tag'
+        uses: codacy/git-version@2.8.7
+        with:
+          release-branch: main
+          prefix: v
+
+      # Values arrive as env vars rather than being interpolated into the script, so
+      # nothing from the ref name can be executed as shell.
+      - name: Assemble release identity
+        id: compute
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          GV_TAG: ${{ steps.gitversion.outputs.version }}
+          GV_PLAIN: ${{ steps.gitversion.outputs.non-prefixed-version }}
+          RUN: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" = "tag" ]; then
+            tag="$REF_NAME"
+            {
+              echo "tag=$tag"
+              echo "name=$tag"
+              echo "build=${tag#v}"
+              echo "draft=false"
+              echo "prerelease=false"
+            } >> "$GITHUB_OUTPUT"
+          else
+            if [ -z "$GV_TAG" ] || [ -z "$GV_PLAIN" ]; then
+              echo "git-version produced no version — is fetch-depth 0 set?" >&2
+              exit 1
+            fi
+            # run_number keeps successive candidates for the same target version distinct;
+            # `-rc.N` is a semver prerelease, so v0.1.1-rc.7 correctly sorts before v0.1.1.
+            {
+              echo "tag=${GV_TAG}-rc.${RUN}"
+              echo "name=${GV_TAG}-rc.${RUN} (${GITHUB_SHA:0:7})"
+              echo "build=${GV_PLAIN}-rc.${RUN}"
+              echo "draft=true"
+              echo "prerelease=true"
+            } >> "$GITHUB_OUTPUT"
+          fi
+          cat "$GITHUB_OUTPUT"
+
+  # Built once and shared, so every platform's binary embeds byte-identical frontend
+  # assets. rust-embed bakes web/dist into the binary at compile time, so this artifact
+  # has to be in place before any cargo build starts.
+  web:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build web frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+          retention-days: 1
+
+  build:
+    name: ${{ matrix.name }}
+    needs: [version, web]
+    runs-on: ${{ matrix.runner }}
+    env:
+      # Compiled into the binary; `--version` reports it. See `handled_immediate_flag` in
+      # crates/server/src/main.rs and the build script that invalidates on change.
+      FLEET_BUILD_VERSION: ${{ needs.version.outputs.build }}
+    defaults:
+      run:
+        # bash on every runner, Windows included, so the shared steps below are identical
+        # across the matrix instead of forking into pwsh.
+        shell: bash
+    strategy:
+      # One broken target should not hide the results for the other three.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            cross: true
+            ext: ""
+          - name: linux-aarch64
+            target: aarch64-unknown-linux-musl
+            runner: ubuntu-latest
+            cross: true
+            ext: ""
+          - name: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            cross: false
+            ext: ".exe"
+          - name: windows-aarch64
+            target: aarch64-pc-windows-msvc
+            runner: windows-latest
+            cross: false
+            ext: ".exe"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # aws-lc-sys assembles AWS-LC's x86_64 routines with NASM, which is not on the
+      # Windows images. Harmless on the ARM64 target, which uses different sources.
+      - name: Install NASM
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      # Fail here, with an actionable message, rather than several minutes later inside
+      # aws-lc-sys's CMake invocation with an error that does not name the real cause.
+      - name: Verify ARM64 MSVC toolchain is present
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $found = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 `
+            -property installationPath
+          if (-not $found) {
+            throw "This runner image has no ARM64 MSVC build tools (VC.Tools.ARM64), so " +
+                  "aarch64-pc-windows-msvc cannot be cross-compiled here. Either pin an " +
+                  "image that ships them, or move this matrix entry to a native " +
+                  "'windows-11-arm' runner and drop the cross-compile."
+          }
+          Write-Host "ARM64 build tools: $found"
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked --version 0.2.5
+
+      # Cargo.lock is committed, so --locked keeps a release reproducible: a dependency
+      # publishing a new semver-compatible version cannot silently change what we ship.
+      - name: Build nsclient-fleet
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --locked --target ${{ matrix.target }} --bin nsclient-fleet
+          else
+            cargo build --release --locked --target ${{ matrix.target }} --bin nsclient-fleet
+          fi
+
+      # Symbols are already stripped by [profile.release] in Cargo.toml.
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          src="target/${{ matrix.target }}/release/nsclient-fleet${{ matrix.ext }}"
+          dest="dist/nsclient-fleet-${{ matrix.target }}${{ matrix.ext }}"
+          cp "$src" "$dest"
+          ls -lh "$dest"
+
+      # Native targets only — an x64 runner cannot execute an ARM64 binary. Proves the
+      # binary links and runs; --version is answered before config is read, so this works
+      # without MASTER_KEY. Not a substitute for the test suite.
+      - name: Smoke-test the binary
+        if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'x86_64-pc-windows-msvc'
+        run: |
+          set -euo pipefail
+          got=$(./dist/nsclient-fleet-${{ matrix.target }}${{ matrix.ext }} --version)
+          echo "reported: $got"
+          # Also proves the version injection reached the compiler — including through
+          # cross's container, which only forwards variables listed in Cross.toml.
+          expected="nsclient-fleet ${{ needs.version.outputs.build }}"
+          if [ "$got" != "$expected" ]; then
+            echo "version mismatch: expected '$expected'" >&2
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nsclient-fleet-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    # workflow_dispatch runs the matrix as a rehearsal and stops here.
+    if: github.event_name == 'push'
+    permissions:
+      contents: write
+    steps:
+      # Only so bootstrap-vm.sh can be attached as an asset.
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: nsclient-fleet-*
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          # Explicit glob rather than '*' so the checksum file can never list itself.
+          sha256sum nsclient-fleet-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: ${{ needs.version.outputs.name }}
+          draft: ${{ needs.version.outputs.draft }}
+          prerelease: ${{ needs.version.outputs.prerelease }}
+          # Pins the RC to the exact commit it was built from: when a draft is published,
+          # GitHub creates its tag here rather than at whatever main has drifted to.
+          target_commitish: ${{ github.sha }}
+          # bootstrap-vm.sh ships as an asset because the documented one-time VM setup is
+          # `curl -L .../releases/latest/download/bootstrap-vm.sh | bash` — without this it
+          # 404s.
+          files: |
+            dist/*
+            scripts/bootstrap-vm.sh
+          generate_release_notes: true

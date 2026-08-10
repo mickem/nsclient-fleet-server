@@ -1,0 +1,50 @@
+[Unit]
+Description=NSClient Fleet control plane
+After=network-online.target
+Wants=network-online.target
+Documentation=https://github.com/mickem/nsclient-fleet-server
+
+[Service]
+Type=exec
+User=nsclient-fleet
+Group=nsclient-fleet
+WorkingDirectory=/opt/nsclient-fleet
+ExecStart=/opt/nsclient-fleet/nsclient-fleet
+EnvironmentFile=/etc/nsclient-fleet/env
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# Filesystem hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/nsclient-fleet/data /opt/nsclient-fleet/data/bundles /opt/nsclient-fleet/data/acme
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Bind to ports < 1024 (HTTPS :443) without running as root
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Resource limits
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

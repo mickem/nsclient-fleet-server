@@ -1,0 +1,19 @@
+[package]
+name = "fleet-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+fleet-core = { path = "../core" }
+sqlx.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+ulid.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,63 @@
+[package]
+name = "fleet-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "fleet_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nsclient-fleet"
+path = "src/main.rs"
+
+[dependencies]
+fleet-core = { path = "../core" }
+fleet-storage = { path = "../storage" }
+fleet-enrollment = { path = "../enrollment" }
+fleet-proto = { path = "../proto" }
+
+axum.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rust-embed.workspace = true
+mime_guess.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rand.workspace = true
+sha2.workspace = true
+base64.workspace = true
+zip.workspace = true
+
+axum-extra = { version = "0.9", features = ["cookie"] }
+governor = "0.6"
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "cookies", "multipart"] }
+url = "2"
+time = "0.3"
+rustls.workspace = true
+rustls-pemfile.workspace = true
+tokio-rustls.workspace = true
+x509-parser.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+rcgen.workspace = true
+sqlx.workspace = true
+ed25519-dalek.workspace = true
+futures = "0.3"
+futures-util.workspace = true
+tower = { version = "0.5", features = ["util"] }
+async-trait = "0.1"
+rustls-acme.workspace = true
+
+[dev-dependencies]
+fleet-core = { path = "../core" }
+fleet-agent-sim = { path = "../agent-sim" }
+fleet-enrollment = { path = "../enrollment" }
+tempfile.workspace = true
+http-body-util = "0.1"
+zip.workspace = true

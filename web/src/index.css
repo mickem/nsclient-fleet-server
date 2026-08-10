@@ -1,0 +1,4 @@
+/* MUI's CssBaseline owns the reset and typography; keep only what it doesn't cover. */
+code {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+}

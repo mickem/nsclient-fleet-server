@@ -1,0 +1,32 @@
+# Configuration for `cross` (used by the release workflow for the musl targets).
+#
+# cross runs the build inside a container and forwards only the environment variables it
+# is told to. FLEET_BUILD_VERSION carries the tag-derived version that gets compiled into
+# the binary; without this passthrough the musl builds would silently fall back to the
+# version in Cargo.toml while the Windows builds used the real one.
+
+[build.env]
+passthrough = ["FLEET_BUILD_VERSION"]
+#
+# rustls pulls in aws-lc-sys, whose build script compiles AWS-LC's C sources with CMake.
+# cross's stock images carry a working musl cross-toolchain but no CMake, so without these
+# pre-build steps every musl release build dies inside aws-lc-sys's build script with a
+# "could not find cmake" error that looks nothing like the actual problem.
+#
+# perl is needed for AWS-LC's assembly generation; ninja is not required but makes the
+# CMake build noticeably faster than the default make generator.
+#
+# DEBIAN_FRONTEND=noninteractive is not optional: cmake drags in tzdata, whose postinst
+# asks for a geographic area. There is no TTY in the build container, so debconf falls
+# back to the Readline frontend and blocks on a prompt nobody can answer -- the build
+# hangs until the CI job times out. noninteractive makes tzdata default to Etc/UTC.
+
+[target.x86_64-unknown-linux-musl]
+pre-build = [
+    "export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install --assume-yes --no-install-recommends cmake ninja-build perl",
+]
+
+[target.aarch64-unknown-linux-musl]
+pre-build = [
+    "export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install --assume-yes --no-install-recommends cmake ninja-build perl",
+]

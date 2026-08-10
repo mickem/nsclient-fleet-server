@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/server",
+    "crates/core",
+    "crates/storage",
+    "crates/enrollment",
+    "crates/agent-sim",
+    "crates/proto",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+axum = { version = "0.7", features = ["multipart"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rust-embed = "8"
+mime_guess = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
+ulid = "1"
+tempfile = "3"
+rand = "0.8"
+sha2 = "0.10"
+base64 = "0.22"
+rcgen = { version = "0.13", features = ["x509-parser"] }
+ed25519-dalek = { version = "2", features = ["rand_core", "pem"] }
+chacha20poly1305 = "0.10"
+jsonwebtoken = "9"
+rustls = "0.23"
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+x509-parser = "0.16"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+rustls-acme = { version = "0.11", default-features = false, features = ["tokio", "aws-lc-rs"] }
+futures-util = "0.3"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

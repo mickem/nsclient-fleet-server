@@ -1,0 +1,22 @@
+[package]
+name = "fleet-agent-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+fleet-proto = { path = "../proto" }
+
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rcgen.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+rustls = { workspace = true }
+rustls-pemfile.workspace = true
+sha2.workspace = true
+base64.workspace = true
+ed25519-dalek = { workspace = true, features = ["pem"] }

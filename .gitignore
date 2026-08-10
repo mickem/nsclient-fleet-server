@@ -1,0 +1,38 @@
+# Rust
+/target
+Cargo.lock.bak
+**/*.rs.bk
+
+# Node / Vite
+node_modules
+web/dist/*
+!web/dist/.gitkeep
+
+# Local data
+/data
+*.db
+*.db-shm
+*.db-wal
+
+# Editor
+.idea
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*~
+
+# Claude Code (machine-local agent config)
+.claude/
+
+# Private operational docs — our own hosting, backups, key custody, roadmap.
+# This repo is public; anything specific to *our* deployment lives here and is
+# never committed. See private/README.md (on a machine that has it) for contents.
+/private/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local

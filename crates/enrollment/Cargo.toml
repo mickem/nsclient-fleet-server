@@ -1,0 +1,20 @@
+[package]
+name = "fleet-enrollment"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+fleet-core = { path = "../core" }
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rand.workspace = true
+sha2.workspace = true
+rcgen.workspace = true
+ed25519-dalek.workspace = true
+jsonwebtoken.workspace = true
+tracing.workspace = true
+time = "0.3"
