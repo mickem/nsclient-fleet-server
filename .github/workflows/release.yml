@@ -11,11 +11,14 @@ name: Release
 #
 # What each trigger produces:
 #
-#   push to main   →  a release candidate: DRAFT prerelease `v<version>-rc.<run>`.
+#   push to main   →  a release candidate: DRAFT prerelease, tag `v<version>-rc.<run>`.
 #                     Every commit (in practice every merge) gets one, so there is always
 #                     a built, downloadable artifact set for the tip of main.
 #   push of v*     →  the real thing: a published, non-draft release at that tag.
 #   manual run     →  builds the whole matrix and stops. A rehearsal; publishes nothing.
+#
+# Tags keep the `v` prefix; release *titles* are the bare version — `1.2.3`, `1.2.3-rc.7` —
+# and are byte-identical to what `nsclient-fleet --version` prints for that build.
 #
 # A draft release does not create its git tag — GitHub only does that when someone
 # publishes it. RC drafts therefore never pollute the tag namespace, and they are visible
@@ -82,10 +85,13 @@ jobs:
           set -euo pipefail
           if [ "$REF_TYPE" = "tag" ]; then
             tag="$REF_NAME"
+            # The release is titled with the bare version — no `v`, no commit suffix — so it
+            # reads identically to what `nsclient-fleet --version` prints.
+            version="${tag#v}"
             {
               echo "tag=$tag"
-              echo "name=$tag"
-              echo "build=${tag#v}"
+              echo "name=$version"
+              echo "build=$version"
               echo "draft=false"
               echo "prerelease=false"
             } >> "$GITHUB_OUTPUT"
@@ -96,9 +102,11 @@ jobs:
             fi
             # run_number keeps successive candidates for the same target version distinct;
             # `-rc.N` is a semver prerelease, so v0.1.1-rc.7 correctly sorts before v0.1.1.
+            # The `-rc.N` stays in the title: it is part of the version the binary reports,
+            # not decoration, and without it every candidate would be titled the same.
             {
               echo "tag=${GV_TAG}-rc.${RUN}"
-              echo "name=${GV_TAG}-rc.${RUN} (${GITHUB_SHA:0:7})"
+              echo "name=${GV_PLAIN}-rc.${RUN}"
               echo "build=${GV_PLAIN}-rc.${RUN}"
               echo "draft=true"
               echo "prerelease=true"
