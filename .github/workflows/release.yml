@@ -297,8 +297,10 @@ jobs:
           target_commitish: ${{ github.sha }}
           # bootstrap-vm.sh ships as an asset because the documented one-time VM setup is
           # `curl -L .../releases/latest/download/bootstrap-vm.sh | bash` — without this it
-          # 404s.
+          # 404s. The unit file ships alongside it because that piped invocation has no
+          # checkout to copy it from, so the script downloads it from this same release.
           files: |
             dist/*
             scripts/bootstrap-vm.sh
+            scripts/nsclient-fleet.service
           generate_release_notes: true
