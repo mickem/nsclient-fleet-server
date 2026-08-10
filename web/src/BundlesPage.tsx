@@ -23,6 +23,7 @@ import EditIcon from "@mui/icons-material/Edit";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import { apiGet, apiUpload, BundleView, fmtBytes, fmtTime } from "./api";
 import { BundleEditor } from "./BundleEditor";
+import { RefreshButton } from "./RefreshButton";
 
 type EditorState = null | { editBundleId: string | null };
 
@@ -33,10 +34,17 @@ export function BundlesPage() {
   const [version, setVersion] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // Returns void, not the promise: `useEffect` below takes this directly, and a returned
+  // promise would be mistaken for a cleanup function.
   const refresh = () => {
-    apiGet<BundleView[]>("/api/bundles").then(setBundles, (e) => setError(e.message));
+    setRefreshing(true);
+    setError(null);
+    void apiGet<BundleView[]>("/api/bundles")
+      .then(setBundles, (e) => setError(e.message))
+      .finally(() => setRefreshing(false));
   };
   useEffect(refresh, []);
 
@@ -66,15 +74,18 @@ export function BundlesPage() {
     <Box>
       <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
         <Typography variant="h4">Bundles</Typography>
-        {!editor && (
-          <Button
-            variant="contained"
-            startIcon={<AddIcon />}
-            onClick={() => setEditor({ editBundleId: null })}
-          >
-            New bundle
-          </Button>
-        )}
+        <Stack direction="row" spacing={1} alignItems="center">
+          <RefreshButton refreshing={refreshing} onClick={refresh} />
+          {!editor && (
+            <Button
+              variant="contained"
+              startIcon={<AddIcon />}
+              onClick={() => setEditor({ editBundleId: null })}
+            >
+              New bundle
+            </Button>
+          )}
+        </Stack>
       </Stack>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
         A bundle is a zip (manifest + config patch + scripts) signed by your tenant key.

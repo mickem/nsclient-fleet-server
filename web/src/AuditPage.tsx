@@ -15,6 +15,7 @@ import {
   Typography,
 } from "@mui/material";
 import { apiGet, fmtTime } from "./api";
+import { RefreshButton } from "./RefreshButton";
 
 type AuditEntry = {
   id: number;
@@ -30,22 +31,39 @@ export function AuditPage() {
   const [entries, setEntries] = useState<AuditEntry[] | null>(null);
   const [filter, setFilter] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => {
+  // Reads `filter` from the closure, so the effect below re-runs it whenever the filter
+  // changes. Returns void, not the promise — `useEffect` would mistake a promise for a
+  // cleanup function.
+  const refresh = () => {
+    setRefreshing(true);
+    setError(null);
     const qs = filter ? `?action=${encodeURIComponent(filter)}` : "";
-    apiGet<AuditEntry[]>(`/api/audit${qs}`).then(setEntries, (e) => setError(e.message));
-  }, [filter]);
+    void apiGet<AuditEntry[]>(`/api/audit${qs}`)
+      .then(setEntries, (e) => setError(e.message))
+      .finally(() => setRefreshing(false));
+  };
+  useEffect(refresh, [filter]);
 
   return (
     <Box>
       <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
         <Typography variant="h4">Audit log</Typography>
-        <Select size="small" value={filter} onChange={(e) => setFilter(e.target.value)} displayEmpty>
-          <MenuItem value="">all actions</MenuItem>
-          <MenuItem value="host.">host.*</MenuItem>
-          <MenuItem value="group.">group.*</MenuItem>
-          <MenuItem value="bundle.">bundle.*</MenuItem>
-        </Select>
+        <Stack direction="row" spacing={1} alignItems="center">
+          <Select
+            size="small"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            displayEmpty
+          >
+            <MenuItem value="">all actions</MenuItem>
+            <MenuItem value="host.">host.*</MenuItem>
+            <MenuItem value="group.">group.*</MenuItem>
+            <MenuItem value="bundle.">bundle.*</MenuItem>
+          </Select>
+          <RefreshButton refreshing={refreshing} onClick={refresh} />
+        </Stack>
       </Stack>
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>

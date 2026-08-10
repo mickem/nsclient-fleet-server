@@ -23,16 +23,24 @@ import {
   Selector,
 } from "./api";
 import { describeSelector, SelectorEditor } from "./SelectorBuilder";
+import { RefreshButton } from "./RefreshButton";
 
 export function GroupsPage() {
   const [groups, setGroups] = useState<GroupView[] | null>(null);
   const [bundles, setBundles] = useState<BundleView[]>([]);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
+  // Returns void, not the promise: `useEffect` below takes this directly, and a returned
+  // promise would be mistaken for a cleanup function.
   const refresh = () => {
-    apiGet<GroupView[]>("/api/groups").then(setGroups, (e) => setError(e.message));
-    apiGet<BundleView[]>("/api/bundles").then(setBundles, () => {});
+    setRefreshing(true);
+    setError(null);
+    void Promise.all([
+      apiGet<GroupView[]>("/api/groups").then(setGroups, (e) => setError(e.message)),
+      apiGet<BundleView[]>("/api/bundles").then(setBundles, () => {}),
+    ]).finally(() => setRefreshing(false));
   };
   useEffect(refresh, []);
 
@@ -40,11 +48,14 @@ export function GroupsPage() {
     <Box>
       <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
         <Typography variant="h4">Groups</Typography>
-        {!creating && (
-          <Button variant="contained" startIcon={<AddIcon />} onClick={() => setCreating(true)}>
-            New group
-          </Button>
-        )}
+        <Stack direction="row" spacing={1} alignItems="center">
+          <RefreshButton refreshing={refreshing} onClick={refresh} />
+          {!creating && (
+            <Button variant="contained" startIcon={<AddIcon />} onClick={() => setCreating(true)}>
+              New group
+            </Button>
+          )}
+        </Stack>
       </Stack>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
         A group is a saved rule over host tags. Bundles assigned to a group apply to every host

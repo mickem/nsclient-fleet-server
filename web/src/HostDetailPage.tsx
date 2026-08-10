@@ -20,6 +20,7 @@ import {
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import DeleteIcon from "@mui/icons-material/Delete";
 import { ConfirmDeleteHostDialog } from "./ConfirmDeleteHostDialog";
+import { RefreshButton } from "./RefreshButton";
 import { apiGet, apiSend, DesiredStateView, fmtAgo, fmtTime, HostDetail } from "./api";
 
 type Props = { hostId: string; onBack: () => void };
@@ -28,15 +29,29 @@ export function HostDetailPage({ hostId, onBack }: Props) {
   const [host, setHost] = useState<HostDetail | null>(null);
   const [desired, setDesired] = useState<DesiredStateView | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
+  // Returns void, not the promise: `useEffect` below takes this directly, and a returned
+  // promise would be mistaken for a cleanup function.
   const refresh = () => {
-    apiGet<HostDetail>(`/api/hosts/${hostId}`).then(setHost, (e) => setError(e.message));
-    apiGet<DesiredStateView>(`/api/hosts/${hostId}/desired`).then(setDesired, () => {});
+    setRefreshing(true);
+    void Promise.all([
+      apiGet<HostDetail>(`/api/hosts/${hostId}`).then(
+        (h) => {
+          setHost(h);
+          setError(null);
+        },
+        (e) => setError(e.message),
+      ),
+      apiGet<DesiredStateView>(`/api/hosts/${hostId}/desired`).then(setDesired, () => {}),
+    ]).finally(() => setRefreshing(false));
   };
   useEffect(refresh, [hostId]);
 
-  if (error) {
+  // Only the initial load takes over the page. Once a host is on screen a failed refresh
+  // reports itself inline instead of discarding what the operator was looking at.
+  if (error && !host) {
     return (
       <Box>
         <Button startIcon={<ArrowBackIcon />} onClick={onBack}>
@@ -68,6 +83,7 @@ export function HostDetailPage({ hostId, onBack }: Props) {
         <Typography variant="h4" sx={{ flexGrow: 1 }}>
           {host.hostname ?? host.id}
         </Typography>
+        <RefreshButton refreshing={refreshing} onClick={refresh} />
         <Button
           color="error"
           variant="outlined"
@@ -82,6 +98,11 @@ export function HostDetailPage({ hostId, onBack }: Props) {
         onClose={() => setConfirmDelete(false)}
         onDeleted={onBack}
       />
+      {error && (
+        <Alert severity="warning" sx={{ mb: 2 }} onClose={() => setError(null)}>
+          Refresh failed — showing the last loaded state. {error}
+        </Alert>
+      )}
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
         <code>{host.id}</code> · {host.os ?? "unknown os"} ·{" "}
         {host.enrolled_at ? `enrolled ${fmtTime(host.enrolled_at)}` : "pending enrollment"} · last

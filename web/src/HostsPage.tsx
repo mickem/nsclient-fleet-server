@@ -21,6 +21,7 @@ import CloseIcon from "@mui/icons-material/Close";
 import DeleteIcon from "@mui/icons-material/Delete";
 import { apiGet, apiSend, CreateHostResponse, fmtAgo, HostView } from "./api";
 import { ConfirmDeleteHostDialog } from "./ConfirmDeleteHostDialog";
+import { RefreshButton } from "./RefreshButton";
 
 type Props = { onOpen: (hostId: string) => void };
 
@@ -29,10 +30,18 @@ export function HostsPage({ onOpen }: Props) {
   const [issued, setIssued] = useState<CreateHostResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [toDelete, setToDelete] = useState<HostView | null>(null);
 
+  // Returns void, not the promise: `useEffect` below takes this directly, and a returned
+  // promise would be mistaken for a cleanup function. `hosts` is left in place while the
+  // fetch is in flight, so the table stays on screen rather than flashing back to "Loading…".
   const refresh = () => {
-    apiGet<HostView[]>("/api/hosts").then(setHosts, (e) => setError(String(e.message)));
+    setRefreshing(true);
+    setError(null);
+    void apiGet<HostView[]>("/api/hosts")
+      .then(setHosts, (e) => setError(String(e.message)))
+      .finally(() => setRefreshing(false));
   };
   useEffect(refresh, []);
 
@@ -53,9 +62,12 @@ export function HostsPage({ onOpen }: Props) {
     <Box>
       <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
         <Typography variant="h4">Hosts</Typography>
-        <Button variant="contained" startIcon={<AddIcon />} onClick={addHost} disabled={busy}>
-          {busy ? "Issuing token…" : "Add host"}
-        </Button>
+        <Stack direction="row" spacing={1} alignItems="center">
+          <RefreshButton refreshing={refreshing} onClick={refresh} />
+          <Button variant="contained" startIcon={<AddIcon />} onClick={addHost} disabled={busy}>
+            {busy ? "Issuing token…" : "Add host"}
+          </Button>
+        </Stack>
       </Stack>
 
       {error && (
