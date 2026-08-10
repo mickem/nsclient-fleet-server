@@ -10,6 +10,10 @@ export type Me = {
   on_prem: boolean;
 };
 
+/** Derived server-side from `enrolled_at` + the bootstrap deadline. See `HostStatus` in
+ *  `crates/core/src/host.rs` — `never_enrolled` is terminal, the row cannot be recovered. */
+export type HostStatus = "enrolled" | "awaiting_enrollment" | "never_enrolled";
+
 export type HostView = {
   id: string;
   hostname: string | null;
@@ -17,6 +21,8 @@ export type HostView = {
   enrolled_at: number | null;
   last_seen_at: number | null;
   current_state_hash: string | null;
+  status: HostStatus;
+  bootstrap_expires_at: number | null;
   created_at: number;
 };
 

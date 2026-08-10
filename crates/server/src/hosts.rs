@@ -138,10 +138,17 @@ pub struct HostView {
     pub enrolled_at: Option<i64>,
     pub last_seen_at: Option<i64>,
     pub current_state_hash: Option<String>,
+    /// Derived, not stored — see [`fleet_core::host::HostStatus`]. Computed here so the list
+    /// and the detail page can never disagree about what a row means.
+    pub status: fleet_core::host::HostStatus,
+    /// Only set while a bootstrap token is outstanding; lets the UI say how long is left to
+    /// run the install command.
+    pub bootstrap_expires_at: Option<i64>,
     pub created_at: i64,
 }
 
 fn host_view(h: fleet_core::host::Host) -> HostView {
+    let status = h.status(now_unix());
     HostView {
         id: h.id,
         hostname: h.hostname,
@@ -149,6 +156,8 @@ fn host_view(h: fleet_core::host::Host) -> HostView {
         enrolled_at: h.enrolled_at,
         last_seen_at: h.last_seen_at,
         current_state_hash: h.current_state_hash,
+        status,
+        bootstrap_expires_at: h.bootstrap_expires_at,
         created_at: h.created_at,
     }
 }

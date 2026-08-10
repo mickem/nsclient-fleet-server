@@ -153,13 +153,15 @@ impl<'a> HostRepo<'a> {
             enrolled_at: None,
             last_seen_at: None,
             current_state_hash: None,
+            bootstrap_expires_at: None,
             created_at: now,
         })
     }
 
     pub async fn get(&self, tenant_id: i64, host_id: &str) -> Result<Option<Host>> {
         let row = sqlx::query(
-            "SELECT id, tenant_id, hostname, os, enrolled_at, last_seen_at, current_state_hash, created_at
+            "SELECT id, tenant_id, hostname, os, enrolled_at, last_seen_at, current_state_hash,
+                    bootstrap_expires_at, created_at
              FROM hosts WHERE tenant_id = ? AND id = ?",
         )
         .bind(tenant_id)
@@ -172,7 +174,8 @@ impl<'a> HostRepo<'a> {
 
     pub async fn list(&self, tenant_id: i64) -> Result<Vec<Host>> {
         let rows = sqlx::query(
-            "SELECT id, tenant_id, hostname, os, enrolled_at, last_seen_at, current_state_hash, created_at
+            "SELECT id, tenant_id, hostname, os, enrolled_at, last_seen_at, current_state_hash,
+                    bootstrap_expires_at, created_at
              FROM hosts WHERE tenant_id = ? ORDER BY created_at DESC",
         )
         .bind(tenant_id)
@@ -225,6 +228,7 @@ impl<'a> HostRepo<'a> {
             enrolled_at: None,
             last_seen_at: None,
             current_state_hash: None,
+            bootstrap_expires_at: Some(bootstrap_expires_at),
             created_at: now,
         })
     }
@@ -962,6 +966,7 @@ fn map_host(r: sqlx::sqlite::SqliteRow) -> Host {
         enrolled_at: r.get("enrolled_at"),
         last_seen_at: r.get("last_seen_at"),
         current_state_hash: r.get("current_state_hash"),
+        bootstrap_expires_at: r.get("bootstrap_expires_at"),
         created_at: r.get("created_at"),
     }
 }

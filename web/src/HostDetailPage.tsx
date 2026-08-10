@@ -20,10 +20,25 @@ import {
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import DeleteIcon from "@mui/icons-material/Delete";
 import { ConfirmDeleteHostDialog } from "./ConfirmDeleteHostDialog";
+import { HostStatusChip } from "./HostStatusChip";
 import { RefreshButton } from "./RefreshButton";
 import { apiGet, apiSend, DesiredStateView, fmtAgo, fmtTime, HostDetail } from "./api";
 
 type Props = { hostId: string; onBack: () => void };
+
+/** The enrolment clause of the summary line — what happened, or what still needs to. */
+function enrollmentSummary(host: HostDetail): string {
+  switch (host.status) {
+    case "enrolled":
+      return `enrolled ${fmtTime(host.enrolled_at)}`;
+    case "awaiting_enrollment":
+      return `install command not run yet — token expires ${fmtTime(host.bootstrap_expires_at)}`;
+    case "never_enrolled":
+      return host.bootstrap_expires_at
+        ? `never enrolled — token expired ${fmtTime(host.bootstrap_expires_at)}`
+        : "never enrolled";
+  }
+}
 
 export function HostDetailPage({ hostId, onBack }: Props) {
   const [host, setHost] = useState<HostDetail | null>(null);
@@ -80,9 +95,10 @@ export function HostDetailPage({ hostId, onBack }: Props) {
         <Button startIcon={<ArrowBackIcon />} onClick={onBack}>
           Hosts
         </Button>
-        <Typography variant="h4" sx={{ flexGrow: 1 }}>
-          {host.hostname ?? host.id}
-        </Typography>
+        <Stack direction="row" alignItems="center" spacing={1} sx={{ flexGrow: 1 }}>
+          <Typography variant="h4">{host.hostname ?? host.id}</Typography>
+          <HostStatusChip host={host} />
+        </Stack>
         <RefreshButton refreshing={refreshing} onClick={refresh} />
         <Button
           color="error"
@@ -104,9 +120,8 @@ export function HostDetailPage({ hostId, onBack }: Props) {
         </Alert>
       )}
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        <code>{host.id}</code> · {host.os ?? "unknown os"} ·{" "}
-        {host.enrolled_at ? `enrolled ${fmtTime(host.enrolled_at)}` : "pending enrollment"} · last
-        seen {fmtAgo(host.last_seen_at)}
+        <code>{host.id}</code> · {host.os ?? "unknown os"} · {enrollmentSummary(host)} · last seen{" "}
+        {fmtAgo(host.last_seen_at)}
       </Typography>
 
       <Grid container spacing={2}>

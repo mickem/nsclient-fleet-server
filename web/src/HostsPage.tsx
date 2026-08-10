@@ -5,7 +5,6 @@ import {
   Button,
   Card,
   CardContent,
-  Chip,
   IconButton,
   Stack,
   Table,
@@ -21,6 +20,7 @@ import CloseIcon from "@mui/icons-material/Close";
 import DeleteIcon from "@mui/icons-material/Delete";
 import { apiGet, apiSend, CreateHostResponse, fmtAgo, HostView } from "./api";
 import { ConfirmDeleteHostDialog } from "./ConfirmDeleteHostDialog";
+import { HostStatusChip } from "./HostStatusChip";
 import { RefreshButton } from "./RefreshButton";
 
 type Props = { onOpen: (hostId: string) => void };
@@ -144,11 +144,7 @@ export function HostsPage({ onOpen }: Props) {
                   <TableCell>{h.hostname ?? <em>(not reported)</em>}</TableCell>
                   <TableCell>{h.os ?? "—"}</TableCell>
                   <TableCell>
-                    {h.enrolled_at ? (
-                      <Chip label="enrolled" color="success" size="small" />
-                    ) : (
-                      <Chip label="pending" color="warning" size="small" variant="outlined" />
-                    )}
+                    <HostStatusChip host={h} />
                   </TableCell>
                   <TableCell>{fmtAgo(h.last_seen_at)}</TableCell>
                   <TableCell>

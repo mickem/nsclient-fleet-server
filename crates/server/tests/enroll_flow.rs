@@ -468,3 +468,90 @@ async fn a_freshly_enrolled_host_can_connect_immediately() {
         .await
         .expect("the first mTLS call after enrollment must not race the trust store");
 }
+
+/// "Add host" writes a row before anyone runs the install command, so the operator views
+/// have to distinguish three states — not two. The one that matters is `never_enrolled`:
+/// the token has expired, `mark_enrolled_if_pending` will refuse it forever, and the row is
+/// only good for deleting.
+#[tokio::test]
+async fn host_status_separates_never_enrolled_from_awaiting() {
+    let s = start().await;
+    signup_and_login(&s).await;
+
+    let create_host = |s: &TestServer| {
+        let req = s
+            .cookie_jar
+            .post(format!("{}/api/hosts", s.base_url))
+            .json(&serde_json::json!({}));
+        async move {
+            let v: serde_json::Value = req.send().await.unwrap().json().await.unwrap();
+            (
+                v["host_id"].as_str().unwrap().to_string(),
+                v["bootstrap_token"].as_str().unwrap().to_string(),
+            )
+        }
+    };
+
+    let status_of = |s: &TestServer, host_id: String| {
+        let req = s.cookie_jar.get(format!("{}/api/hosts", s.base_url));
+        async move {
+            let hosts: serde_json::Value = req.send().await.unwrap().json().await.unwrap();
+            hosts
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|h| h["id"].as_str() == Some(&host_id))
+                .unwrap_or_else(|| panic!("host {host_id} missing from list"))["status"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+    };
+
+    // Freshly added, install command not run: still actionable.
+    let (waiting_id, _) = create_host(&s).await;
+    assert_eq!(
+        status_of(&s, waiting_id.clone()).await,
+        "awaiting_enrollment"
+    );
+
+    // A host that ran the command reads as enrolled (retried while the trust store catches
+    // up, as elsewhere in this file).
+    let (enrolled_id, token) = create_host(&s).await;
+    let mut enrolled = false;
+    for _ in 0..20 {
+        if fleet_agent_sim::enroll(&s.base_url, &token, Some("beta"), Some("linux"))
+            .await
+            .is_ok()
+        {
+            enrolled = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(enrolled, "enroll failed after retries");
+    assert_eq!(status_of(&s, enrolled_id).await, "enrolled");
+
+    // Let the first host's token lapse. Nothing else about the row changes.
+    sqlx::query("UPDATE hosts SET bootstrap_expires_at = ? WHERE id = ?")
+        .bind(fleet_core::time::now_unix() - 1)
+        .bind(&waiting_id)
+        .execute(&s._db.write)
+        .await
+        .unwrap();
+
+    assert_eq!(status_of(&s, waiting_id.clone()).await, "never_enrolled");
+
+    // The detail endpoint must agree — it is the same derivation, and an operator who opens
+    // the host from a "never enrolled" row must not see a different story.
+    let detail: serde_json::Value = s
+        .cookie_jar
+        .get(format!("{}/api/hosts/{}", s.base_url, waiting_id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail["status"], serde_json::json!("never_enrolled"));
+}
