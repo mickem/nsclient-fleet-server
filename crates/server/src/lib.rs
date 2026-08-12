@@ -1,5 +1,6 @@
 pub mod agent_api;
 pub mod agent_limits;
+pub mod api_keys;
 pub mod audit;
 pub mod auth;
 pub mod bundles;
@@ -175,6 +176,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/bundles/compose", post(bundles::compose))
         .route("/api/bundles/:id/config", get(bundles::get_config))
         .route("/api/audit", get(audit::list))
+        .route("/api/keys", get(api_keys::list).post(api_keys::create))
+        .route("/api/keys/:id", axum::routing::delete(api_keys::delete_key))
         .route("/api/users", get(users::list).post(users::invite))
         .route(
             "/api/users/:id",

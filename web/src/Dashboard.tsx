@@ -9,6 +9,7 @@ import { GroupsPage } from "./GroupsPage";
 import { BundlesPage } from "./BundlesPage";
 import { AuditPage } from "./AuditPage";
 import { UsersPage } from "./UsersPage";
+import { ApiKeysPage } from "./ApiKeysPage";
 
 const drawerWidth = 240;
 
@@ -68,6 +69,7 @@ export function Dashboard({ me, onLogout }: Props) {
         {page === "bundles" && <BundlesPage me={me} />}
         {page === "audit" && <AuditPage />}
         {page === "users" && <UsersPage me={me} />}
+        {page === "keys" && <ApiKeysPage me={me} />}
       </Box>
     </Box>
   );

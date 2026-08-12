@@ -35,6 +35,18 @@ export type Me = {
   on_prem: boolean;
 };
 
+export type ApiKeyView = {
+  id: string;
+  name: string;
+  /** e.g. `nsk_a1B2c3D4` — identifies a key without being usable as one. */
+  token_prefix: string;
+  created_at: number;
+  last_used_at: number | null;
+};
+
+/** Only ever returned by `POST /api/keys`; the token is unrecoverable afterwards. */
+export type CreatedApiKey = ApiKeyView & { token: string };
+
 export type UserView = {
   id: number;
   email: string;

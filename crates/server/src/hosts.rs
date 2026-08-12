@@ -38,10 +38,14 @@ pub struct TierLimitError {
     pub tier: String,
 }
 
+/// The body is optional so that provisioning from a script is a one-liner:
+/// `curl -X POST -H "Authorization: Bearer nsk_…" https://…/api/hosts`. Requiring a JSON
+/// body would mean every caller sending `-H 'Content-Type: application/json' -d '{}'` to
+/// supply nothing.
 pub async fn create(
     State(state): State<AppState>,
     who: AuthedUser,
-    Json(_body): Json<CreateHostBody>,
+    _body: Option<Json<CreateHostBody>>,
 ) -> Response {
     if !who.role.can_add_hosts() {
         return crate::auth::forbidden("add hosts");

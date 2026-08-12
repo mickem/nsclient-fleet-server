@@ -73,6 +73,26 @@ out immediately and leaves their audit entries in place, without attribution.
 Invitations are unavailable when `ON_PREM=true`: that mode disables magic links and
 authenticates a single administrator from `ON_PREM_ADMIN_EMAIL` / `ON_PREM_ADMIN_PASSWORD`.
 
+## API keys
+
+Every user can mint bearer tokens from **API keys** in the sidebar, for scripting the API.
+A key acts as its owner and does exactly what their role allows — so provisioning installers
+from CI wants a key belonging to an `add_hosts` account, not an admin one.
+
+```bash
+# Provision a host and print the command to run on it
+curl -sS -X POST https://app.example.com/api/hosts \
+  -H "Authorization: Bearer $NSCLIENT_FLEET_API_KEY" | jq -r .install_command
+```
+
+The response also carries `host_id`, `bootstrap_token` and `expires_at`; the token is
+single-use and expires in an hour, same as one issued from the UI.
+
+The key itself is shown once at creation — only its SHA-256 reaches the database, alongside a
+short prefix (`nsk_a1B2c3D4…`) so keys are still identifiable in the list. Keys are private to
+their owner: nobody else can list or revoke them, admins included. Revoking a key, changing
+the owner's role, or deleting the owner all take effect on the key's next request.
+
 ## Dev environment variables
 
 `MASTER_KEY` is required for any startup that touches encryption (tenant CAs, host overrides). For dev:

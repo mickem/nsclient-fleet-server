@@ -9,9 +9,10 @@ import WorkspacesIcon from "@mui/icons-material/Workspaces";
 import Inventory2Icon from "@mui/icons-material/Inventory2";
 import HistoryIcon from "@mui/icons-material/History";
 import GroupIcon from "@mui/icons-material/Group";
+import KeyIcon from "@mui/icons-material/Key";
 import { canManageUsers, Me } from "./api";
 
-export type Page = "hosts" | "groups" | "bundles" | "audit" | "users";
+export type Page = "hosts" | "groups" | "bundles" | "audit" | "users" | "keys";
 
 const drawerWidth = 240;
 
@@ -39,6 +40,9 @@ function menuFor(me: Me): MenuItemDef[][] {
       { id: "bundles", label: "Bundles", icon: <Inventory2Icon /> },
     ],
     [{ id: "audit", label: "Audit log", icon: <HistoryIcon /> }],
+    // Own-account settings: any role has keys, because a read-only key is a legitimate
+    // thing to want.
+    [{ id: "keys", label: "API keys", icon: <KeyIcon /> }],
   ];
   if (canManageUsers(me.role)) {
     groups.push([{ id: "users", label: "Users", icon: <GroupIcon /> }]);

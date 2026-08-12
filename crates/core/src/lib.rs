@@ -1,4 +1,5 @@
 pub mod aead;
+pub mod api_key;
 pub mod host;
 pub mod merge;
 pub mod selector;

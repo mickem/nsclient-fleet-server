@@ -1,4 +1,5 @@
 use anyhow::Result;
+use fleet_core::api_key::ApiKey;
 use fleet_core::host::{new_host_id, Host};
 use fleet_core::session::Session;
 use fleet_core::tenant::Tenant;
@@ -1195,6 +1196,13 @@ impl<'a> UserRepo<'a> {
             .bind(user_id)
             .execute(&mut *tx)
             .await?;
+        // NOT NULL reference: these must go, and revoking a departing user's automation is
+        // the point of deleting them in the first place.
+        sqlx::query("DELETE FROM api_keys WHERE tenant_id = ? AND user_id = ?")
+            .bind(tenant_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("UPDATE audit_log SET user_id = NULL WHERE tenant_id = ? AND user_id = ?")
             .bind(tenant_id)
             .bind(user_id)
@@ -1307,6 +1315,113 @@ impl<'a> MagicLinkRepo<'a> {
             .execute(&self.db.write)
             .await?;
         Ok(res.rows_affected())
+    }
+}
+
+pub struct ApiKeyRepo<'a> {
+    db: &'a Db,
+}
+
+impl<'a> ApiKeyRepo<'a> {
+    pub fn new(db: &'a Db) -> Self {
+        Self { db }
+    }
+
+    /// Store a key. `token_hash` must already be hashed by the caller — the plaintext never
+    /// reaches this layer.
+    pub async fn create(
+        &self,
+        tenant_id: i64,
+        user_id: i64,
+        name: &str,
+        token_hash: &str,
+        token_prefix: &str,
+    ) -> Result<ApiKey> {
+        let id = ulid::Ulid::new().to_string();
+        let now = now_unix();
+        sqlx::query(
+            "INSERT INTO api_keys (id, tenant_id, user_id, name, token_hash, token_prefix, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(tenant_id)
+        .bind(user_id)
+        .bind(name)
+        .bind(token_hash)
+        .bind(token_prefix)
+        .bind(now)
+        .execute(&self.db.write)
+        .await?;
+
+        Ok(ApiKey {
+            id,
+            tenant_id,
+            user_id,
+            name: name.to_owned(),
+            token_prefix: token_prefix.to_owned(),
+            created_at: now,
+            last_used_at: None,
+        })
+    }
+
+    pub async fn list_for_user(&self, tenant_id: i64, user_id: i64) -> Result<Vec<ApiKey>> {
+        let rows = sqlx::query(
+            "SELECT id, tenant_id, user_id, name, token_prefix, created_at, last_used_at
+             FROM api_keys WHERE tenant_id = ? AND user_id = ? ORDER BY created_at DESC",
+        )
+        .bind(tenant_id)
+        .bind(user_id)
+        .fetch_all(&self.db.read)
+        .await?;
+        Ok(rows.into_iter().map(map_api_key).collect())
+    }
+
+    /// Resolve a presented token to its owner. Returns the key id alongside, so the caller
+    /// can record use without a second lookup.
+    ///
+    /// Looked up by hash — a leaked database yields no usable tokens.
+    pub async fn find_by_hash(&self, token_hash: &str) -> Result<Option<ApiKey>> {
+        let row = sqlx::query(
+            "SELECT id, tenant_id, user_id, name, token_prefix, created_at, last_used_at
+             FROM api_keys WHERE token_hash = ?",
+        )
+        .bind(token_hash)
+        .fetch_optional(&self.db.read)
+        .await?;
+        Ok(row.map(map_api_key))
+    }
+
+    pub async fn touch_last_used(&self, id: &str) -> Result<()> {
+        sqlx::query("UPDATE api_keys SET last_used_at = ? WHERE id = ?")
+            .bind(now_unix())
+            .bind(id)
+            .execute(&self.db.write)
+            .await?;
+        Ok(())
+    }
+
+    /// Scoped to the owner: a key can only be revoked by the user it belongs to.
+    pub async fn delete(&self, tenant_id: i64, user_id: i64, id: &str) -> Result<bool> {
+        let res =
+            sqlx::query("DELETE FROM api_keys WHERE tenant_id = ? AND user_id = ? AND id = ?")
+                .bind(tenant_id)
+                .bind(user_id)
+                .bind(id)
+                .execute(&self.db.write)
+                .await?;
+        Ok(res.rows_affected() == 1)
+    }
+}
+
+fn map_api_key(r: sqlx::sqlite::SqliteRow) -> ApiKey {
+    ApiKey {
+        id: r.get("id"),
+        tenant_id: r.get("tenant_id"),
+        user_id: r.get("user_id"),
+        name: r.get("name"),
+        token_prefix: r.get("token_prefix"),
+        created_at: r.get("created_at"),
+        last_used_at: r.get("last_used_at"),
     }
 }
 
