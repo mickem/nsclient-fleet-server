@@ -10,9 +10,10 @@ import Inventory2Icon from "@mui/icons-material/Inventory2";
 import HistoryIcon from "@mui/icons-material/History";
 import GroupIcon from "@mui/icons-material/Group";
 import KeyIcon from "@mui/icons-material/Key";
+import AdminPanelSettingsIcon from "@mui/icons-material/AdminPanelSettings";
 import { canManageUsers, Me } from "./api";
 
-export type Page = "hosts" | "groups" | "bundles" | "audit" | "users" | "keys";
+export type Page = "hosts" | "groups" | "bundles" | "audit" | "users" | "keys" | "platform";
 
 const drawerWidth = 240;
 
@@ -46,6 +47,11 @@ function menuFor(me: Me): MenuItemDef[][] {
   ];
   if (canManageUsers(me.role)) {
     groups.push([{ id: "users", label: "Users", icon: <GroupIcon /> }]);
+  }
+  // Last, and in a group of its own: this one leaves the tenant entirely. Most operators of
+  // this UI are customers who will never see it.
+  if (me.is_platform_admin) {
+    groups.push([{ id: "platform", label: "Platform", icon: <AdminPanelSettingsIcon /> }]);
   }
   return groups;
 }

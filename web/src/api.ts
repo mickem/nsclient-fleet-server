@@ -33,6 +33,9 @@ export type Me = {
   tenant_slug: string;
   tenant_name: string;
   on_prem: boolean;
+  /** Cross-tenant privilege, orthogonal to `role`. Only decides whether the Platform entry
+   *  appears — the routes behind it check the flag themselves. */
+  is_platform_admin: boolean;
 };
 
 export type ApiKeyView = {
@@ -53,6 +56,9 @@ export type UserView = {
   role: Role;
   created_at: number;
   is_self: boolean;
+  /** Blocked by a platform admin. Read-only for a tenant — shown so that a colleague who
+   *  cannot sign in has a visible reason. */
+  blocked: boolean;
 };
 
 /** Derived server-side from `enrolled_at` + the bootstrap deadline. See `HostStatus` in
@@ -153,6 +159,72 @@ export type AuditView = {
   metadata_json: string | null;
   ts: number;
 };
+
+// --- Platform console (cross-tenant) ---------------------------------------------------
+
+/** Mirrors `fleet_core::tier::TierLimits`. Tiers are defined in code, so the console reads
+ *  them from `/api/platform/tiers` rather than keeping a second copy that drifts. */
+export type TierLimits = {
+  name: string;
+  max_hosts: number;
+  min_poll_interval_secs: number;
+  per_host_requests_per_minute: number;
+  max_bundle_mb: number;
+};
+
+/** The numeric fields that may be overridden per tenant. `null` in any field means "inherit
+ *  from the named tier" — which is what an empty input in the subscription form sends. */
+export type TierOverrides = {
+  max_hosts: number | null;
+  min_poll_interval_secs: number | null;
+  per_host_requests_per_minute: number | null;
+  max_bundle_mb: number | null;
+};
+
+export type PlatformTenantView = {
+  id: number;
+  slug: string;
+  name: string;
+  tier: string;
+  overrides: TierOverrides | null;
+  /** Tier plus overrides: the numbers this tenant is actually held to. */
+  effective: TierLimits;
+  trial_expires_at: number | null;
+  trial_expired: boolean;
+  user_count: number;
+  blocked_user_count: number;
+  /** Counted the way the `max_hosts` check counts: enrolled, plus hosts still inside their
+   *  24h bootstrap window. */
+  host_count: number;
+  created_at: number;
+};
+
+export type PlatformUserView = {
+  id: number;
+  tenant_id: number;
+  email: string;
+  role: Role;
+  blocked_at: number | null;
+  is_platform_admin: boolean;
+  created_at: number;
+  is_self: boolean;
+};
+
+export type PlatformSettings = { signups_enabled: boolean; on_prem: boolean };
+
+/** Unauthenticated: whether the sign-in page should offer a signup link at all. */
+export type PublicConfig = { signups_enabled: boolean; on_prem: boolean };
+
+export type CreateTenantResponse = {
+  tenant: PlatformTenantView;
+  /** False when no owner was requested, or when the account was created but its sign-in
+   *  link could not be delivered. The tenant exists in both cases. */
+  owner_invited: boolean;
+};
+
+/** `onprem` sets max_hosts to u32::MAX, which is a limit in name only. */
+export const UNLIMITED = 4294967295;
+export const fmtLimit = (n: number) => (n >= UNLIMITED ? "unlimited" : n.toLocaleString());
 
 export class ApiError extends Error {
   status: number;

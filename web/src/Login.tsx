@@ -6,9 +6,12 @@ import { AuthShell } from "./AuthShell";
 type Props = {
   onDone: () => void;
   onSwitchToSignup: () => void;
+  /** False when a platform admin has closed self-service signup, or on-prem — in either case
+   *  the form would only lead to a 403, so the invitation is not offered at all. */
+  signupsEnabled: boolean;
 };
 
-export function Login({ onSwitchToSignup }: Props) {
+export function Login({ onSwitchToSignup, signupsEnabled }: Props) {
   const [email, setEmail] = useState("");
   const [sent, setSent] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -69,18 +72,20 @@ export function Login({ onSwitchToSignup }: Props) {
           >
             {submitting ? "Sending…" : "Send magic link"}
           </Button>
-          <Typography variant="body2">
-            No account?{" "}
-            <Link
-              href="#"
-              onClick={(e) => {
-                e.preventDefault();
-                onSwitchToSignup();
-              }}
-            >
-              Start a trial
-            </Link>
-          </Typography>
+          {signupsEnabled && (
+            <Typography variant="body2">
+              No account?{" "}
+              <Link
+                href="#"
+                onClick={(e) => {
+                  e.preventDefault();
+                  onSwitchToSignup();
+                }}
+              >
+                Start a trial
+              </Link>
+            </Typography>
+          )}
         </Stack>
       </form>
     </AuthShell>

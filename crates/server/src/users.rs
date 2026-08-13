@@ -35,6 +35,10 @@ pub struct UserView {
     /// True for the caller's own row. The UI uses it to disable the controls that the
     /// self-modification guard would reject anyway.
     pub is_self: bool,
+    /// Blocked by a platform admin. Read-only here — a tenant cannot block or unblock its own
+    /// users — but shown so that "why can't they sign in?" has an answer on this page rather
+    /// than a support ticket.
+    pub blocked: bool,
 }
 
 #[derive(Deserialize)]
@@ -58,6 +62,7 @@ pub async fn list(State(state): State<AppState>, who: AuthedUser) -> Response {
                 .into_iter()
                 .map(|u| UserView {
                     is_self: u.id == who.user_id,
+                    blocked: u.is_blocked(),
                     id: u.id,
                     email: u.email,
                     role: u.role,
@@ -123,6 +128,9 @@ pub async fn invite(
         }
     };
 
+    // An address in PLATFORM_ADMIN_EMAILS that arrives by invitation rather than signup.
+    crate::platform_admin_bootstrap(&state, &user).await;
+
     if let Err(e) = crate::auth::handlers::issue_and_send_link(
         &state,
         &user.email,
@@ -160,6 +168,7 @@ pub async fn invite(
         role: user.role,
         created_at: user.created_at,
         is_self: false,
+        blocked: false,
     })
     .into_response()
 }

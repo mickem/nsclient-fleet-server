@@ -137,6 +137,11 @@ function UserRow({
       <TableCell>
         {user.email}
         {user.is_self && <Chip label="you" size="small" sx={{ ml: 1 }} />}
+        {user.blocked && (
+          <Tooltip title="Blocked by the service operator — they cannot sign in, and their API keys are inert. Only the operator can lift it.">
+            <Chip label="blocked" size="small" color="warning" sx={{ ml: 1 }} />
+          </Tooltip>
+        )}
       </TableCell>
       <TableCell>
         {locked ? (

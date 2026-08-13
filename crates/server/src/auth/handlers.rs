@@ -56,6 +56,9 @@ pub struct MeResponse {
     pub on_prem: bool,
     pub trial_expires_at: Option<i64>,
     pub trial_expired: bool,
+    /// Drives the Platform entry in the sidebar. The routes it leads to check the flag
+    /// themselves — this only decides whether the UI offers the door.
+    pub is_platform_admin: bool,
 }
 
 pub async fn signup(
@@ -65,6 +68,23 @@ pub async fn signup(
 ) -> Response {
     if state.config.on_prem {
         return (StatusCode::NOT_FOUND, "signup disabled in on-prem mode").into_response();
+    }
+
+    // Checked before Turnstile: when signups are closed nothing about this request matters,
+    // and there is no reason to spend a siteverify round trip refusing it.
+    match crate::platform::settings::signups_enabled(&state.db).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::FORBIDDEN,
+                "self-service signup is currently closed — contact your administrator for an invitation",
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "signup gate read failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "signup unavailable").into_response();
+        }
     }
 
     let token = body.turnstile_token.as_deref().unwrap_or("");
@@ -127,6 +147,10 @@ pub async fn signup(
         }
     };
 
+    // A fresh install where the operator set PLATFORM_ADMIN_EMAILS and then signed up: the
+    // startup pass found no account for that address, so the grant happens here instead.
+    crate::platform_admin_bootstrap(&state, &user).await;
+
     if let Err(e) = issue_and_send_link(&state, &user.email, tenant.id, user.id, addr).await {
         tracing::error!(error = %e, "magic link send failed");
     }
@@ -168,7 +192,15 @@ pub async fn send_link(
 
     let users = UserRepo::new(&state.db);
     if let Ok(Some(user)) = users.find_by_email(&email).await {
-        if let Err(e) =
+        // A blocked account gets the same uniform 204 as an unknown address. Sending a link
+        // the session layer will refuse to honour would only waste the send budget and tell
+        // the holder that the address is real.
+        if user.is_blocked() {
+            tracing::info!(
+                user_id = user.id,
+                "send-link for a blocked account (uniform 204)"
+            );
+        } else if let Err(e) =
             issue_and_send_link(&state, &user.email, user.tenant_id, user.id, addr).await
         {
             tracing::error!(error = %e, "magic link send failed");
@@ -268,12 +300,28 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// The one place a session is minted — every sign-in path ends here, which is why the block
+/// check lives here rather than in each of them. A link issued before the block was applied
+/// is still a valid link; it just no longer buys a session.
 async fn issue_session_cookie(
     state: &AppState,
     jar: CookieJar,
     tenant_id: i64,
     user_id: i64,
 ) -> Response {
+    match UserRepo::new(&state.db).get(tenant_id, user_id).await {
+        Ok(Some(u)) if u.is_blocked() => {
+            tracing::info!(user_id, "sign-in refused: account blocked");
+            return (StatusCode::FORBIDDEN, "this account has been blocked").into_response();
+        }
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::UNAUTHORIZED, "no such account").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "sign-in user lookup failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "sign-in failed").into_response();
+        }
+    }
+
     let token = random_token();
     let hash = hash_token(&token);
     if let Err(e) = SessionRepo::new(&state.db)
@@ -350,6 +398,7 @@ pub async fn me(State(state): State<AppState>, who: AuthedUser) -> Response {
         on_prem: state.config.on_prem,
         trial_expires_at: tenant.trial_expires_at,
         trial_expired,
+        is_platform_admin: user.is_platform_admin,
     })
     .into_response()
 }

@@ -17,6 +17,10 @@ pub struct Config {
     pub on_prem: bool,
     pub on_prem_admin_email: Option<String>,
     pub on_prem_admin_password: Option<String>,
+    /// Addresses that are granted the platform-admin flag at startup (and when they sign up).
+    /// This is the bootstrap only: the flag lives in the database and is granted and revoked
+    /// from the console after that. Lowercased on load so comparisons match stored addresses.
+    pub platform_admin_emails: Vec<String>,
     pub magic_link_ttl_secs: i64,
     pub session_ttl_secs: i64,
     pub bootstrap_ttl_secs: i64,
@@ -149,6 +153,7 @@ impl Config {
             on_prem,
             on_prem_admin_email: std::env::var("ON_PREM_ADMIN_EMAIL").ok(),
             on_prem_admin_password: std::env::var("ON_PREM_ADMIN_PASSWORD").ok(),
+            platform_admin_emails: csv_env("PLATFORM_ADMIN_EMAILS"),
             magic_link_ttl_secs: 900,
             session_ttl_secs: 604_800,
             bootstrap_ttl_secs: 3600,
@@ -202,6 +207,26 @@ fn derive_agent_mtls_url(base_url: &str, listen_https: &str, listen_mtls: &str) 
     } else {
         format!("https://{host}:{port}")
     }
+}
+
+impl Config {
+    /// Whether this address is listed in `PLATFORM_ADMIN_EMAILS`. Such a user can still have
+    /// the flag revoked in the console, but the next restart grants it back — the env var is
+    /// the way in when nobody has the flag, so it has to keep working.
+    pub fn is_bootstrap_platform_admin(&self, email: &str) -> bool {
+        let email = email.trim().to_lowercase();
+        self.platform_admin_emails.contains(&email)
+    }
+}
+
+/// A comma-separated env var as a list of lowercased, trimmed, non-empty entries.
+fn csv_env(key: &str) -> Vec<String> {
+    std::env::var(key)
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 fn bool_env(key: &str, default: bool) -> bool {

@@ -15,9 +15,10 @@ use crate::AppState;
 /// Does not reject — let the route's `AuthedUser` extractor decide whether auth is required.
 ///
 /// The user row is re-read on every request to pick up the current role. That costs one
-/// indexed lookup, and buys two things: a demotion takes effect immediately rather than at
-/// the victim's convenience, and a session whose user has been deleted stops authenticating
-/// even if a row somehow outlived `UserRepo::delete`.
+/// indexed lookup, and buys three things: a demotion takes effect immediately rather than at
+/// the victim's convenience, a session whose user has been deleted stops authenticating even
+/// if a row somehow outlived `UserRepo::delete`, and a block lands on the blocked user's
+/// very next request — through whichever credential they present.
 pub async fn session_layer(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -46,17 +47,24 @@ async fn from_session(state: &AppState, cookie_value: &str) -> Option<AuthedUser
         .get(session.tenant_id, session.user_id)
         .await
         .ok()??;
+    if user.is_blocked() {
+        tracing::info!(user_id = user.id, "blocked user presented a session cookie");
+        return None;
+    }
     Some(AuthedUser {
         user_id: session.user_id,
         tenant_id: session.tenant_id,
         role: user.role,
+        is_platform_admin: user.is_platform_admin,
     })
 }
 
 /// Authenticate `Authorization: Bearer nsk_…`.
 ///
 /// A key carries its owner's current role, read here rather than stored with the key, so
-/// re-roling or deleting the user immediately changes what their automation can do.
+/// re-roling, blocking or deleting the user immediately changes what their automation can
+/// do. Blocking in particular does not touch the key rows — it does not have to, because
+/// every key is resolved through its owner on every request.
 async fn from_api_key(state: &AppState, token: &str) -> Option<AuthedUser> {
     let keys = ApiKeyRepo::new(&state.db);
     let key = keys.find_by_hash(&hash_token(token)).await.ok()??;
@@ -64,6 +72,10 @@ async fn from_api_key(state: &AppState, token: &str) -> Option<AuthedUser> {
         .get(key.tenant_id, key.user_id)
         .await
         .ok()??;
+    if user.is_blocked() {
+        tracing::info!(user_id = user.id, key_id = %key.id, "blocked user presented an API key");
+        return None;
+    }
 
     // Best-effort: a failed write here must not cost the caller their request.
     if let Err(e) = keys.touch_last_used(&key.id).await {
@@ -74,6 +86,7 @@ async fn from_api_key(state: &AppState, token: &str) -> Option<AuthedUser> {
         user_id: key.user_id,
         tenant_id: key.tenant_id,
         role: user.role,
+        is_platform_admin: user.is_platform_admin,
     })
 }
 

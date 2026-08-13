@@ -14,7 +14,7 @@ pub struct TierLimits {
 
 /// Numeric subset of `TierLimits` that may be overridden per tenant. Anything not present
 /// here is locked to the named tier — overrides cannot rename a tenant's tier.
-#[derive(Debug, Default, Clone, Copy, serde::Deserialize)]
+#[derive(Debug, Default, Clone, Copy, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TierOverrides {
     pub max_hosts: Option<u32>,

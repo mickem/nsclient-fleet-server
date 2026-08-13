@@ -110,6 +110,7 @@ fn test_config(db_path: PathBuf) -> fleet_server::config::Config {
         on_prem: false,
         on_prem_admin_email: None,
         on_prem_admin_password: None,
+        platform_admin_emails: Vec::new(),
         magic_link_ttl_secs: 900,
         session_ttl_secs: 3600,
         bootstrap_ttl_secs: 3600,

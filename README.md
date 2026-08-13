@@ -73,6 +73,33 @@ out immediately and leaves their audit entries in place, without attribution.
 Invitations are unavailable when `ON_PREM=true`: that mode disables magic links and
 authenticates a single administrator from `ON_PREM_ADMIN_EMAIL` / `ON_PREM_ADMIN_PASSWORD`.
 
+## Platform console
+
+Roles above are tenant-scoped — they say what you may do inside your own tenant. Running the
+*service* is a separate privilege: a flag on the user row, seeded from
+`PLATFORM_ADMIN_EMAILS`, which adds **Platform** to the sidebar.
+
+| capability | covered |
+|------------|---------|
+| every tenant's subscription — tier, trial deadline, per-tenant limit overrides | yes |
+| every tenant's users — block, unblock, remove, grant the platform flag | yes |
+| create a tenant, with its CA and an optional owner who is emailed a sign-in link | yes |
+| open or close self-service signup for the whole install | yes |
+| another tenant's hosts, groups, bundles or configuration | **no** |
+
+The flag grants nothing extra inside the holder's own tenant, and nothing at all in anyone
+else's fleet data — that still requires being a user of the tenant. Its holder cannot revoke
+their own flag or block their own account, so the console cannot be locked out of itself, and
+a tenant's last owner can be blocked but not removed, so a tenant cannot be stranded.
+
+Blocking is the reversible half of removal: the account, its keys and its audit trail stay
+put, but the session, the API keys and the sign-in link all stop working until it is lifted.
+Every platform action lands in the affected tenant's audit log, naming who took it.
+
+Self-service signup is a switch in the console rather than an environment variable — closing
+it hides the signup form and refuses the endpoint, while leaving invitations working. Full
+reference: [Platform console](docs/deployment.md#14-the-platform-console).
+
 ## API keys
 
 Every user can mint bearer tokens from **API keys** in the sidebar, for scripting the API.
@@ -117,6 +144,7 @@ All other env vars have working dev defaults. Useful overrides:
 | `ON_PREM`                                               | `false`                 | Disables signup + magic links; enables password admin login                                                                                               |
 | `ON_PREM_ADMIN_EMAIL`                                   |                         | Required when `ON_PREM=true`                                                                                                                              |
 | `ON_PREM_ADMIN_PASSWORD`                                |                         | Required when `ON_PREM=true`                                                                                                                              |
+| `PLATFORM_ADMIN_EMAILS`                                 |                         | Comma-separated; grants the platform console at boot and at account creation                                                                              |
 | `COOKIE_SECURE`                                         | `false`                 | Set `true` in production (HTTPS only)                                                                                                                     |
 | `SMTP_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_FROM` |                         | Magic-link delivery; falls back to stdout when unset                                                                                                      |
 | `TURNSTILE_SECRET`                                      |                         | Cloudflare Turnstile siteverify secret (signup gate)                                                                                                      |

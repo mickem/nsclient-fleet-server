@@ -7,5 +7,6 @@ pub use pool::{open, Db};
 pub use repos::{
     ApiKeyRepo, AuditRepo, AuditRow, BundleAssignmentsRepo, BundleRow, BundlesRepo, CaSummary,
     GroupRow, GroupsRepo, HostCertRepo, HostOverridesRepo, HostRepo, HostTagsRepo, MagicLinkRepo,
-    SessionRepo, StoredHostOverride, StoredTenantSecrets, TenantRepo, TenantSecretsRepo, UserRepo,
+    PlatformSettingsRepo, SessionRepo, StoredHostOverride, StoredTenantSecrets, TenantRepo,
+    TenantSecretsRepo, TenantSummary, UserRepo,
 };

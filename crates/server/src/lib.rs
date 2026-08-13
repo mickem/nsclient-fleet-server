@@ -11,6 +11,7 @@ pub mod hosts;
 pub mod https;
 pub mod mtls;
 pub mod mux;
+pub mod platform;
 pub mod tenant_setup;
 pub mod trial_expiry;
 pub mod users;
@@ -121,6 +122,48 @@ pub async fn ensure_on_prem_admin(db: &Db, cfg: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Grant the platform-admin flag to every address in `PLATFORM_ADMIN_EMAILS` that has an
+/// account, at startup.
+///
+/// Only ever grants. Revoking is a console action, and having the env var quietly undo it on
+/// the next deploy would make the console's toggle a lie for anyone listed here — the log
+/// line on revoke says as much. An address with no account yet is normal on a fresh install:
+/// `platform_admin_bootstrap` picks it up the moment that account is created.
+pub async fn ensure_platform_admins(db: &Db, cfg: &Config) -> anyhow::Result<()> {
+    let users = UserRepo::new(db);
+    for email in &cfg.platform_admin_emails {
+        match users.promote_platform_admin_by_email(email).await? {
+            Some(user_id) => {
+                tracing::info!(%email, user_id, "platform admin granted from PLATFORM_ADMIN_EMAILS")
+            }
+            None => {
+                tracing::debug!(%email, "platform admin already granted, or no such account yet")
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Grant the flag to a user who has just been created, if their address is in the bootstrap
+/// list. This is what makes `PLATFORM_ADMIN_EMAILS` work on a brand-new install, where the
+/// operator sets the variable and *then* signs up.
+pub(crate) async fn platform_admin_bootstrap(state: &AppState, user: &fleet_core::user::User) {
+    if !state.config.is_bootstrap_platform_admin(&user.email) {
+        return;
+    }
+    match UserRepo::new(&state.db)
+        .set_platform_admin(user.id, true)
+        .await
+    {
+        Ok(_) => tracing::info!(
+            email = %user.email,
+            user_id = user.id,
+            "platform admin granted from PLATFORM_ADMIN_EMAILS at account creation"
+        ),
+        Err(e) => tracing::error!(error = %e, "platform admin bootstrap failed"),
+    }
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
@@ -182,6 +225,31 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/users/:id",
             axum::routing::patch(users::set_role).delete(users::delete_user),
+        )
+        // Anonymous: the sign-in page asks whether signup is open before it can offer it.
+        .route("/api/public-config", get(platform::public_config))
+        // Cross-tenant administration. Every handler below takes the `PlatformAdmin`
+        // extractor — see the module docs for why the check lives in the signature.
+        .route(
+            "/api/platform/tenants",
+            get(platform::list_tenants).post(platform::create_tenant),
+        )
+        .route(
+            "/api/platform/tenants/:id/subscription",
+            axum::routing::put(platform::put_subscription),
+        )
+        .route(
+            "/api/platform/tenants/:id/users",
+            get(platform::list_tenant_users),
+        )
+        .route(
+            "/api/platform/users/:id",
+            axum::routing::patch(platform::update_user).delete(platform::delete_user),
+        )
+        .route("/api/platform/tiers", get(platform::list_tiers))
+        .route(
+            "/api/platform/settings",
+            get(platform::get_settings).put(platform::put_settings),
         )
         .route("/enroll/v1", post(hosts::enroll))
         // Layers wrap the inner service; later .layer() = outer = runs first on the request.

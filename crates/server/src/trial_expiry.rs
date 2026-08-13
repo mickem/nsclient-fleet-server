@@ -23,7 +23,14 @@ fn is_allowlisted(path: &str) -> bool {
         // expiry — fleet operations don't suddenly fail when billing lapses).
         return true;
     }
-    matches!(path, "/api/me" | "/api/auth/logout")
+    // The platform console is exempt: it is the thing that *fixes* an expired trial, and its
+    // operator is an ordinary user of some tenant whose own trial may well have lapsed.
+    // Locking them out of it because of their own billing state would be a trap — and it is
+    // not a hole, since every route under it still requires the platform-admin flag.
+    if path.starts_with("/api/platform/") {
+        return true;
+    }
+    matches!(path, "/api/me" | "/api/auth/logout" | "/api/public-config")
 }
 
 pub async fn trial_expiry_layer(

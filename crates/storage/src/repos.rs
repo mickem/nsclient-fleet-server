@@ -77,6 +77,76 @@ impl<'a> TenantRepo<'a> {
         Ok(row.map(map_tenant))
     }
 
+    /// Every tenant on the estate, with the two numbers the platform console ranks them by.
+    ///
+    /// The counts are correlated subqueries rather than a second round trip per tenant: the
+    /// console lists the whole estate, and an N+1 there would grow with the customer base.
+    ///
+    /// `host_count` deliberately matches what the tier limit actually counts
+    /// (`HostRepo::count_active`) — enrolled hosts plus pending ones from the last 24h — so
+    /// the "42 / 50 hosts" the console shows is the same 42 that will refuse the 51st.
+    pub async fn list_with_counts(&self) -> Result<Vec<TenantSummary>> {
+        let rows = sqlx::query(
+            "SELECT t.id, t.slug, t.name, t.tier, t.tier_overrides_json, t.trial_expires_at,
+                    t.config_version, t.created_at,
+                    (SELECT COUNT(*) FROM users u WHERE u.tenant_id = t.id)
+                        AS user_count,
+                    (SELECT COUNT(*) FROM users u
+                      WHERE u.tenant_id = t.id AND u.blocked_at IS NOT NULL)
+                        AS blocked_user_count,
+                    (SELECT COUNT(*) FROM hosts h
+                      WHERE h.tenant_id = t.id
+                        AND (h.enrolled_at IS NOT NULL
+                             OR (h.enrolled_at IS NULL AND h.created_at > ?)))
+                        AS host_count
+             FROM tenants t
+             ORDER BY t.created_at DESC",
+        )
+        .bind(now_unix() - 86_400)
+        .fetch_all(&self.db.read)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| TenantSummary {
+                user_count: r.get("user_count"),
+                blocked_user_count: r.get("blocked_user_count"),
+                host_count: r.get("host_count"),
+                tenant: map_tenant(r),
+            })
+            .collect())
+    }
+
+    /// Replace a tenant's subscription wholesale: named tier, trial deadline, and the
+    /// numeric overrides sitting on top of it.
+    ///
+    /// Every field is authoritative — `None` clears rather than preserves. The console edits
+    /// all three in one form, and under COALESCE semantics "this tenant has paid, drop the
+    /// trial" would be indistinguishable from "leave the trial alone".
+    ///
+    /// The caller validates `tier` against `fleet_core::tier::lookup` and `overrides_json`
+    /// against `TierOverrides`; this layer only writes what it is given.
+    pub async fn update_subscription(
+        &self,
+        tenant_id: i64,
+        tier: &str,
+        trial_expires_at: Option<i64>,
+        overrides_json: Option<&str>,
+    ) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE tenants
+                SET tier = ?, trial_expires_at = ?, tier_overrides_json = ?
+              WHERE id = ?",
+        )
+        .bind(tier)
+        .bind(trial_expires_at)
+        .bind(overrides_json)
+        .bind(tenant_id)
+        .execute(&self.db.write)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
     /// Set or clear the tier override JSON. Caller must validate against
     /// `fleet_core::tier::TierOverrides` before calling.
     pub async fn set_tier_overrides(
@@ -103,6 +173,16 @@ impl<'a> TenantRepo<'a> {
         .await?;
         Ok(row.get::<i64, _>("config_version"))
     }
+}
+
+/// A tenant plus the counts the platform console shows next to it. Built by
+/// `TenantRepo::list_with_counts`.
+#[derive(Debug, Clone)]
+pub struct TenantSummary {
+    pub tenant: Tenant,
+    pub user_count: i64,
+    pub blocked_user_count: i64,
+    pub host_count: i64,
 }
 
 fn map_tenant(r: sqlx::sqlite::SqliteRow) -> Tenant {
@@ -1152,19 +1232,102 @@ impl<'a> UserRepo<'a> {
             tenant_id,
             email: email.to_owned(),
             role,
+            blocked_at: None,
+            is_platform_admin: false,
             created_at: now,
         })
     }
 
     pub async fn list(&self, tenant_id: i64) -> Result<Vec<User>> {
         let rows = sqlx::query(
-            "SELECT id, tenant_id, email, role, created_at
+            "SELECT id, tenant_id, email, role, blocked_at, is_platform_admin, created_at
              FROM users WHERE tenant_id = ? ORDER BY created_at ASC",
         )
         .bind(tenant_id)
         .fetch_all(&self.db.read)
         .await?;
         Ok(rows.into_iter().map(map_user).collect())
+    }
+
+    /// Look a user up by id alone, without knowing their tenant.
+    ///
+    /// The tenant-scoped `get` is what handlers should use — passing the caller's tenant_id
+    /// is how cross-tenant reads are prevented by construction. This one exists for the
+    /// platform console, where a user id is addressed from outside their tenant and the
+    /// tenant is the *answer*, not an input.
+    pub async fn get_any(&self, user_id: i64) -> Result<Option<User>> {
+        let row = sqlx::query(
+            "SELECT id, tenant_id, email, role, blocked_at, is_platform_admin, created_at
+             FROM users WHERE id = ?",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.db.read)
+        .await?;
+        Ok(row.map(map_user))
+    }
+
+    /// Block or unblock an account.
+    ///
+    /// Blocking deletes the user's sessions in the same transaction. The session layer
+    /// already refuses a blocked user on their next request, so this is belt and braces —
+    /// but it also means an unblock hands back an account with no stale cookies attached,
+    /// and the row count in `sessions` keeps meaning "people currently signed in".
+    ///
+    /// API keys are deliberately *not* deleted: blocking is reversible, and a block that
+    /// silently destroyed a user's automation would not be. They stop working while the
+    /// block is in force because the session layer resolves them through the owner's row.
+    pub async fn set_blocked(&self, user_id: i64, blocked: bool) -> Result<bool> {
+        let mut tx = self.db.write.begin().await?;
+        let res = sqlx::query("UPDATE users SET blocked_at = ? WHERE id = ?")
+            .bind(blocked.then(now_unix))
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        if blocked {
+            sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// Grant or revoke the cross-tenant platform-admin flag.
+    pub async fn set_platform_admin(&self, user_id: i64, is_admin: bool) -> Result<bool> {
+        let res = sqlx::query("UPDATE users SET is_platform_admin = ? WHERE id = ?")
+            .bind(i64::from(is_admin))
+            .bind(user_id)
+            .execute(&self.db.write)
+            .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// Grant the platform-admin flag to a user identified by address, if that address
+    /// exists. Returns the user id when a row was promoted, `None` when the address is
+    /// unknown or already had the flag — which is what `PLATFORM_ADMIN_EMAILS` bootstrapping
+    /// needs to report at startup.
+    pub async fn promote_platform_admin_by_email(&self, email: &str) -> Result<Option<i64>> {
+        let id: Option<i64> = sqlx::query_scalar(
+            "UPDATE users SET is_platform_admin = 1
+              WHERE email = ? AND is_platform_admin = 0
+              RETURNING id",
+        )
+        .bind(email)
+        .fetch_optional(&self.db.write)
+        .await?;
+        Ok(id)
+    }
+
+    /// How many owners a tenant has. Used by the platform console to refuse the one deletion
+    /// that would strand a tenant: removing its last owner.
+    pub async fn count_owners(&self, tenant_id: i64) -> Result<i64> {
+        let n: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE tenant_id = ? AND role = 'owner'")
+                .bind(tenant_id)
+                .fetch_one(&self.db.read)
+                .await?;
+        Ok(n)
     }
 
     pub async fn set_role(&self, tenant_id: i64, user_id: i64, role: Role) -> Result<bool> {
@@ -1216,6 +1379,14 @@ impl<'a> UserRepo<'a> {
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
+        // Not tenant-scoped, because platform_settings is not: a platform admin can be the
+        // last person to have flipped a switch that belongs to the whole install.
+        sqlx::query(
+            "UPDATE platform_settings SET updated_by_user = NULL WHERE updated_by_user = ?",
+        )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
 
         let res = sqlx::query("DELETE FROM users WHERE tenant_id = ? AND id = ?")
             .bind(tenant_id)
@@ -1229,7 +1400,7 @@ impl<'a> UserRepo<'a> {
 
     pub async fn get(&self, tenant_id: i64, user_id: i64) -> Result<Option<User>> {
         let row = sqlx::query(
-            "SELECT id, tenant_id, email, role, created_at
+            "SELECT id, tenant_id, email, role, blocked_at, is_platform_admin, created_at
              FROM users WHERE tenant_id = ? AND id = ?",
         )
         .bind(tenant_id)
@@ -1241,7 +1412,8 @@ impl<'a> UserRepo<'a> {
 
     pub async fn find_by_email(&self, email: &str) -> Result<Option<User>> {
         let row = sqlx::query(
-            "SELECT id, tenant_id, email, role, created_at FROM users WHERE email = ? LIMIT 1",
+            "SELECT id, tenant_id, email, role, blocked_at, is_platform_admin, created_at
+             FROM users WHERE email = ? LIMIT 1",
         )
         .bind(email)
         .fetch_optional(&self.db.read)
@@ -1256,7 +1428,52 @@ fn map_user(r: sqlx::sqlite::SqliteRow) -> User {
         tenant_id: r.get("tenant_id"),
         email: r.get("email"),
         role: Role::from_db(&r.get::<String, _>("role")),
+        blocked_at: r.get("blocked_at"),
+        is_platform_admin: r.get::<i64, _>("is_platform_admin") != 0,
         created_at: r.get("created_at"),
+    }
+}
+
+/// Process-wide switches that belong to no tenant.
+///
+/// Key/value on purpose: these are rare, unrelated, and read at most once per request that
+/// cares. A typed column per switch would mean a migration for each one and a struct that
+/// every caller has to fetch in full. Values are strings; the server owns their meaning
+/// (see `crate::platform::settings`), including what an absent key defaults to.
+pub struct PlatformSettingsRepo<'a> {
+    db: &'a Db,
+}
+
+impl<'a> PlatformSettingsRepo<'a> {
+    pub fn new(db: &'a Db) -> Self {
+        Self { db }
+    }
+
+    pub async fn get(&self, key: &str) -> Result<Option<String>> {
+        let value: Option<String> =
+            sqlx::query_scalar("SELECT value FROM platform_settings WHERE key = ?")
+                .bind(key)
+                .fetch_optional(&self.db.read)
+                .await?;
+        Ok(value)
+    }
+
+    pub async fn set(&self, key: &str, value: &str, updated_by_user: Option<i64>) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO platform_settings (key, value, updated_at, updated_by_user)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET
+               value = excluded.value,
+               updated_at = excluded.updated_at,
+               updated_by_user = excluded.updated_by_user",
+        )
+        .bind(key)
+        .bind(value)
+        .bind(now_unix())
+        .bind(updated_by_user)
+        .execute(&self.db.write)
+        .await?;
+        Ok(())
     }
 }
 

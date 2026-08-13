@@ -76,7 +76,22 @@ pub struct User {
     pub tenant_id: i64,
     pub email: String,
     pub role: Role,
+    /// When a platform admin blocked this account, or `None` if it is allowed to sign in.
+    ///
+    /// Orthogonal to `role`: a blocked owner is still the owner, they just cannot
+    /// authenticate. Enforced once, in the session layer, so it covers cookies and API keys
+    /// alike rather than being a check every handler has to remember.
+    pub blocked_at: Option<i64>,
+    /// Cross-tenant privilege: may read and edit every tenant through `/api/platform/*`.
+    /// Grants nothing extra inside the user's own tenant — `role` still decides that.
+    pub is_platform_admin: bool,
     pub created_at: i64,
+}
+
+impl User {
+    pub fn is_blocked(&self) -> bool {
+        self.blocked_at.is_some()
+    }
 }
 
 #[cfg(test)]

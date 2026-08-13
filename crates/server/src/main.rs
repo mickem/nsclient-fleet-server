@@ -3,8 +3,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use fleet_server::{
-    config::Config, ensure_on_prem_admin, mtls, mtls_router, router, tenant_setup::backfill_all,
-    AppState,
+    config::Config, ensure_on_prem_admin, ensure_platform_admins, mtls, mtls_router, router,
+    tenant_setup::backfill_all, AppState,
 };
 
 use fleet_server::auth::{email::EmailSender, rate_limit::AuthRateLimits, turnstile::Turnstile};
@@ -91,6 +91,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(migration_version, "migrations applied");
 
     ensure_on_prem_admin(&db, &cfg).await?;
+    ensure_platform_admins(&db, &cfg).await?;
 
     // Self-signed cert for agent mTLS, persisted so it survives restarts — agents pin it at
     // enrollment and cannot recover on their own if it changes. Regenerated only when

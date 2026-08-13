@@ -174,6 +174,10 @@ database becomes undecryptable. Store a copy outside the VM and outside its back
 | `SMTP_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_FROM` | unset   | All five or none; falls back to stdout |
 | `TURNSTILE_SECRET`                                      | unset   | Cloudflare Turnstile siteverify secret |
 | `DAILY_EMAIL_BUDGET`                                    | `5000`  | Global cap; sends past it are dropped  |
+| `PLATFORM_ADMIN_EMAILS`                                 | unset   | Comma-separated. Grants the platform console — see below |
+
+Whether self-service signup is open is **not** an environment variable: it is a switch in the
+platform console, so it can be closed without a redeploy. See [§14](#14-the-platform-console).
 
 ### On-prem
 
@@ -502,3 +506,85 @@ that tenant at once, so expect a burst of recomputation after an operator edits 
 What remains on the per-poll path is the `last_seen_at` write on every heartbeat, which
 turns poll rate into SQLite write rate. Coalescing those into a periodic batched write is
 the next change that extends the life of a single VM.
+
+---
+
+## 14. The platform console
+
+Everything above is per-tenant. **Platform** in the sidebar is the cross-tenant view: every
+tenant on the install, their subscriptions, their users, and whether strangers may sign up.
+It is a hosted-service tool — on-prem has one tenant and no signups, so there is nothing
+there for it to do.
+
+### Getting the first one
+
+Access is a flag on a user row (`users.is_platform_admin`), not a role. Seed it:
+
+```
+PLATFORM_ADMIN_EMAILS=ops@yourcompany.example,you@yourcompany.example
+```
+
+At every boot each listed address that has an account is granted the flag; an address with
+no account yet gets it the moment that account is created, by signup or invitation. So the
+variable works in either order — set it before the first signup, or add it later and
+restart.
+
+After that the console is the way to hand the flag around: the toggle on any user row grants
+or revokes it, effective on that person's next request. Two things it will not do, both so
+the console cannot be locked out of itself: you cannot revoke your own flag, and you cannot
+block or delete your own account. Removing a platform admin is therefore always somebody
+else's action.
+
+Revoking the flag from an address still listed in `PLATFORM_ADMIN_EMAILS` works, and the
+next restart grants it back — the variable is the way in when nobody has the flag, so it has
+to keep working. Take the address out of the environment as well if the revocation is meant
+to stick; the server logs a warning when this case arises.
+
+The flag grants nothing inside the holder's own tenant — their `role` still decides that —
+and it does not open other tenants' fleet data. Hosts, groups, bundles and configuration are
+reachable only as a user of that tenant, which the console offers no way around. What it
+covers is subscriptions, accounts, and the signup switch.
+
+### Subscriptions
+
+Each tenant has a named tier (defined in code, `crates/core/src/tier.rs`), an optional trial
+deadline, and optional numeric overrides on top of the tier. The edit form writes all three
+at once, so what is on screen is what the tenant gets — a blank trial field means "no
+deadline", i.e. a tenant that has paid.
+
+Changes apply on the tenant's next request. Nothing caches a limit: `tier::effective` is
+consulted where each one is enforced. The exception is the per-tier agent rate-limiter
+buckets, which are sized per tier name and age out on their own.
+
+A tenant past its trial deadline gets `402 Payment Required` on every `/api/*` call except
+`/api/me` and logout — clearing or extending the deadline here un-sticks them immediately,
+with no need for them to sign in again.
+
+### Blocking vs. removing a user
+
+**Block** is reversible and immediate: the account, its tenant membership, its audit trail
+and its API keys all stay, but nothing authenticates. Their session is deleted, their keys
+stop resolving, and the sign-in form issues them no new link — while returning the same
+uniform 204 it returns for any address, so a block is not detectable from outside. Unblocking
+restores everything without reissuing keys.
+
+**Remove** deletes the row, and with it the user's API keys. Audit entries survive with their
+attribution dropped, exactly as for a tenant-level removal. A tenant's *only* owner cannot be
+removed — that would leave the tenant with nobody who can manage it and no way back — so
+block that account instead, or promote a second owner first.
+
+Every platform action is written to the affected tenant's own audit log, attributed to the
+platform admin who took it, with their address in the entry's metadata. A customer can see
+that their subscription changed and who changed it.
+
+### The signup switch
+
+`Allow self-service signups` decides whether `POST /api/auth/signup` works and whether the
+sign-in page offers the form at all (`/api/public-config`, the only unauthenticated endpoint
+that reports it). It is stored in the database, so it survives restarts and takes effect
+without a deploy.
+
+Closing it leaves existing tenants alone and does not touch invitations — a tenant's own
+admins can still add colleagues. New tenants then come from **New tenant** in the console,
+which provisions the CA and bundle-signing key and, given an owner address, emails that
+person the sign-in link.
