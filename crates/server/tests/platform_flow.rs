@@ -351,6 +351,80 @@ async fn the_console_sees_and_edits_other_tenants() {
     assert!(entry.1.unwrap().contains("ops@vendor.example"));
 }
 
+/// Fleet-wide drift, per tenant: how many of a tenant's hosts have configuration of their
+/// own that outranks what we send them.
+///
+/// Only hosts that have actually said so are counted. A host whose agent predates the flag
+/// reports nothing, and counting that as drift would inflate the number with hosts nobody
+/// has any evidence about — the same reason the column is nullable in the first place.
+#[tokio::test]
+async fn the_console_counts_hosts_that_are_only_partly_fleet_managed() {
+    let s = start().await;
+    let (_, admin) = platform_admin(&s, "ops@vendor.example").await;
+
+    // Three enrolled hosts, one per answer the agent can give.
+    for (id, local) in [
+        ("host-drifted", Some(1_i64)),
+        ("host-clean", Some(0)),
+        ("host-silent", None),
+    ] {
+        sqlx::query(
+            "INSERT INTO hosts (id, tenant_id, enrolled_at, created_at, local_config_present)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(s.tenant_id)
+        .bind(now_unix())
+        .bind(now_unix())
+        .bind(local)
+        .execute(&s.db.write)
+        .await
+        .unwrap();
+    }
+
+    let row = |tenants: serde_json::Value| {
+        tenants
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["slug"] == serde_json::json!("acme"))
+            .cloned()
+            .expect("the tenant must be listed")
+    };
+    let listed: serde_json::Value = admin
+        .get(format!("{}/api/platform/tenants", s.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let t = row(listed);
+    assert_eq!(t["host_count"], serde_json::json!(3));
+    assert_eq!(
+        t["local_config_host_count"],
+        serde_json::json!(1),
+        "only the host that reported local configuration counts"
+    );
+
+    // The subscription response is counted the same way, rather than reporting zeros for
+    // everything the edit did not touch.
+    let updated: serde_json::Value = admin
+        .put(format!(
+            "{}/api/platform/tenants/{}/subscription",
+            s.base_url, s.tenant_id
+        ))
+        .json(&serde_json::json!({ "tier": "pro" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(updated["host_count"], serde_json::json!(3));
+    assert_eq!(updated["local_config_host_count"], serde_json::json!(1));
+}
+
 #[tokio::test]
 async fn extending_a_trial_unblocks_the_tenant_immediately() {
     let s = start().await;

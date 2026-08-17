@@ -556,6 +556,14 @@ Changes apply on the tenant's next request. Nothing caches a limit: `tier::effec
 consulted where each one is enforced. The exception is the per-tier agent rate-limiter
 buckets, which are sized per tier name and age out on their own.
 
+The host count carries a **local config** badge when some of the tenant's hosts report
+configuration of their own that outranks what the fleet sends them — those hosts are only
+partly centrally managed, so what an operator sees in the tenant's UI is not necessarily
+what is in force. Only hosts that have actually reported are counted; an agent too old to
+answer is left out rather than assumed either way. Which hosts they are is visible on the
+tenant's own Hosts page, and nothing about the local configuration itself ever reaches the
+server — see [agent-integration.md §2.1](agent-integration.md#21-local-configuration).
+
 A tenant past its trial deadline gets `402 Payment Required` on every `/api/*` call except
 `/api/me` and logout — clearing or extending the deadline here un-sticks them immediately,
 with no need for them to sign in again.

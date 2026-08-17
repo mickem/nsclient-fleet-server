@@ -13,6 +13,13 @@ pub struct Host {
     /// Deadline for the bootstrap token issued by "Add host". Cleared at enrollment, so a
     /// non-`None` value here always describes a host that has not enrolled yet.
     pub bootstrap_expires_at: Option<i64>,
+    /// Last answer from the agent to "do you carry local configuration that outranks what we
+    /// send you?" — `None` until one arrives, which is not the same as `Some(false)`: an
+    /// agent that predates the field says nothing, and we must not read that as a denial.
+    ///
+    /// The agent reports only this fact, never the local configuration, so the server can say
+    /// a host is partly self-managed without ever holding what that configuration contains.
+    pub local_config_present: Option<bool>,
     pub created_at: i64,
 }
 
@@ -66,6 +73,7 @@ mod tests {
             last_seen_at: None,
             current_state_hash: None,
             bootstrap_expires_at,
+            local_config_present: None,
             created_at: 1_000,
         }
     }

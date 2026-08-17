@@ -138,36 +138,37 @@ pub struct TenantView {
     /// Hosts counted the way the `max_hosts` check counts them: enrolled, plus hosts still
     /// inside their 24h bootstrap window.
     pub host_count: i64,
+    /// How many of those hosts report configuration of their own that outranks what the
+    /// fleet sends them — the tenant-level view of what the host list shows per host.
+    pub local_config_host_count: i64,
     pub created_at: i64,
-}
-
-fn tenant_view(t: Tenant, user_count: i64, blocked_user_count: i64, host_count: i64) -> TenantView {
-    let effective = tier::effective(&t.tier, t.tier_overrides_json.as_deref());
-    // A malformed override string is already logged (and ignored) by `tier::effective`; the
-    // console shows `None` for it rather than inventing values it does not have.
-    let overrides = t
-        .tier_overrides_json
-        .as_deref()
-        .and_then(|raw| TierOverrides::from_json(raw).ok());
-    TenantView {
-        id: t.id,
-        slug: t.slug,
-        name: t.name,
-        tier: t.tier,
-        overrides,
-        effective: effective.into(),
-        trial_expired: t.trial_expires_at.map(|e| e < now_unix()).unwrap_or(false),
-        trial_expires_at: t.trial_expires_at,
-        user_count,
-        blocked_user_count,
-        host_count,
-        created_at: t.created_at,
-    }
 }
 
 impl From<TenantSummary> for TenantView {
     fn from(s: TenantSummary) -> Self {
-        tenant_view(s.tenant, s.user_count, s.blocked_user_count, s.host_count)
+        let t: Tenant = s.tenant;
+        let effective = tier::effective(&t.tier, t.tier_overrides_json.as_deref());
+        // A malformed override string is already logged (and ignored) by `tier::effective`;
+        // the console shows `None` for it rather than inventing values it does not have.
+        let overrides = t
+            .tier_overrides_json
+            .as_deref()
+            .and_then(|raw| TierOverrides::from_json(raw).ok());
+        TenantView {
+            id: t.id,
+            slug: t.slug,
+            name: t.name,
+            tier: t.tier,
+            overrides,
+            effective: effective.into(),
+            trial_expired: t.trial_expires_at.map(|e| e < now_unix()).unwrap_or(false),
+            trial_expires_at: t.trial_expires_at,
+            user_count: s.user_count,
+            blocked_user_count: s.blocked_user_count,
+            host_count: s.host_count,
+            local_config_host_count: s.local_config_host_count,
+            created_at: t.created_at,
+        }
     }
 }
 
@@ -405,7 +406,14 @@ pub async fn create_tenant(
         Json(CreateTenantResponse {
             // Counts, rather than a second round trip to compute what is knowable here: a
             // brand-new tenant has no hosts and at most the one owner just created.
-            tenant: tenant_view(tenant, i64::from(owner_created), 0, 0),
+            tenant: TenantSummary {
+                tenant,
+                user_count: i64::from(owner_created),
+                blocked_user_count: 0,
+                host_count: 0,
+                local_config_host_count: 0,
+            }
+            .into(),
             owner_invited,
         }),
     )
@@ -504,8 +512,8 @@ pub async fn put_subscription(
     // Nothing to invalidate: every limit is read from the tenant row at the point it is
     // enforced (`tier::effective` in hosts, bundles and agent_limits), so a new tier applies
     // to the next request. Only the per-tier rate-limiter buckets lag, and they age out.
-    match tenants.get(tenant_id).await {
-        Ok(Some(t)) => Json(tenant_view(t, 0, 0, 0)).into_response(),
+    match tenants.get_with_counts(tenant_id).await {
+        Ok(Some(s)) => Json(TenantView::from(s)).into_response(),
         _ => StatusCode::NO_CONTENT.into_response(),
     }
 }

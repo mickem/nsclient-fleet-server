@@ -16,7 +16,8 @@ loop:
   GET /agent/v1/desired-state?current_hash=<h>
     304 → sleep next_poll_in_seconds (+ jitter), continue
     200 → download missing bundles → verify → apply → render INI → restart NSClient
-          POST /agent/v1/state-report { applied_state_hash, reported_tags, errors }
+          POST /agent/v1/state-report { applied_state_hash, reported_tags, errors,
+                                        local_config_present }
   POST /agent/v1/renew   (when cert has < 14 days left)
 ```
 
@@ -121,7 +122,8 @@ POST {mtls_url}/agent/v1/state-report
   "applied_state_hash": "3f2a…",
   "bundles_installed": [ { "id": "01J…", "version": "2.1.0" } ],
   "errors": [],
-  "reported_tags": { "os": "windows", "os_version": "2019", "sql_server_present": "true" }
+  "reported_tags": { "os": "windows", "os_version": "2019", "sql_server_present": "true" },
+  "local_config_present": false
 }
 ```
 
@@ -137,6 +139,34 @@ All fields are optional. Semantics, exactly as the server implements them:
   to send the full tag map on every report.
 - `errors` → logged server-side against the host. Put bundle verification failures,
   apply failures, and INI render errors here as human-readable strings.
+- `local_config_present` → stored on the host and surfaced in the UI as a **local config**
+  badge. See below.
+
+### 2.1 Local configuration
+
+`local_config_present` answers one question: does this host carry configuration of its own
+that **outranks** what we send it? On NSClient a lookup reads the local store first and only
+falls back to the fleet-managed include, so a locally set key silently shadows the fleet's
+value — the host can be in sync and still not be running what the operator sees.
+
+Report **only the fact**. Never send the local configuration itself, or any part of it: it
+routinely holds credentials, and the server has no field for it. The flag exists so an
+operator can tell which hosts are only partly centrally managed without anything sensitive
+leaving the host.
+
+Send it on **every** report, in both directions — `false` is a real answer and the server
+stores it as one. Omitting the field means "no answer", which is what an agent older than
+this field looks like, and the server keeps those apart:
+
+| what you send | what the server stores | what the UI shows |
+|---|---|---|
+| `true` | reported: partly self-managed | **local config** badge on the host |
+| `false` | reported: fully fleet-managed | nothing in the list; stated on the host page |
+| field omitted | unknown — and any earlier answer is **kept**, not cleared | "not reported by this agent" |
+
+An unchanged answer is not a write server-side, so reporting it every time costs nothing.
+Unlike tags it never bumps the tenant's config version: it describes the host, and is not an
+input to desired state.
 
 Practical tag guidance: report observed facts (`os`, versions, detected services) —
 these are what operators write selectors against, e.g. `sql_server_present = "true"`

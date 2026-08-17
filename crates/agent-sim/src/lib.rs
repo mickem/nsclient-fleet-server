@@ -92,6 +92,10 @@ struct StateReportBody<'a> {
     bundles_installed: Vec<serde_json::Value>,
     errors: Vec<String>,
     reported_tags: BTreeMap<String, String>,
+    /// Omitted entirely when `None`, which is what an agent older than the field looks like
+    /// on the wire — the server has to keep telling that apart from an explicit `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_config_present: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -185,10 +189,39 @@ impl EnrolledAgent {
         }
     }
 
+    /// Report state the way an agent predating `local_config_present` does: without the
+    /// field at all. Kept as the default so the tests that do not care about it keep
+    /// exercising the older wire shape.
     pub async fn report_state(
         &self,
         applied_state_hash: Option<&str>,
         reported_tags: BTreeMap<String, String>,
+    ) -> Result<()> {
+        self.send_state_report(applied_state_hash, reported_tags, None)
+            .await
+    }
+
+    /// Report state the way a current agent does: always carrying whether the host has
+    /// local configuration outranking the fleet's, in both directions.
+    pub async fn report_state_with_local_config(
+        &self,
+        applied_state_hash: Option<&str>,
+        reported_tags: BTreeMap<String, String>,
+        local_config_present: bool,
+    ) -> Result<()> {
+        self.send_state_report(
+            applied_state_hash,
+            reported_tags,
+            Some(local_config_present),
+        )
+        .await
+    }
+
+    async fn send_state_report(
+        &self,
+        applied_state_hash: Option<&str>,
+        reported_tags: BTreeMap<String, String>,
+        local_config_present: Option<bool>,
     ) -> Result<()> {
         let client = self.mtls_client()?;
         let url = format!(
@@ -200,6 +233,7 @@ impl EnrolledAgent {
             bundles_installed: vec![],
             errors: vec![],
             reported_tags,
+            local_config_present,
         };
         let res = client.post(&url).json(&body).send().await?;
         if !res.status().is_success() {

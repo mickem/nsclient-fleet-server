@@ -74,6 +74,11 @@ export type HostView = {
   current_state_hash: string | null;
   status: HostStatus;
   bootstrap_expires_at: number | null;
+  /** Whether the host carries configuration of its own that outranks what the fleet sends.
+   *  `null` means the agent has never reported either way (a build older than the field) —
+   *  render that as unknown, never as "no". The agent sends only this fact; no local
+   *  configuration is ever uploaded. */
+  local_config_present: boolean | null;
   created_at: number;
 };
 
@@ -196,6 +201,9 @@ export type PlatformTenantView = {
   /** Counted the way the `max_hosts` check counts: enrolled, plus hosts still inside their
    *  24h bootstrap window. */
   host_count: number;
+  /** How many of those hosts report local configuration outranking the fleet's — how much
+   *  of this tenant is only partly centrally managed. */
+  local_config_host_count: number;
   created_at: number;
 };
 

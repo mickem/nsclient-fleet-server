@@ -188,7 +188,8 @@ Content-Type: application/json
   "applied_state_hash": "<state_hash you successfully applied, or null>",
   "bundles_installed": [],
   "errors": ["…any apply/verify failures…"],
-  "reported_tags": { "os": "linux", "role": "web" }
+  "reported_tags": { "os": "linux", "role": "web" },
+  "local_config_present": false
 }
 ```
 
@@ -205,6 +206,12 @@ All fields are optional server-side (`crates/server/src/agent_api.rs`,
   send the full tag map every time.
 - `errors` → logged server-side; use it for bundle verification or apply
   failures.
+- `local_config_present` → whether the host has configuration of its own that
+  takes precedence over what you were sent. Send the fact on every report, both
+  ways round, and **never** send the configuration itself — it typically holds
+  credentials. Omitting the field means "no answer" and leaves any previous
+  answer standing. Full contract:
+  [agent-integration.md §2.1](agent-integration.md#21-local-configuration).
 
 Report tags early (right after enrollment, before the first apply) so the host
 gets matched into groups and receives its real desired state promptly.

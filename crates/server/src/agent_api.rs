@@ -120,6 +120,14 @@ pub struct StateReport {
     pub errors: Vec<String>,
     #[serde(default)]
     pub reported_tags: BTreeMap<String, String>,
+    /// Whether the host carries configuration of its own that outranks what we send it.
+    ///
+    /// `None` means the agent said nothing — a build older than the field — and is stored as
+    /// "unknown" rather than folded into `false`. Current agents send it on every report,
+    /// both ways round, precisely so the two can be told apart. Only the fact arrives here;
+    /// the local configuration itself never leaves the host.
+    #[serde(default)]
+    pub local_config_present: Option<bool>,
 }
 
 pub async fn state_report(
@@ -144,6 +152,30 @@ pub async fn state_report(
         let _ = hosts_repo
             .touch_last_seen(ctx.tenant_id, &ctx.host_id)
             .await;
+    }
+
+    // Independent of the applied hash: a host can be perfectly in sync and still have local
+    // configuration shadowing what it just applied, which is exactly the case worth showing.
+    if let Some(present) = body.local_config_present {
+        match hosts_repo
+            .set_local_config_present(ctx.tenant_id, &ctx.host_id, present)
+            .await
+        {
+            // Logged on transition only — the flag is reported on every state report, and an
+            // unchanged answer is not news. No config_version bump: this describes the host,
+            // it does not feed selectors or change what we send.
+            Ok(true) => tracing::info!(
+                host_id = %ctx.host_id,
+                local_config_present = present,
+                "host local-configuration status changed"
+            ),
+            Ok(false) => { /* unchanged */ }
+            Err(e) => {
+                // Non-fatal: the rest of the report is still worth keeping, and the agent
+                // re-sends this on its next pass anyway.
+                tracing::error!(error = %e, "set_local_config_present failed");
+            }
+        }
     }
 
     if !body.reported_tags.is_empty() {

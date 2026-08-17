@@ -151,6 +151,10 @@ pub struct HostView {
     /// Only set while a bootstrap token is outstanding; lets the UI say how long is left to
     /// run the install command.
     pub bootstrap_expires_at: Option<i64>,
+    /// The agent's last answer to whether the host has local configuration outranking the
+    /// fleet's. `null` means it has never said — which the UI must not render as "no", since
+    /// the honest answer there is that we do not know.
+    pub local_config_present: Option<bool>,
     pub created_at: i64,
 }
 
@@ -165,6 +169,7 @@ fn host_view(h: fleet_core::host::Host) -> HostView {
         current_state_hash: h.current_state_hash,
         status,
         bootstrap_expires_at: h.bootstrap_expires_at,
+        local_config_present: h.local_config_present,
         created_at: h.created_at,
     }
 }
