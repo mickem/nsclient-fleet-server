@@ -35,10 +35,14 @@ import {
 
 type Props = { me: Me; hostId: string; onBack: () => void };
 
-/** The enrolment clause of the summary line — what happened, or what still needs to. */
+/** The enrolment clause of the summary line — what happened, or what still needs to.
+ *  The live states all share it: the chip beside the hostname carries what they add. */
 function enrollmentSummary(host: HostDetail): string {
   switch (host.status) {
-    case "enrolled":
+    case "in_sync":
+    case "out_of_sync":
+    case "offline":
+    case "lost":
       return `enrolled ${fmtTime(host.enrolled_at)}`;
     case "awaiting_enrollment":
       return `install command not run yet — token expires ${fmtTime(host.bootstrap_expires_at)}`;

@@ -62,6 +62,7 @@ async fn start() -> TestServer {
         magic_link_ttl_secs: 900,
         session_ttl_secs: 3600,
         bootstrap_ttl_secs: 3600,
+        host_lost_after_secs: 172_800,
         client_cert_lifetime_days: 90,
         cookie_secure: false,
         daily_email_budget: 1_000_000,
@@ -484,4 +485,102 @@ async fn fifty_agents_converge_on_assigned_bundle() {
     assert_eq!(desired["in_sync"], serde_json::json!(true));
     assert_eq!(desired["state_hash"].as_str().unwrap(), expected);
     assert_eq!(desired["bundles"].as_array().unwrap().len(), 1);
+
+    // …and the list says so on every row, which is the whole point of the status field: a
+    // converged fleet is legible without opening a single host.
+    assert!(
+        hosts
+            .iter()
+            .all(|h| h["status"] == serde_json::json!("in_sync")),
+        "every converged host must read in_sync in the list: {:?}",
+        hosts
+            .iter()
+            .map(|h| h["status"].clone())
+            .collect::<Vec<_>>()
+    );
+
+    // An operator unassigns the bundle. Nothing about the hosts changed, but what we would
+    // serve them did, so the fleet is behind until each one polls again — and the list has
+    // to say that immediately rather than after the agents notice.
+    let unassign = s
+        .cookie_jar
+        .delete(format!(
+            "{}/api/groups/{}/bundles/{}",
+            s.base_url,
+            group["id"].as_str().unwrap(),
+            bundle["id"].as_str().unwrap()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unassign.status(), 204, "unassign failed");
+
+    let hosts: serde_json::Value = s
+        .cookie_jar
+        .get(format!("{}/api/hosts", s.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        hosts
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|h| h["status"] == serde_json::json!("out_of_sync")),
+        "a configuration change must show as out of sync before the agents catch up"
+    );
+
+    // Silence outranks the hash, in two sizes. Ageing `last_seen_at` is the only way to
+    // reach either without waiting out the real grace periods.
+    let age_fleet = |secs: i64| {
+        let db = s.db.clone();
+        async move {
+            let t = fleet_core::time::now_unix() - secs;
+            sqlx::query(
+                "UPDATE hosts SET last_seen_at = ?, enrolled_at = ?
+                 WHERE tenant_id = (SELECT id FROM tenants WHERE slug = 'fleet')",
+            )
+            .bind(t)
+            .bind(t)
+            .execute(&db.write)
+            .await
+            .unwrap();
+        }
+    };
+    let statuses = || async {
+        let hosts: serde_json::Value = s
+            .cookie_jar
+            .get(format!("{}/api/hosts", s.base_url))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        hosts
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["status"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+
+    // An hour: past a few poll intervals, well short of a day.
+    age_fleet(3_600).await;
+    assert!(
+        statuses().await.iter().all(|st| st == "offline"),
+        "a host that stopped calling home must read offline, not out of sync"
+    );
+
+    // Three days: past `host_lost_after_secs` (48h in this server's config), so no longer
+    // something to wait out. Deliberately not *exactly* the threshold — the comparison is
+    // strict, and a test that lands on the boundary would turn on which second it ran in.
+    age_fleet(3 * 86_400).await;
+    assert!(
+        statuses().await.iter().all(|st| st == "lost"),
+        "a host silent past the configured threshold must be told apart from a brief outage"
+    );
 }

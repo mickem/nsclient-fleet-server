@@ -130,8 +130,22 @@ POST {mtls_url}/agent/v1/state-report
 All fields are optional. Semantics, exactly as the server implements them:
 
 - `applied_state_hash` present → stored as the host's `current_state_hash` and
-  `last_seen_at` is refreshed. This is what makes the UI show **✔ In sync**. Omit it
-  (or send `null`) after a failed apply — the server still refreshes `last_seen_at`.
+  `last_seen_at` is refreshed. The operator's host list compares it against what the server
+  would serve that host now, and shows **in sync** only when the two match — so reporting the
+  hash is what takes a host out of **out of sync**. Omit it (or send `null`) after a failed
+  apply: the server still refreshes `last_seen_at`, and the host stays out of sync, which is
+  the truth.
+- Keep polling even when there is nothing to do. The status is derived from `last_seen_at`
+  as well, and silence outranks the hash — a hash reported days ago says nothing about what
+  is running now:
+
+  | silence | status | what the operator reads into it |
+  |---|---|---|
+  | three poll intervals (min. 5 minutes) | **offline** | a reboot or a blip; it may come back on its own |
+  | `HOST_LOST_AFTER_HOURS`, 48h by default | **lost** | the agent is stopped, removed, firewalled or the machine is gone |
+
+  Both are measured from the last contact of any kind — a poll, a heartbeat or a state
+  report — so an agent with nothing to say still keeps itself out of them by polling.
 - `reported_tags` → upserted with `source = 'agent'`. Manual (operator-set) tags are
   never touched. If any value actually **changed**, the server bumps the tenant's
   config version — which can change your next desired state, since tags drive group

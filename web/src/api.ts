@@ -61,9 +61,18 @@ export type UserView = {
   blocked: boolean;
 };
 
-/** Derived server-side from `enrolled_at` + the bootstrap deadline. See `HostStatus` in
- *  `crates/core/src/host.rs` — `never_enrolled` is terminal, the row cannot be recovered. */
-export type HostStatus = "enrolled" | "awaiting_enrollment" | "never_enrolled";
+/** What a host is actually doing, in one field: enrollment, then liveness, then whether it
+ *  is running the configuration we want — worst-first, so a host that stopped calling home
+ *  reads `offline` rather than claiming the sync state of whatever it last reported. Derived
+ *  server-side; see `HostStatus` in `crates/core/src/host.rs`. `never_enrolled` is terminal,
+ *  the row cannot be recovered. */
+export type HostStatus =
+  | "in_sync"
+  | "out_of_sync"
+  | "offline"
+  | "lost"
+  | "awaiting_enrollment"
+  | "never_enrolled";
 
 export type HostView = {
   id: string;

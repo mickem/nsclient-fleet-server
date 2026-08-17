@@ -146,7 +146,8 @@ pub struct HostView {
     pub last_seen_at: Option<i64>,
     pub current_state_hash: Option<String>,
     /// Derived, not stored — see [`fleet_core::host::HostStatus`]. Computed here so the list
-    /// and the detail page can never disagree about what a row means.
+    /// and the detail page can never disagree about what a row means, and so that "is this
+    /// host doing what we told it" is answered without opening the row.
     pub status: fleet_core::host::HostStatus,
     /// Only set while a bootstrap token is outstanding; lets the UI say how long is left to
     /// run the install command.
@@ -158,8 +159,13 @@ pub struct HostView {
     pub created_at: i64,
 }
 
-fn host_view(h: fleet_core::host::Host) -> HostView {
-    let status = h.status(now_unix());
+fn host_view(
+    h: fleet_core::host::Host,
+    now: i64,
+    thresholds: fleet_core::host::StatusThresholds,
+    desired_state_hash: Option<&str>,
+) -> HostView {
+    let status = h.status(now, thresholds, desired_state_hash);
     HostView {
         id: h.id,
         hostname: h.hostname,
@@ -174,14 +180,72 @@ fn host_view(h: fleet_core::host::Host) -> HostView {
     }
 }
 
+/// The fleet, each host carrying the one status that says what it is doing.
+///
+/// Deciding in-sync means knowing what we would serve each host, so this walks the same
+/// `compute_desired_state_at` the agents' poll uses — the memoized one. Sharing that path
+/// rather than reimplementing the comparison is the point: a second hash computation that
+/// drifted from the agent's would leave the UI insisting a converged fleet is out of sync,
+/// which is precisely the bug an operator cannot diagnose from the outside.
+///
+/// Cost is one cache lookup per enrolled host, and a full recompute per host the first time
+/// the list is loaded after a configuration change (the same burst the agents' next poll
+/// would cause anyway). At the fleet sizes the tiers allow that is worth paying for a status
+/// that is exact; if it ever stops being, the answer is to page the list rather than to
+/// cache a second, weaker answer here.
 pub async fn list(State(state): State<AppState>, who: AuthedUser) -> Response {
-    match HostRepo::new(&state.db).list(who.tenant_id).await {
-        Ok(hosts) => Json(hosts.into_iter().map(host_view).collect::<Vec<_>>()).into_response(),
+    // One tenant read serves both the silence thresholds (from the tier's poll interval) and
+    // the cache key every desired-state lookup below is validated against.
+    let tenant = match TenantRepo::new(&state.db).get(who.tenant_id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return (StatusCode::INTERNAL_SERVER_ERROR, "tenant missing").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "tenant lookup failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+        }
+    };
+    let limits = tier::effective(&tenant.tier, tenant.tier_overrides_json.as_deref());
+    let thresholds = fleet_core::host::StatusThresholds::new(
+        limits.min_poll_interval_secs,
+        state.config.host_lost_after_secs,
+    );
+
+    let hosts = match HostRepo::new(&state.db).list(who.tenant_id).await {
+        Ok(h) => h,
         Err(e) => {
             tracing::error!(error = %e, "host list failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response()
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
         }
+    };
+
+    let now = now_unix();
+    let mut views = Vec::with_capacity(hosts.len());
+    for host in hosts {
+        // A host that never enrolled has nothing to be in sync with, and computing a desired
+        // state for one would be work spent on an answer its status cannot use.
+        let desired = if host.enrolled_at.is_some() {
+            match crate::desired_state::compute_desired_state_at(
+                &state,
+                who.tenant_id,
+                &host.id,
+                tenant.config_version,
+            )
+            .await
+            {
+                Ok(ds) => Some(ds.state_hash),
+                // Fail the request rather than the row: a list where one host silently shows
+                // the wrong status is worse than a list that failed to load.
+                Err(e) => {
+                    tracing::error!(error = %e, host_id = %host.id, "desired state failed");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+                }
+            }
+        } else {
+            None
+        };
+        views.push(host_view(host, now, thresholds, desired.as_deref()));
     }
+    Json(views).into_response()
 }
 
 #[derive(Serialize)]
@@ -241,8 +305,18 @@ pub async fn detail(
             return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
         }
     };
+    // Same inputs as the list, so the chip in the header cannot contradict the row the
+    // operator clicked to get here.
+    let (thresholds, desired_hash) = match status_inputs(&state, who.tenant_id, &host).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = %e, "status inputs failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+        }
+    };
+
     Json(HostDetail {
-        host: host_view(host),
+        host: host_view(host, now_unix(), thresholds, desired_hash.as_deref()),
         tags: tags
             .into_iter()
             .map(|(key, value, source)| TagView { key, value, source })
@@ -250,6 +324,41 @@ pub async fn detail(
         override_meta,
     })
     .into_response()
+}
+
+/// The two things `Host::status` needs beyond the row itself: the tenant's silence
+/// thresholds, and what we would serve this host right now. Only worth its own function for
+/// the single-host callers — `list` loads the tenant once and loops instead.
+async fn status_inputs(
+    state: &AppState,
+    tenant_id: i64,
+    host: &fleet_core::host::Host,
+) -> anyhow::Result<(fleet_core::host::StatusThresholds, Option<String>)> {
+    let tenant = TenantRepo::new(&state.db)
+        .get(tenant_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("tenant {tenant_id} not found"))?;
+    let limits = tier::effective(&tenant.tier, tenant.tier_overrides_json.as_deref());
+    let thresholds = fleet_core::host::StatusThresholds::new(
+        limits.min_poll_interval_secs,
+        state.config.host_lost_after_secs,
+    );
+
+    let desired = if host.enrolled_at.is_some() {
+        Some(
+            crate::desired_state::compute_desired_state_at(
+                state,
+                tenant_id,
+                &host.id,
+                tenant.config_version,
+            )
+            .await?
+            .state_hash,
+        )
+    } else {
+        None
+    };
+    Ok((thresholds, desired))
 }
 
 pub async fn delete_host(
