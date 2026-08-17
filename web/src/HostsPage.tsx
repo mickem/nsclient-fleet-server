@@ -29,7 +29,7 @@ import {
   Me,
 } from "./api";
 import { ConfirmDeleteHostDialog } from "./ConfirmDeleteHostDialog";
-import { HostStatusChip } from "./HostStatusChip";
+import { HostStatusChip, LocalConfigChip } from "./HostStatusChip";
 import { RefreshButton } from "./RefreshButton";
 
 type Props = { me: Me; onOpen: (hostId: string) => void };
@@ -155,7 +155,10 @@ export function HostsPage({ me, onOpen }: Props) {
                   <TableCell>{h.hostname ?? <em>(not reported)</em>}</TableCell>
                   <TableCell>{h.os ?? "—"}</TableCell>
                   <TableCell>
-                    <HostStatusChip host={h} />
+                    <Stack direction="row" spacing={0.5} alignItems="center" useFlexGap flexWrap="wrap">
+                      <HostStatusChip host={h} />
+                      <LocalConfigChip host={h} />
+                    </Stack>
                   </TableCell>
                   <TableCell>{fmtAgo(h.last_seen_at)}</TableCell>
                   <TableCell>

@@ -62,6 +62,7 @@ async fn start() -> TestServer {
         magic_link_ttl_secs: 900,
         session_ttl_secs: 3600,
         bootstrap_ttl_secs: 3600,
+        host_lost_after_secs: 172_800,
         client_cert_lifetime_days: 90,
         cookie_secure: false,
         daily_email_budget: 1_000_000,
@@ -277,6 +278,92 @@ async fn state_report_records_tags_and_bumps_config_version() {
             .await
             .unwrap();
     assert_eq!(stored_hash.as_deref(), Some("phase4-test-hash"));
+}
+
+/// The agent reports *whether* the host carries configuration of its own that outranks what
+/// we send it — never what that configuration is.
+///
+/// The state that needs proving is the third one. "Never reported" is not "reported no": an
+/// agent older than the field says nothing, and reading that as a denial would tell an
+/// operator a host is fully fleet-managed on no evidence at all. So the column stays NULL
+/// until an agent answers, and a later silent report must not undo an answer already given.
+#[tokio::test]
+async fn a_host_reports_whether_local_configuration_outranks_the_fleet() {
+    let s = start().await;
+    signup_login(&s, "gamma", "gwen@example.com").await;
+    let agent = enroll_a_host(&s).await;
+
+    let stored = || async {
+        sqlx::query_scalar::<_, Option<i64>>("SELECT local_config_present FROM hosts LIMIT 1")
+            .fetch_one(&s.db.read)
+            .await
+            .unwrap()
+    };
+    // What the operator API says, which is what the UI renders.
+    let published = || async {
+        let hosts: serde_json::Value = s
+            .cookie_jar
+            .get(format!("{}/api/hosts", s.base_url))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        hosts[0]["local_config_present"].clone()
+    };
+
+    assert_eq!(stored().await, None, "unknown until an agent answers");
+    assert_eq!(published().await, serde_json::Value::Null);
+
+    // An agent that predates the field: silence changes nothing.
+    agent
+        .report_state(Some("h1"), BTreeMap::new())
+        .await
+        .unwrap();
+    assert_eq!(stored().await, None, "an omitted field is not an answer");
+
+    // Reported clean.
+    agent
+        .report_state_with_local_config(Some("h1"), BTreeMap::new(), false)
+        .await
+        .unwrap();
+    assert_eq!(stored().await, Some(0));
+    assert_eq!(published().await, serde_json::json!(false));
+
+    // Someone edits nsclient.ini on the box.
+    agent
+        .report_state_with_local_config(Some("h1"), BTreeMap::new(), true)
+        .await
+        .unwrap();
+    assert_eq!(stored().await, Some(1));
+    assert_eq!(published().await, serde_json::json!(true));
+
+    // A report that omits the field must not silently clear what we were told.
+    agent
+        .report_state(Some("h1"), BTreeMap::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        stored().await,
+        Some(1),
+        "silence must not retract a reported answer"
+    );
+
+    // And it comes back down when the local configuration is removed.
+    agent
+        .report_state_with_local_config(Some("h1"), BTreeMap::new(), false)
+        .await
+        .unwrap();
+    assert_eq!(stored().await, Some(0));
+
+    // The flag describes the host; it must not touch the tenant's config version, which
+    // exists to invalidate desired state. Nothing about it changes what we send.
+    let bumps: i64 = sqlx::query_scalar("SELECT config_version FROM tenants WHERE slug = 'gamma'")
+        .fetch_one(&s.db.read)
+        .await
+        .unwrap();
+    assert_eq!(bumps, 0, "local config is not an input to desired state");
 }
 
 #[tokio::test]

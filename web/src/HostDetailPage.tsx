@@ -20,7 +20,7 @@ import {
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import DeleteIcon from "@mui/icons-material/Delete";
 import { ConfirmDeleteHostDialog } from "./ConfirmDeleteHostDialog";
-import { HostStatusChip } from "./HostStatusChip";
+import { HostStatusChip, LocalConfigChip } from "./HostStatusChip";
 import { RefreshButton } from "./RefreshButton";
 import {
   apiGet,
@@ -35,10 +35,14 @@ import {
 
 type Props = { me: Me; hostId: string; onBack: () => void };
 
-/** The enrolment clause of the summary line — what happened, or what still needs to. */
+/** The enrolment clause of the summary line — what happened, or what still needs to.
+ *  The live states all share it: the chip beside the hostname carries what they add. */
 function enrollmentSummary(host: HostDetail): string {
   switch (host.status) {
-    case "enrolled":
+    case "in_sync":
+    case "out_of_sync":
+    case "offline":
+    case "lost":
       return `enrolled ${fmtTime(host.enrolled_at)}`;
     case "awaiting_enrollment":
       return `install command not run yet — token expires ${fmtTime(host.bootstrap_expires_at)}`;
@@ -137,7 +141,7 @@ export function HostDetailPage({ me, hostId, onBack }: Props) {
 
       <Grid container spacing={2}>
         <Grid size={{ xs: 12, md: 6 }}>
-          <DesiredCard desired={desired} />
+          <DesiredCard host={host} desired={desired} />
         </Grid>
         <Grid size={{ xs: 12, md: 6 }}>
           <TagsCard host={host} canWrite={canWriteConfig(me.role)} onChanged={refresh} />
@@ -150,7 +154,32 @@ export function HostDetailPage({ me, hostId, onBack }: Props) {
   );
 }
 
-function DesiredCard({ desired }: { desired: DesiredStateView | null }) {
+/**
+ * What the fleet wants this host to run, and whether it is running it.
+ *
+ * The local-configuration line sits here rather than anywhere else because it is the caveat
+ * to "In sync": that chip only says the host applied the state we sent, and a host with local
+ * configuration applies it and then overrides part of it. Unlike the hosts list this
+ * distinguishes "reported none" from "never reported" — silence is not a denial, and an
+ * operator asking why a change had no effect deserves to be told which one they are seeing.
+ */
+function DesiredCard({ host, desired }: { host: HostDetail; desired: DesiredStateView | null }) {
+  const localConfig =
+    host.local_config_present === true ? (
+      <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 1 }}>
+        <LocalConfigChip host={host} />
+        <Typography variant="caption" color="text.secondary">
+          Local settings on the host take precedence over what is shown here.
+        </Typography>
+      </Stack>
+    ) : (
+      <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
+        {host.local_config_present === false
+          ? "No local configuration — this host is entirely fleet-managed."
+          : "Local configuration: not reported by this agent."}
+      </Typography>
+    );
+
   return (
     <Card variant="outlined" sx={{ height: "100%" }}>
       <CardContent>
@@ -161,7 +190,7 @@ function DesiredCard({ desired }: { desired: DesiredStateView | null }) {
           <Typography>Loading…</Typography>
         ) : (
           <>
-            <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+            <Stack direction="row" spacing={1} alignItems="center">
               {desired.in_sync ? (
                 <Chip label="In sync" color="success" size="small" />
               ) : (
@@ -171,6 +200,7 @@ function DesiredCard({ desired }: { desired: DesiredStateView | null }) {
                 desired hash <code>{desired.state_hash.slice(0, 12)}…</code>
               </Typography>
             </Stack>
+            <Box sx={{ mb: 2 }}>{localConfig}</Box>
             {desired.bundles.length === 0 ? (
               <Typography variant="body2" color="text.secondary">
                 No bundles apply to this host — it matches no group with assignments.

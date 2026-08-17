@@ -175,6 +175,24 @@ database becomes undecryptable. Store a copy outside the VM and outside its back
 | `TURNSTILE_SECRET`                                      | unset   | Cloudflare Turnstile siteverify secret |
 | `DAILY_EMAIL_BUDGET`                                    | `5000`  | Global cap; sends past it are dropped  |
 | `PLATFORM_ADMIN_EMAILS`                                 | unset   | Comma-separated. Grants the platform console — see below |
+| `HOST_LOST_AFTER_HOURS`                                 | `48`    | Silence after which a host reads **lost** — see below  |
+
+### Host status thresholds
+
+The hosts list carries one status per host, and two of its values are about silence:
+**offline** after three missed polls (floored at five minutes, derived from the tenant's
+tier), and **lost** after `HOST_LOST_AFTER_HOURS`. The split exists because the responses
+differ — offline is a reboot or a blip you wait out, lost is a machine to go and look at.
+
+Set it to whatever "this should have called home by now" means for your fleet: shorter for
+always-on servers, longer where laptops go away for a week. It is a reporting threshold
+only: crossing it revokes nothing, deletes nothing, and does not affect the agent, which
+reconnects and reports normally whenever it comes back. A value that is missing, zero,
+negative or unparseable falls back to 48 hours with a warning rather than failing startup.
+
+It is floored per tenant at that tenant's offline grace, so the two can never invert — a
+tenant whose `min_poll_interval_secs` is overridden to something very slow reaches lost and
+offline at the same moment rather than being called lost while polling on schedule.
 
 Whether self-service signup is open is **not** an environment variable: it is a switch in the
 platform console, so it can be closed without a redeploy. See [§14](#14-the-platform-console).
@@ -555,6 +573,14 @@ deadline", i.e. a tenant that has paid.
 Changes apply on the tenant's next request. Nothing caches a limit: `tier::effective` is
 consulted where each one is enforced. The exception is the per-tier agent rate-limiter
 buckets, which are sized per tier name and age out on their own.
+
+The host count carries a **local config** badge when some of the tenant's hosts report
+configuration of their own that outranks what the fleet sends them — those hosts are only
+partly centrally managed, so what an operator sees in the tenant's UI is not necessarily
+what is in force. Only hosts that have actually reported are counted; an agent too old to
+answer is left out rather than assumed either way. Which hosts they are is visible on the
+tenant's own Hosts page, and nothing about the local configuration itself ever reaches the
+server — see [agent-integration.md §2.1](agent-integration.md#21-local-configuration).
 
 A tenant past its trial deadline gets `402 Payment Required` on every `/api/*` call except
 `/api/me` and logout — clearing or extending the deadline here un-sticks them immediately,

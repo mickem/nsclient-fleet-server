@@ -102,6 +102,7 @@ async fn start() -> TestServer {
         magic_link_ttl_secs: 900,
         session_ttl_secs: 3600,
         bootstrap_ttl_secs: 3600,
+        host_lost_after_secs: 172_800,
         client_cert_lifetime_days: 90,
         cookie_secure: false,
         daily_email_budget: 1_000_000,

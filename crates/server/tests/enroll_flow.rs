@@ -59,6 +59,7 @@ async fn start() -> TestServer {
         magic_link_ttl_secs: 900,
         session_ttl_secs: 3600,
         bootstrap_ttl_secs: 3600,
+        host_lost_after_secs: 172_800,
         client_cert_lifetime_days: 90,
         cookie_secure: false,
         daily_email_budget: 1_000_000,
@@ -516,8 +517,9 @@ async fn host_status_separates_never_enrolled_from_awaiting() {
         "awaiting_enrollment"
     );
 
-    // A host that ran the command reads as enrolled (retried while the trust store catches
-    // up, as elsewhere in this file).
+    // A host that ran the command has enrolled, and the status moves on to describing what
+    // it is doing: it is in contact but has not reported applying anything yet (retried
+    // while the trust store catches up, as elsewhere in this file).
     let (enrolled_id, token) = create_host(&s).await;
     let mut enrolled = false;
     for _ in 0..20 {
@@ -531,7 +533,7 @@ async fn host_status_separates_never_enrolled_from_awaiting() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert!(enrolled, "enroll failed after retries");
-    assert_eq!(status_of(&s, enrolled_id).await, "enrolled");
+    assert_eq!(status_of(&s, enrolled_id).await, "out_of_sync");
 
     // Let the first host's token lapse. Nothing else about the row changes.
     sqlx::query("UPDATE hosts SET bootstrap_expires_at = ? WHERE id = ?")

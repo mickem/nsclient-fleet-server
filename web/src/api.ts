@@ -61,9 +61,18 @@ export type UserView = {
   blocked: boolean;
 };
 
-/** Derived server-side from `enrolled_at` + the bootstrap deadline. See `HostStatus` in
- *  `crates/core/src/host.rs` — `never_enrolled` is terminal, the row cannot be recovered. */
-export type HostStatus = "enrolled" | "awaiting_enrollment" | "never_enrolled";
+/** What a host is actually doing, in one field: enrollment, then liveness, then whether it
+ *  is running the configuration we want — worst-first, so a host that stopped calling home
+ *  reads `offline` rather than claiming the sync state of whatever it last reported. Derived
+ *  server-side; see `HostStatus` in `crates/core/src/host.rs`. `never_enrolled` is terminal,
+ *  the row cannot be recovered. */
+export type HostStatus =
+  | "in_sync"
+  | "out_of_sync"
+  | "offline"
+  | "lost"
+  | "awaiting_enrollment"
+  | "never_enrolled";
 
 export type HostView = {
   id: string;
@@ -74,6 +83,11 @@ export type HostView = {
   current_state_hash: string | null;
   status: HostStatus;
   bootstrap_expires_at: number | null;
+  /** Whether the host carries configuration of its own that outranks what the fleet sends.
+   *  `null` means the agent has never reported either way (a build older than the field) —
+   *  render that as unknown, never as "no". The agent sends only this fact; no local
+   *  configuration is ever uploaded. */
+  local_config_present: boolean | null;
   created_at: number;
 };
 
@@ -196,6 +210,9 @@ export type PlatformTenantView = {
   /** Counted the way the `max_hosts` check counts: enrolled, plus hosts still inside their
    *  24h bootstrap window. */
   host_count: number;
+  /** How many of those hosts report local configuration outranking the fleet's — how much
+   *  of this tenant is only partly centrally managed. */
+  local_config_host_count: number;
   created_at: number;
 };
 

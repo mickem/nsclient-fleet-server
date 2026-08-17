@@ -77,16 +77,28 @@ impl<'a> TenantRepo<'a> {
         Ok(row.map(map_tenant))
     }
 
-    /// Every tenant on the estate, with the two numbers the platform console ranks them by.
-    ///
+    /// Every tenant on the estate, with the numbers the platform console shows beside them.
+    pub async fn list_with_counts(&self) -> Result<Vec<TenantSummary>> {
+        self.summaries(None).await
+    }
+
+    /// One tenant, counted the same way as `list_with_counts` — so a console that has just
+    /// edited a subscription can render the result without the counts arriving as zeros.
+    pub async fn get_with_counts(&self, tenant_id: i64) -> Result<Option<TenantSummary>> {
+        Ok(self.summaries(Some(tenant_id)).await?.into_iter().next())
+    }
+
     /// The counts are correlated subqueries rather than a second round trip per tenant: the
     /// console lists the whole estate, and an N+1 there would grow with the customer base.
     ///
     /// `host_count` deliberately matches what the tier limit actually counts
     /// (`HostRepo::count_active`) — enrolled hosts plus pending ones from the last 24h — so
     /// the "42 / 50 hosts" the console shows is the same 42 that will refuse the 51st.
-    pub async fn list_with_counts(&self) -> Result<Vec<TenantSummary>> {
-        let rows = sqlx::query(
+    ///
+    /// `local_config_host_count` needs no such window: only a host that has enrolled and
+    /// reported can have the flag set at all, so counting the flag alone can never exceed it.
+    async fn summaries(&self, only_tenant: Option<i64>) -> Result<Vec<TenantSummary>> {
+        let sql = format!(
             "SELECT t.id, t.slug, t.name, t.tier, t.tier_overrides_json, t.trial_expires_at,
                     t.config_version, t.created_at,
                     (SELECT COUNT(*) FROM users u WHERE u.tenant_id = t.id)
@@ -98,13 +110,24 @@ impl<'a> TenantRepo<'a> {
                       WHERE h.tenant_id = t.id
                         AND (h.enrolled_at IS NOT NULL
                              OR (h.enrolled_at IS NULL AND h.created_at > ?)))
-                        AS host_count
+                        AS host_count,
+                    (SELECT COUNT(*) FROM hosts h
+                      WHERE h.tenant_id = t.id AND h.local_config_present = 1)
+                        AS local_config_host_count
              FROM tenants t
+             {}
              ORDER BY t.created_at DESC",
-        )
-        .bind(now_unix() - 86_400)
-        .fetch_all(&self.db.read)
-        .await?;
+            if only_tenant.is_some() {
+                "WHERE t.id = ?"
+            } else {
+                ""
+            }
+        );
+        let mut q = sqlx::query(&sql).bind(now_unix() - 86_400);
+        if let Some(id) = only_tenant {
+            q = q.bind(id);
+        }
+        let rows = q.fetch_all(&self.db.read).await?;
 
         Ok(rows
             .into_iter()
@@ -112,6 +135,7 @@ impl<'a> TenantRepo<'a> {
                 user_count: r.get("user_count"),
                 blocked_user_count: r.get("blocked_user_count"),
                 host_count: r.get("host_count"),
+                local_config_host_count: r.get("local_config_host_count"),
                 tenant: map_tenant(r),
             })
             .collect())
@@ -183,6 +207,9 @@ pub struct TenantSummary {
     pub user_count: i64,
     pub blocked_user_count: i64,
     pub host_count: i64,
+    /// Hosts that have reported configuration of their own outranking the fleet's — i.e.
+    /// how much of this tenant is only partly centrally managed.
+    pub local_config_host_count: i64,
 }
 
 fn map_tenant(r: sqlx::sqlite::SqliteRow) -> Tenant {
@@ -235,6 +262,7 @@ impl<'a> HostRepo<'a> {
             last_seen_at: None,
             current_state_hash: None,
             bootstrap_expires_at: None,
+            local_config_present: None,
             created_at: now,
         })
     }
@@ -242,7 +270,7 @@ impl<'a> HostRepo<'a> {
     pub async fn get(&self, tenant_id: i64, host_id: &str) -> Result<Option<Host>> {
         let row = sqlx::query(
             "SELECT id, tenant_id, hostname, os, enrolled_at, last_seen_at, current_state_hash,
-                    bootstrap_expires_at, created_at
+                    bootstrap_expires_at, local_config_present, created_at
              FROM hosts WHERE tenant_id = ? AND id = ?",
         )
         .bind(tenant_id)
@@ -256,7 +284,7 @@ impl<'a> HostRepo<'a> {
     pub async fn list(&self, tenant_id: i64) -> Result<Vec<Host>> {
         let rows = sqlx::query(
             "SELECT id, tenant_id, hostname, os, enrolled_at, last_seen_at, current_state_hash,
-                    bootstrap_expires_at, created_at
+                    bootstrap_expires_at, local_config_present, created_at
              FROM hosts WHERE tenant_id = ? ORDER BY created_at DESC",
         )
         .bind(tenant_id)
@@ -310,6 +338,7 @@ impl<'a> HostRepo<'a> {
             last_seen_at: None,
             current_state_hash: None,
             bootstrap_expires_at: Some(bootstrap_expires_at),
+            local_config_present: None,
             created_at: now,
         })
     }
@@ -382,6 +411,33 @@ impl<'a> HostRepo<'a> {
             .execute(&self.db.write)
             .await?;
         Ok(())
+    }
+
+    /// Record the agent's answer to "do you carry local configuration that outranks ours?".
+    ///
+    /// Returns true iff this *changed* the stored answer — including the first report on a
+    /// host that had none, since "unknown → no" is a real transition. The WHERE clause does
+    /// that comparison in the same statement rather than reading first: an agent sends this
+    /// on every state report, and the overwhelmingly common case is an unchanged value that
+    /// should not become a write on the single writer connection.
+    pub async fn set_local_config_present(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        present: bool,
+    ) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE hosts SET local_config_present = ?
+              WHERE tenant_id = ? AND id = ?
+                AND (local_config_present IS NULL OR local_config_present != ?)",
+        )
+        .bind(i64::from(present))
+        .bind(tenant_id)
+        .bind(host_id)
+        .bind(i64::from(present))
+        .execute(&self.db.write)
+        .await?;
+        Ok(res.rows_affected() > 0)
     }
 
     pub async fn update_current_state_hash(
@@ -1048,6 +1104,9 @@ fn map_host(r: sqlx::sqlite::SqliteRow) -> Host {
         last_seen_at: r.get("last_seen_at"),
         current_state_hash: r.get("current_state_hash"),
         bootstrap_expires_at: r.get("bootstrap_expires_at"),
+        local_config_present: r
+            .get::<Option<i64>, _>("local_config_present")
+            .map(|v| v != 0),
         created_at: r.get("created_at"),
     }
 }

@@ -312,7 +312,29 @@ function TenantRow({
           </Stack>
         </TableCell>
         <TableCell>
-          {tenant.host_count} / {fmtLimit(tenant.effective.max_hosts)}
+          <Stack direction="row" spacing={0.5} alignItems="center" useFlexGap flexWrap="wrap">
+            <span>
+              {tenant.host_count} / {fmtLimit(tenant.effective.max_hosts)}
+            </span>
+            {/* Only when there is something to say. A tenant whose hosts are all fully
+                fleet-managed — or whose agents predate the flag — shows a plain count. */}
+            {tenant.local_config_host_count > 0 && (
+              <Tooltip
+                title={
+                  `${tenant.local_config_host_count} of this tenant's hosts carry configuration of ` +
+                  "their own, which outranks anything the fleet sends them. Open the tenant's own " +
+                  "Hosts page to see which."
+                }
+              >
+                <Chip
+                  label={`${tenant.local_config_host_count} local config`}
+                  size="small"
+                  color="warning"
+                  variant="outlined"
+                />
+              </Tooltip>
+            )}
+          </Stack>
         </TableCell>
         <TableCell>
           {tenant.user_count}

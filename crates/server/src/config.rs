@@ -24,6 +24,11 @@ pub struct Config {
     pub magic_link_ttl_secs: i64,
     pub session_ttl_secs: i64,
     pub bootstrap_ttl_secs: i64,
+    /// Silence after which an enrolled host reads `lost` rather than `offline`, from
+    /// `HOST_LOST_AFTER_HOURS`. Purely a reporting threshold — nothing is disabled, revoked
+    /// or deleted when a host crosses it. Floored per tenant at the offline grace; see
+    /// [`fleet_core::host::StatusThresholds`].
+    pub host_lost_after_secs: i64,
     pub client_cert_lifetime_days: i64,
     pub cookie_secure: bool,
     pub daily_email_budget: u32,
@@ -157,6 +162,7 @@ impl Config {
             magic_link_ttl_secs: 900,
             session_ttl_secs: 604_800,
             bootstrap_ttl_secs: 3600,
+            host_lost_after_secs: host_lost_after_secs(),
             client_cert_lifetime_days: 90,
             cookie_secure: bool_env("COOKIE_SECURE", false),
             daily_email_budget: std::env::var("DAILY_EMAIL_BUDGET")
@@ -219,6 +225,38 @@ impl Config {
     }
 }
 
+/// `HOST_LOST_AFTER_HOURS` in seconds, or the default.
+///
+/// In hours because that is the unit the decision is made in — "a day", "a long weekend" —
+/// and nobody should have to multiply. A value that is missing, unparseable or non-positive
+/// falls back to the default with a warning rather than failing startup: this only decides
+/// which chip an operator sees, and refusing to boot over it would be out of proportion.
+/// Zero in particular is rejected because it would report the entire fleet lost.
+fn host_lost_after_secs() -> i64 {
+    parse_lost_after_hours(std::env::var("HOST_LOST_AFTER_HOURS").ok().as_deref())
+}
+
+/// Split from the env lookup so it can be tested without mutating process environment,
+/// which is shared by every test in the binary.
+fn parse_lost_after_hours(raw: Option<&str>) -> i64 {
+    let Some(raw) = raw else {
+        return fleet_core::host::DEFAULT_LOST_AFTER_SECS;
+    };
+    match raw.trim().parse::<i64>() {
+        // Capped so the multiplication cannot overflow on a nonsense value; a century of
+        // silence and two days are the same answer in practice.
+        Ok(hours) if hours > 0 => hours.min(24 * 365 * 100) * 3_600,
+        _ => {
+            tracing::warn!(
+                value = %raw,
+                default_hours = fleet_core::host::DEFAULT_LOST_AFTER_SECS / 3_600,
+                "HOST_LOST_AFTER_HOURS must be a positive whole number of hours; using the default"
+            );
+            fleet_core::host::DEFAULT_LOST_AFTER_SECS
+        }
+    }
+}
+
 /// A comma-separated env var as a list of lowercased, trimmed, non-empty entries.
 fn csv_env(key: &str) -> Vec<String> {
     std::env::var(key)
@@ -238,7 +276,37 @@ fn bool_env(key: &str, default: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::derive_agent_mtls_url;
+    use super::{derive_agent_mtls_url, parse_lost_after_hours};
+    use fleet_core::host::DEFAULT_LOST_AFTER_SECS;
+
+    #[test]
+    fn lost_after_hours_defaults_to_two_days() {
+        assert_eq!(DEFAULT_LOST_AFTER_SECS, 172_800);
+        assert_eq!(parse_lost_after_hours(None), DEFAULT_LOST_AFTER_SECS);
+    }
+
+    #[test]
+    fn lost_after_hours_is_read_in_hours() {
+        assert_eq!(parse_lost_after_hours(Some("48")), 172_800);
+        assert_eq!(parse_lost_after_hours(Some("4")), 14_400);
+        assert_eq!(parse_lost_after_hours(Some(" 12 ")), 43_200);
+    }
+
+    /// A bad value falls back rather than failing startup — this decides which chip an
+    /// operator sees, and refusing to boot over it would be out of proportion. Zero matters
+    /// most: taken literally it would report the entire fleet lost.
+    #[test]
+    fn a_nonsense_lost_after_hours_falls_back() {
+        for bad in ["0", "-1", "", "soon", "1.5", "48h"] {
+            assert_eq!(
+                parse_lost_after_hours(Some(bad)),
+                DEFAULT_LOST_AFTER_SECS,
+                "{bad:?} must not be taken literally"
+            );
+        }
+        // Absurd but positive: clamped rather than overflowed into something negative.
+        assert!(parse_lost_after_hours(Some("999999999999")) > 0);
+    }
 
     #[test]
     fn muxed_deployment_drops_the_implicit_443() {
