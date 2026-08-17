@@ -13,6 +13,12 @@ use fleet_core::user::Role;
 
 pub const SESSION_COOKIE: &str = "fleet_session";
 
+/// Short-lived, HttpOnly, SameSite=Strict cookie set when the magic-link confirmation page is
+/// rendered. Its value is echoed back in the confirmation form and compared server-side
+/// (double-submit), so completing sign-in requires a same-origin submit of *our* page rather
+/// than a cross-site request an attacker can forge. See `auth::handlers::exchange`.
+pub const EXCHANGE_COOKIE: &str = "fleet_exchange";
+
 #[derive(Clone, Debug)]
 pub struct AuthedUser {
     pub user_id: i64,

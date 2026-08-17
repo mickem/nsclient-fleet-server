@@ -311,11 +311,7 @@ async fn invite_creates_a_user_with_the_requested_role() {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap();
-    let r = invitee
-        .get(format!("{}/api/auth/exchange?t={}", s.base_url, token))
-        .send()
-        .await
-        .unwrap();
+    let r = complete_exchange(&invitee, &s.base_url, token).await;
     assert_eq!(r.status(), 303, "the invited user must be able to sign in");
 
     let code = status(
@@ -559,4 +555,26 @@ async fn a_tenant_cannot_lock_itself_out() {
         serde_json::json!("admin"),
         "the caller still manages users"
     );
+}
+
+/// Complete a magic-link sign-in the browser way: GET renders the confirmation page and sets
+/// the `fleet_exchange` double-submit cookie, then the form POST redeems the token. The
+/// client must carry a cookie store so the cookie is resent on the POST.
+async fn complete_exchange(c: &reqwest::Client, base_url: &str, token: &str) -> reqwest::Response {
+    let page = c
+        .get(format!("{base_url}/api/auth/exchange?t={token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page.status(), 200, "confirmation page must render on GET");
+    let html = page.text().await.unwrap();
+    let marker = "name=\"csrf\" value=\"";
+    let start = html.find(marker).expect("csrf field present") + marker.len();
+    let end = html[start..].find('"').expect("csrf value terminated");
+    let csrf = html[start..start + end].to_string();
+    c.post(format!("{base_url}/api/auth/exchange"))
+        .form(&[("t", token), ("csrf", csrf.as_str())])
+        .send()
+        .await
+        .unwrap()
 }

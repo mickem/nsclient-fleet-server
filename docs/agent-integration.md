@@ -222,7 +222,7 @@ startup before entering the loop.
 | `304` on desired-state | up to date | sleep `next_poll_in_seconds` + jitter |
 | `429` + `Retry-After` | pacing/budget exceeded | wait exactly `Retry-After`, resume normal cadence |
 | `403` on bundle download | bundle no longer in effective set | abandon cycle, re-poll |
-| `403` on heartbeat | certificate revoked | stop; operator intervention (re-enroll) |
+| `403` on any agent route | certificate revoked or the host was deleted | stop; operator intervention (re-enroll) |
 | TLS handshake failure | cert expired/revoked, or server cert rotated | if before expiry: retry with backoff; if expired: re-enroll |
 | `5xx` / network error | transient server trouble | exponential backoff with jitter, cap at ~5× poll interval; keep running last-applied config |
 

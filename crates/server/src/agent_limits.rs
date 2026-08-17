@@ -156,8 +156,8 @@ impl Default for AgentRateLimits {
     }
 }
 
-/// Middleware applied to the mTLS router. Resolves tier, runs per-host rate limit, and (for
-/// the desired-state route) the poll-interval floor.
+/// Middleware applied to the mTLS router. Resolves tier, enforces certificate revocation,
+/// runs per-host rate limit, and (for the desired-state route) the poll-interval floor.
 pub async fn tier_layer(State(state): State<AppState>, req: Request<Body>, next: Next) -> Response {
     let ctx = match req.extensions().get::<PeerHostContext>() {
         Some(c) => c.clone(),
@@ -166,6 +166,27 @@ pub async fn tier_layer(State(state): State<AppState>, req: Request<Body>, next:
             return (StatusCode::INTERNAL_SERVER_ERROR, "no peer context").into_response();
         }
     };
+
+    // Revocation is enforced here, once, so it covers every agent route rather than only
+    // heartbeat. A tenant's CA is shared by all its hosts, so removing one host cannot be
+    // reflected in the rustls trust store — the leaf still completes the handshake and yields
+    // a valid `PeerHostContext`. The serial check is what actually cuts a deleted or revoked
+    // host off: its `host_certs` rows are gone (deletion) or flagged (`revoked_at`), so
+    // `is_active` returns false and we refuse before any handler runs, including `renew`.
+    match fleet_storage::HostCertRepo::new(&state.db)
+        .is_active(&ctx.serial_hex)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!(host_id = %ctx.host_id, serial = %ctx.serial_hex, "agent cert revoked or unknown");
+            return (StatusCode::FORBIDDEN, "cert revoked or unknown").into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "is_active check failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+        }
+    }
 
     let tenant = match fleet_storage::TenantRepo::new(&state.db)
         .get(ctx.tenant_id)
