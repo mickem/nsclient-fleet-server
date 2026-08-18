@@ -226,12 +226,7 @@ async fn signup_and_login(s: &TestServer) {
         .await
         .unwrap();
 
-    let r = s
-        .cookie_jar
-        .get(format!("{}/api/auth/exchange?t={}", s.base_url, token))
-        .send()
-        .await
-        .unwrap();
+    let r = complete_exchange(&s.cookie_jar, &s.base_url, token).await;
     assert_eq!(r.status(), 303);
 }
 
@@ -358,4 +353,26 @@ async fn agent_alpn_without_a_client_cert_is_rejected() {
         res.is_err(),
         "a certificate-less client on the agent branch must not get a response: {res:?}"
     );
+}
+
+/// Complete a magic-link sign-in the browser way: GET renders the confirmation page and sets
+/// the `fleet_exchange` double-submit cookie, then the form POST redeems the token. The
+/// client must carry a cookie store so the cookie is resent on the POST.
+async fn complete_exchange(c: &reqwest::Client, base_url: &str, token: &str) -> reqwest::Response {
+    let page = c
+        .get(format!("{base_url}/api/auth/exchange?t={token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page.status(), 200, "confirmation page must render on GET");
+    let html = page.text().await.unwrap();
+    let marker = "name=\"csrf\" value=\"";
+    let start = html.find(marker).expect("csrf field present") + marker.len();
+    let end = html[start..].find('"').expect("csrf value terminated");
+    let csrf = html[start..start + end].to_string();
+    c.post(format!("{base_url}/api/auth/exchange"))
+        .form(&[("t", token), ("csrf", csrf.as_str())])
+        .send()
+        .await
+        .unwrap()
 }

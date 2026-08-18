@@ -170,7 +170,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/me", get(auth::handlers::me))
         .route("/api/auth/signup", post(auth::handlers::signup))
         .route("/api/auth/send-link", post(auth::handlers::send_link))
-        .route("/api/auth/exchange", get(auth::handlers::exchange))
+        .route(
+            "/api/auth/exchange",
+            get(auth::handlers::exchange).post(auth::handlers::exchange_confirm),
+        )
         .route("/api/auth/login", post(auth::handlers::on_prem_login))
         .route("/api/auth/logout", post(auth::handlers::logout))
         .route("/api/hosts", get(hosts::list).post(hosts::create))
@@ -286,18 +289,9 @@ async fn agent_heartbeat(
     State(state): State<AppState>,
     axum::Extension(ctx): axum::Extension<crate::mtls::PeerHostContext>,
 ) -> Response {
-    use fleet_storage::{HostCertRepo, HostRepo};
-
-    let cert_repo = HostCertRepo::new(&state.db);
-    match cert_repo.is_active(&ctx.serial_hex).await {
-        Ok(true) => {}
-        Ok(false) => return (StatusCode::FORBIDDEN, "cert revoked or unknown").into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, "is_active check failed");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
-        }
-    }
-    if let Err(e) = HostRepo::new(&state.db)
+    // Revocation is checked in `tier_layer`, which wraps every agent route including this one,
+    // so a cert that reaches here is already active. Heartbeat only refreshes liveness.
+    if let Err(e) = fleet_storage::HostRepo::new(&state.db)
         .touch_last_seen(ctx.tenant_id, &ctx.host_id)
         .await
     {

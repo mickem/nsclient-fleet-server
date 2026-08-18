@@ -169,11 +169,7 @@ async fn signup_login(s: &TestServer, slug: &str, email: &str) {
         .create(&hash, t.id, u.id, fleet_core::time::now_unix() + 600)
         .await
         .unwrap();
-    s.cookie_jar
-        .get(format!("{}/api/auth/exchange?t={}", s.base_url, token))
-        .send()
-        .await
-        .unwrap();
+    let _ = complete_exchange(&s.cookie_jar, &s.base_url, &token).await;
 }
 
 async fn enroll_a_host(s: &TestServer) -> fleet_agent_sim::EnrolledAgent {
@@ -593,4 +589,26 @@ async fn cache_speedup_profile() {
         cached / N as u32,
         uncached.as_secs_f64() / cached.as_secs_f64(),
     );
+}
+
+/// Complete a magic-link sign-in the browser way: GET renders the confirmation page and sets
+/// the `fleet_exchange` double-submit cookie, then the form POST redeems the token. The
+/// client must carry a cookie store so the cookie is resent on the POST.
+async fn complete_exchange(c: &reqwest::Client, base_url: &str, token: &str) -> reqwest::Response {
+    let page = c
+        .get(format!("{base_url}/api/auth/exchange?t={token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page.status(), 200, "confirmation page must render on GET");
+    let html = page.text().await.unwrap();
+    let marker = "name=\"csrf\" value=\"";
+    let start = html.find(marker).expect("csrf field present") + marker.len();
+    let end = html[start..].find('"').expect("csrf value terminated");
+    let csrf = html[start..start + end].to_string();
+    c.post(format!("{base_url}/api/auth/exchange"))
+        .form(&[("t", token), ("csrf", csrf.as_str())])
+        .send()
+        .await
+        .unwrap()
 }

@@ -171,12 +171,7 @@ async fn signup_and_login(s: &TestServer) {
         .await
         .unwrap();
 
-    let r = s
-        .cookie_jar
-        .get(format!("{}/api/auth/exchange?t={}", s.base_url, token))
-        .send()
-        .await
-        .unwrap();
+    let r = complete_exchange(&s.cookie_jar, &s.base_url, token).await;
     assert_eq!(r.status(), 303);
 }
 
@@ -373,9 +368,23 @@ async fn deleted_host_is_cut_off_and_gone() {
         .unwrap();
     assert_eq!(r.status(), 404);
 
-    // The live agent is cut off: its cert serial no longer resolves as active.
-    let hb = agent.heartbeat().await;
-    assert!(hb.is_err(), "deleted host's heartbeat must be rejected");
+    // The live agent is cut off on EVERY agent route, not just heartbeat: revocation is
+    // enforced once in the shared mTLS layer, so the cert serial no longer resolving as
+    // active refuses desired-state and renew the same way. Renew in particular must be
+    // refused — it is the endpoint that would otherwise mint a fresh, non-revoked cert.
+    assert!(
+        agent.heartbeat().await.is_err(),
+        "deleted host's heartbeat must be rejected"
+    );
+    assert!(
+        agent.fetch_desired_state(None).await.is_err(),
+        "deleted host must not fetch desired state"
+    );
+    let mut agent = agent;
+    assert!(
+        agent.renew().await.is_err(),
+        "deleted host must not renew itself back into a valid cert"
+    );
 
     // No orphans left behind.
     for table in ["host_tags", "host_overrides", "host_certs"] {
@@ -557,4 +566,26 @@ async fn host_status_separates_never_enrolled_from_awaiting() {
         .await
         .unwrap();
     assert_eq!(detail["status"], serde_json::json!("never_enrolled"));
+}
+
+/// Complete a magic-link sign-in the browser way: GET renders the confirmation page and sets
+/// the `fleet_exchange` double-submit cookie, then the form POST redeems the token. The
+/// client must carry a cookie store so the cookie is resent on the POST.
+async fn complete_exchange(c: &reqwest::Client, base_url: &str, token: &str) -> reqwest::Response {
+    let page = c
+        .get(format!("{base_url}/api/auth/exchange?t={token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page.status(), 200, "confirmation page must render on GET");
+    let html = page.text().await.unwrap();
+    let marker = "name=\"csrf\" value=\"";
+    let start = html.find(marker).expect("csrf field present") + marker.len();
+    let end = html[start..].find('"').expect("csrf value terminated");
+    let csrf = html[start..start + end].to_string();
+    c.post(format!("{base_url}/api/auth/exchange"))
+        .form(&[("t", token), ("csrf", csrf.as_str())])
+        .send()
+        .await
+        .unwrap()
 }
