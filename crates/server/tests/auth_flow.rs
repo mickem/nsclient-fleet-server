@@ -125,6 +125,35 @@ fn client() -> reqwest::Client {
         .unwrap()
 }
 
+/// Complete a magic-link sign-in the way a browser does: GET renders the confirmation page
+/// and sets the `fleet_exchange` double-submit cookie, then the form POST redeems the token.
+/// Returns the POST response (a 303 on success). The client must carry a cookie store so the
+/// cookie rides along.
+async fn complete_exchange(c: &reqwest::Client, base_url: &str, token: &str) -> reqwest::Response {
+    let page = c
+        .get(format!("{base_url}/api/auth/exchange?t={token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page.status(), 200, "confirmation page must render on GET");
+    let html = page.text().await.unwrap();
+    let csrf = extract_csrf(&html);
+    c.post(format!("{base_url}/api/auth/exchange"))
+        .form(&[("t", token), ("csrf", csrf.as_str())])
+        .send()
+        .await
+        .unwrap()
+}
+
+/// Pull the double-submit nonce out of the rendered confirmation form.
+fn extract_csrf(html: &str) -> String {
+    let marker = "name=\"csrf\" value=\"";
+    let start = html.find(marker).expect("csrf field present") + marker.len();
+    let rest = &html[start..];
+    let end = rest.find('"').expect("csrf value terminated");
+    rest[..end].to_string()
+}
+
 fn hash_token(token: &str) -> String {
     let mut h = Sha256::new();
     h.update(token.as_bytes());
@@ -207,11 +236,7 @@ async fn exchange_burns_link_sets_cookie_and_me_works() {
         .await
         .unwrap();
 
-    let res = c
-        .get(format!("{}/api/auth/exchange?t={}", s.base_url, token))
-        .send()
-        .await
-        .unwrap();
+    let res = complete_exchange(&c, &s.base_url, token).await;
     assert_eq!(res.status(), 303);
 
     let me = c
@@ -224,12 +249,8 @@ async fn exchange_burns_link_sets_cookie_and_me_works() {
     assert_eq!(body["email"], "alice@example.com");
     assert_eq!(body["tenant_slug"], "acme");
 
-    // Replay must fail
-    let replay = c
-        .get(format!("{}/api/auth/exchange?t={}", s.base_url, token))
-        .send()
-        .await
-        .unwrap();
+    // Replay must fail — the token is single-use, so a second confirmed exchange is rejected.
+    let replay = complete_exchange(&c, &s.base_url, token).await;
     assert_eq!(replay.status(), 401);
 
     // Logout
@@ -268,10 +289,64 @@ async fn exchange_expired_token_rejected() {
         .await
         .unwrap();
 
-    let res = c
+    let res = complete_exchange(&c, &s.base_url, token).await;
+    assert_eq!(res.status(), 401);
+}
+
+/// The confirm POST must not sign anyone in without the double-submit nonce that only the
+/// GET confirmation page hands out — this is what stops a cross-site page from completing
+/// sign-in with an attacker-supplied token in a victim's browser (login CSRF).
+#[tokio::test]
+async fn exchange_confirm_requires_the_double_submit_nonce() {
+    let s = start().await;
+
+    let tenants = TenantRepo::new(&s.db);
+    let users = UserRepo::new(&s.db);
+    let links = MagicLinkRepo::new(&s.db);
+    let t = tenants.create("acme", "Acme", "free", None).await.unwrap();
+    let u = users
+        .create(t.id, "alice@example.com", fleet_core::user::Role::Owner)
+        .await
+        .unwrap();
+    let token = "csrf-token-abcdefghij";
+    links
+        .create(
+            &hash_token(token),
+            t.id,
+            u.id,
+            fleet_core::time::now_unix() + 600,
+        )
+        .await
+        .unwrap();
+
+    // A POST with no confirmation cookie at all (the cross-site auto-submit case).
+    let attacker = client();
+    let forged = attacker
+        .post(format!("{}/api/auth/exchange", s.base_url))
+        .form(&[("t", token), ("csrf", "anything")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forged.status(), 403, "no cookie ⇒ no sign-in");
+
+    // A POST whose cookie and form nonce disagree is likewise refused. Establish a real
+    // confirmation cookie via GET, then submit a mismatched nonce.
+    let victim = client();
+    let page = victim
         .get(format!("{}/api/auth/exchange?t={}", s.base_url, token))
         .send()
         .await
         .unwrap();
-    assert_eq!(res.status(), 401);
+    assert_eq!(page.status(), 200);
+    let mismatched = victim
+        .post(format!("{}/api/auth/exchange", s.base_url))
+        .form(&[("t", token), ("csrf", "not-the-cookie-value")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mismatched.status(), 403, "mismatched nonce ⇒ no sign-in");
+
+    // The token was never redeemed by the rejected attempts, so a genuine sign-in still works.
+    let ok = complete_exchange(&victim, &s.base_url, token).await;
+    assert_eq!(ok.status(), 303);
 }
