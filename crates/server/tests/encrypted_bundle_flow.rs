@@ -279,7 +279,10 @@ async fn encrypted_bundle_end_to_end() {
     assert_eq!(bundle["format"], "enc-v1");
     assert_eq!(bundle["key_fingerprint"], key.fingerprint_hex().as_str());
     // The sha256 the server signs is over the ciphertext.
-    let ct_sha: String = Sha256::digest(&blob).iter().map(|b| format!("{b:02x}")).collect();
+    let ct_sha: String = Sha256::digest(&blob)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     assert_eq!(expected_sha, ct_sha);
 
     // 4. The server cannot read it: config extraction and compose-from refuse.
@@ -393,7 +396,14 @@ async fn encrypted_upload_validation() {
     signup_login(&s, "beta", "bob@example.com").await;
 
     // enc-v1 flag with bytes that are not an NSEB1 envelope.
-    let r = upload_bundle(&s, "x", "1", Some("enc-v1"), b"PK\x03\x04not-encrypted".to_vec()).await;
+    let r = upload_bundle(
+        &s,
+        "x",
+        "1",
+        Some("enc-v1"),
+        b"PK\x03\x04not-encrypted".to_vec(),
+    )
+    .await;
     assert_eq!(r.status(), 400, "{:?}", r.text().await);
 
     // Plain flag with bytes that carry the envelope magic — mislabeling is rejected both ways.

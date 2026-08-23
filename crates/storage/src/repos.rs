@@ -1246,12 +1246,11 @@ impl<'a> TenantBundleKeysRepo<'a> {
     }
 
     pub async fn get(&self, tenant_id: i64) -> Result<Option<String>> {
-        let fp: Option<String> = sqlx::query_scalar(
-            "SELECT fingerprint FROM tenant_bundle_keys WHERE tenant_id = ?",
-        )
-        .bind(tenant_id)
-        .fetch_optional(&self.db.read)
-        .await?;
+        let fp: Option<String> =
+            sqlx::query_scalar("SELECT fingerprint FROM tenant_bundle_keys WHERE tenant_id = ?")
+                .bind(tenant_id)
+                .fetch_optional(&self.db.read)
+                .await?;
         Ok(fp)
     }
 

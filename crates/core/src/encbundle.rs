@@ -119,7 +119,12 @@ impl BundleKey {
     }
 
     /// Decrypt a blob, authenticating the claimed `name`/`version` along with the content.
-    pub fn decrypt(&self, name: &str, version: &str, blob: &[u8]) -> Result<Vec<u8>, EncBundleError> {
+    pub fn decrypt(
+        &self,
+        name: &str,
+        version: &str,
+        blob: &[u8],
+    ) -> Result<Vec<u8>, EncBundleError> {
         let header = parse_header(blob)?;
         if header.fingerprint != self.fingerprint() {
             return Err(EncBundleError::WrongKey);

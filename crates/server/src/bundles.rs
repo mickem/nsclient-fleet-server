@@ -556,7 +556,9 @@ fn read_zip_entries(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
 pub async fn list(State(state): State<AppState>, who: AuthedUser) -> Response {
     let bundles = BundlesRepo::new(&state.db);
     match bundles.list(who.tenant_id).await {
-        Ok(rows) => Json(rows.into_iter().map(BundleView::from).collect::<Vec<_>>()).into_response(),
+        Ok(rows) => {
+            Json(rows.into_iter().map(BundleView::from).collect::<Vec<_>>()).into_response()
+        }
         Err(e) => {
             tracing::error!(error = %e, "bundles list failed");
             (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response()
@@ -746,10 +748,8 @@ pub async fn download(
                 "application/zip"
             };
             let mut resp = Response::new(Body::from(bytes));
-            resp.headers_mut().insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static(content_type),
-            );
+            resp.headers_mut()
+                .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
             resp
         }
         Err(e) => {
@@ -769,7 +769,10 @@ pub struct BundleKeyView {
 /// `GET /api/bundle-key` — the registered key fingerprint, so the UI can verify a pasted
 /// key before encrypting with it.
 pub async fn get_bundle_key(State(state): State<AppState>, who: AuthedUser) -> Response {
-    match TenantBundleKeysRepo::new(&state.db).get(who.tenant_id).await {
+    match TenantBundleKeysRepo::new(&state.db)
+        .get(who.tenant_id)
+        .await
+    {
         Ok(fingerprint) => Json(BundleKeyView { fingerprint }).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "bundle key get failed");
