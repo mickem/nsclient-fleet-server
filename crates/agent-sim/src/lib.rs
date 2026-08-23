@@ -29,6 +29,13 @@ pub struct EnrolledAgent {
     pub bundle_signing_pub_pem: String,
     pub mtls_url: String,
     pub mtls_server_cert_pem: String,
+    /// Bundle-encryption keys (base64), newest first — a real agent reads these from local
+    /// config, provisioned out-of-band; they never come from the server. Multiple entries
+    /// exist only mid-rotation.
+    pub bundle_encryption_keys: Vec<String>,
+    /// When set, refuse any bundle that is not an authenticated NSEB1 envelope — the
+    /// "cloud is untrusted" posture: bundle content must be produced by a key holder.
+    pub require_encrypted_bundles: bool,
 }
 
 /// Generate an Ed25519 keypair, build a CSR, post it to /enroll/v1, return the issued
@@ -74,6 +81,8 @@ pub async fn enroll(
         bundle_signing_pub_pem: parsed.bundle_signing_pub_pem,
         mtls_url: parsed.mtls_url,
         mtls_server_cert_pem: parsed.mtls_server_cert_pem,
+        bundle_encryption_keys: Vec::new(),
+        require_encrypted_bundles: false,
     })
 }
 
@@ -291,6 +300,40 @@ impl EnrolledAgent {
             .map_err(|e| anyhow!("signature verify failed: {e}"))?;
 
         Ok(bytes)
+    }
+
+    /// Second half of the apply path: turn verified bundle bytes into the usable zip.
+    ///
+    /// Detection is by the NSEB1 magic in the bytes, not by any server-declared format —
+    /// the magic is inside the blob the signature covered, so a lying server cannot make
+    /// an encrypted bundle look plain or vice versa without failing verification anyway.
+    /// `name`/`version` must be the identity the server advertised for this bundle; they
+    /// are bound into the AEAD, so decryption doubles as a substitution check.
+    pub fn open_bundle(&self, name: &str, version: &str, bytes: Vec<u8>) -> Result<Vec<u8>> {
+        use fleet_core::encbundle::{self, BundleKey, EncBundleError};
+
+        if !encbundle::is_encrypted(&bytes) {
+            if self.require_encrypted_bundles {
+                return Err(anyhow!(
+                    "bundle {name}@{version} is not encrypted but this agent requires encrypted bundles"
+                ));
+            }
+            return Ok(bytes);
+        }
+
+        let header = encbundle::parse_header(&bytes).map_err(|e| anyhow!("bad envelope: {e}"))?;
+        for key_b64 in &self.bundle_encryption_keys {
+            let key = BundleKey::from_b64(key_b64).map_err(|e| anyhow!("bad local key: {e}"))?;
+            match key.decrypt(name, version, &bytes) {
+                Ok(plain) => return Ok(plain),
+                Err(EncBundleError::WrongKey) => continue,
+                Err(e) => return Err(anyhow!("decrypt {name}@{version}: {e}")),
+            }
+        }
+        Err(anyhow!(
+            "no local key matches bundle {name}@{version} (fingerprint {})",
+            header.fingerprint_hex()
+        ))
     }
 
     /// Generate a fresh keypair, post a CSR to `/agent/v1/renew`, and atomically swap the

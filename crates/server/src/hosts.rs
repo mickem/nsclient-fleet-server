@@ -416,6 +416,7 @@ pub struct DesiredBundleView {
     pub version: String,
     pub sha256: String,
     pub priority: i64,
+    pub format: String,
 }
 
 /// Lineage view for the UI: which bundles the host *should* have, at what priority, and
@@ -461,6 +462,7 @@ pub async fn desired(
                 version: b.version,
                 sha256: b.sha256,
                 priority: b.priority,
+                format: b.format,
             })
             .collect(),
     })

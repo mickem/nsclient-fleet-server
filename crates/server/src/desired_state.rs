@@ -30,6 +30,8 @@ pub struct DesiredBundle {
     pub sha256: String,
     pub signature: String,
     pub priority: i64,
+    /// `plain` or `enc-v1` — forwarded to agents so they know to decrypt before unpacking.
+    pub format: String,
 }
 
 #[derive(Debug, Clone)]
@@ -269,6 +271,7 @@ pub async fn compute_uncached(
             sha256: b.sha256,
             signature: b.signature,
             priority,
+            format: b.format,
         })
         .collect();
 

@@ -27,6 +27,10 @@ pub struct BundleRef {
     pub url: String,
     pub signature: String,
     pub priority: i64,
+    /// `plain` or `enc-v1`. Advisory only — agents must trust the NSEB1 magic in the
+    /// downloaded bytes over this field (a lying server gains nothing either way, but the
+    /// magic is what is covered by the AEAD).
+    pub format: String,
 }
 
 #[derive(Serialize)]
@@ -98,6 +102,7 @@ pub async fn desired_state(
             signature: b.signature,
             priority: b.priority,
             url: format!("/agent/v1/bundles/{}", b.id),
+            format: b.format,
         })
         .collect();
 
