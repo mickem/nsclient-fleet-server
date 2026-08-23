@@ -211,7 +211,9 @@ pub async fn upload(
 /// Shared tail of every bundle-creating path: tier size check, sign with the tenant key,
 /// insert the row, store the bytes, bump config_version, audit. Returns the error as a
 /// ready-to-send Response so handlers stay thin.
-#[allow(clippy::too_many_arguments)]
+// result_large_err: the Err is a ready-to-send Response by design; one upload per call,
+// so the size is irrelevant next to the multipart body it follows.
+#[allow(clippy::too_many_arguments, clippy::result_large_err)]
 async fn persist_bundle(
     state: &AppState,
     who: &AuthedUser,
