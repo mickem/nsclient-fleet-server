@@ -104,6 +104,7 @@ export type DesiredBundleView = {
   version: string;
   sha256: string;
   priority: number;
+  format: BundleFormat;
 };
 
 export type DesiredStateView = {
@@ -137,6 +138,8 @@ export type GroupView = {
   created_at: number;
 };
 
+export type BundleFormat = "plain" | "enc-v1";
+
 export type BundleView = {
   id: string;
   name: string;
@@ -145,7 +148,14 @@ export type BundleView = {
   size_bytes: number;
   signature: string;
   uploaded_at: number;
+  /** `enc-v1` bundles are encrypted client-side; the server stores ciphertext it can
+   *  neither read nor edit, so the INI editor is unavailable for them. */
+  format: BundleFormat;
+  key_fingerprint: string | null;
 };
+
+/** The tenant's registered bundle-encryption-key fingerprint (never the key itself). */
+export type BundleKeyView = { fingerprint: string | null };
 
 export type BundleConfigView = {
   id: string;

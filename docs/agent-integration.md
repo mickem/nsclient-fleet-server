@@ -48,7 +48,7 @@ never hardcode a poll interval.
   "bundles": [
     { "id": "01J…", "name": "sql-monitoring", "version": "2.1.0",
       "sha256": "<hex>", "signature": "<base64>",
-      "url": "/agent/v1/bundles/01J…", "priority": 100 }
+      "url": "/agent/v1/bundles/01J…", "priority": 100, "format": "plain" }
   ]
 }
 ```
@@ -85,6 +85,58 @@ A `403` means the bundle is not in this host's effective set (the server recompu
 membership on every download) — treat it as "desired state changed under me": abandon
 this apply cycle and re-poll. A verification failure means the bundle must not be
 applied; record it in `errors` on the state report and keep running the previous config.
+
+### 1.2.1 Encrypted bundles (`format: "enc-v1"`)
+
+Bundles can be encrypted **client-side** by the operator before upload, with a key the
+server never holds. The server stores, signs, and serves the ciphertext opaquely — it can
+neither read such a bundle nor fabricate one that agents will accept, because AES-GCM
+authentication fails for anyone without the key. This is the mechanism that keeps a
+compromised control plane from reaching into agents through bundle content.
+
+Blob layout (`fleet_core::encbundle` and `web/src/crypto.ts` are the reference
+implementations — byte-identical constructions):
+
+```
+"NSEB1" (5 bytes) || key fingerprint (8) || nonce (12) || AES-256-GCM ciphertext + tag
+```
+
+- **Key**: 32 random bytes, base64 in configuration. Provisioned to the agent
+  out-of-band via its local config (alongside the enrollment token — never from the
+  server). Configure it as a *list*, newest first; multiple entries exist only
+  mid-rotation.
+- **Fingerprint**: first 8 bytes of SHA-256 over the raw key. Match it against your
+  configured keys to pick the right one — or to report "no key for this bundle" cleanly.
+- **AAD**: `name || 0x00 || version` (UTF-8), taken from the poll response. Decryption
+  therefore *authenticates the bundle's identity*: a server substituting one
+  validly-encrypted bundle for another fails the tag check.
+
+Agent procedure, after the §1.2 integrity + signature checks pass (both run over the
+ciphertext, unchanged):
+
+1. Detect by the **magic bytes**, not the `format` field — the magic is inside the
+   signed/authenticated blob; the field is advisory.
+2. Look up the key by fingerprint; decrypt with the poll-advertised `name`/`version` as
+   AAD. Any failure → treat exactly like a signature failure: do not apply, report in
+   `errors`, keep the previous config.
+3. The plaintext is an ordinary bundle zip — continue with §1.3.
+
+Two hardening options an agent should offer:
+
+- **`require_encrypted_bundles`** (local config, default off): refuse any bundle that is
+  not an authenticated NSEB1 envelope. With this set, bundle content — including scripts
+  the agent executes — can only originate from a key holder, so a compromised server
+  cannot push code to the host. Without it, encryption protects confidentiality only.
+  (The server-computed `merged_config_json` remains a server-controlled input even then;
+  it is currently always `{}`, and an agent in this posture should ignore it.)
+- **Downgrade refusal**: a compromised server can replay an *older* validly-encrypted
+  version of a bundle. Agents that remember the last-applied version per bundle name and
+  refuse downgrades close this; treat a forced rollback (a legitimate operation) as the
+  documented exception — it arrives as a *new* assignment, so an explicit
+  operator-driven downgrade still works by uploading a fresh version.
+
+Key loss is unrecoverable by design — there is no server-side escrow. Losing every copy
+of the key orphans the bundles encrypted under it; they must be re-uploaded.
 
 ### 1.3 Apply
 

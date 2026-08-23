@@ -14,8 +14,10 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use ed25519_dalek::pkcs8::DecodePrivateKey;
 use ed25519_dalek::{Signer, SigningKey};
+use fleet_core::encbundle;
 use fleet_storage::{
-    BundleAssignmentsRepo, BundlesRepo, GroupsRepo, TenantRepo, TenantSecretsRepo,
+    BundleAssignmentsRepo, BundlesRepo, GroupsRepo, TenantBundleKeysRepo, TenantRepo,
+    TenantSecretsRepo,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -84,12 +86,37 @@ pub struct BundleView {
     pub size_bytes: i64,
     pub signature: String,
     pub uploaded_at: i64,
+    /// `plain` or `enc-v1`. Encrypted bundles are client-side AES-256-GCM envelopes the
+    /// server cannot read or edit — see `fleet_core::encbundle`.
+    pub format: String,
+    pub key_fingerprint: Option<String>,
+}
+
+impl From<fleet_storage::BundleRow> for BundleView {
+    fn from(b: fleet_storage::BundleRow) -> Self {
+        Self {
+            id: b.id,
+            name: b.name,
+            version: b.version,
+            sha256: b.sha256,
+            size_bytes: b.size_bytes,
+            signature: b.signature,
+            uploaded_at: b.uploaded_at,
+            format: b.format,
+            key_fingerprint: b.key_fingerprint,
+        }
+    }
 }
 
 /// `POST /api/bundles` — multipart upload. Required parts:
 ///   - `name` (text)
 ///   - `version` (text)
 ///   - `bundle` (file: zip OR raw bytes; we don't unpack — opaque blob from server's view)
+///
+/// Optional:
+///   - `format` (text): `plain` (default) or `enc-v1` for a client-side encrypted NSEB1
+///     envelope. Encrypted uploads are validated structurally (magic + header) and their
+///     key fingerprint recorded; the server can neither read nor produce their contents.
 pub async fn upload(
     State(state): State<AppState>,
     who: AuthedUser,
@@ -100,12 +127,14 @@ pub async fn upload(
     }
     let mut name: Option<String> = None;
     let mut version: Option<String> = None;
+    let mut format: Option<String> = None;
     let mut bytes: Option<Vec<u8>> = None;
 
     while let Ok(Some(field)) = form.next_field().await {
         match field.name().unwrap_or("").to_string().as_str() {
             "name" => name = field.text().await.ok(),
             "version" => version = field.text().await.ok(),
+            "format" => format = field.text().await.ok(),
             "bundle" => {
                 bytes = field.bytes().await.ok().map(|b| b.to_vec());
             }
@@ -126,7 +155,54 @@ pub async fn upload(
         _ => return (StatusCode::BAD_REQUEST, "missing or empty bundle").into_response(),
     };
 
-    match persist_bundle(&state, &who, &name, &version, bytes, "bundle.uploaded").await {
+    let format = match format.as_deref().map(str::trim) {
+        None | Some("") | Some(encbundle::FORMAT_PLAIN) => encbundle::FORMAT_PLAIN,
+        Some(encbundle::FORMAT_ENC_V1) => encbundle::FORMAT_ENC_V1,
+        Some(other) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("unknown format '{other}' (expected 'plain' or 'enc-v1')"),
+            )
+                .into_response();
+        }
+    };
+
+    // Keep the declared format and the bytes unambiguous in both directions: agents treat
+    // the NSEB1 magic as authoritative, so a mislabeled blob must never be stored.
+    let key_fingerprint = if format == encbundle::FORMAT_ENC_V1 {
+        match encbundle::parse_header(&bytes) {
+            Ok(h) => Some(h.fingerprint_hex()),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("not a valid encrypted bundle: {e}"),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        if encbundle::is_encrypted(&bytes) {
+            return (
+                StatusCode::BAD_REQUEST,
+                "bundle carries the encrypted-bundle magic but format is 'plain' — upload with format=enc-v1",
+            )
+                .into_response();
+        }
+        None
+    };
+
+    match persist_bundle(
+        &state,
+        &who,
+        &name,
+        &version,
+        bytes,
+        format,
+        key_fingerprint.as_deref(),
+        "bundle.uploaded",
+    )
+    .await
+    {
         Ok(view) => Json(view).into_response(),
         Err(resp) => resp,
     }
@@ -135,12 +211,17 @@ pub async fn upload(
 /// Shared tail of every bundle-creating path: tier size check, sign with the tenant key,
 /// insert the row, store the bytes, bump config_version, audit. Returns the error as a
 /// ready-to-send Response so handlers stay thin.
+// result_large_err: the Err is a ready-to-send Response by design; one upload per call,
+// so the size is irrelevant next to the multipart body it follows.
+#[allow(clippy::too_many_arguments, clippy::result_large_err)]
 async fn persist_bundle(
     state: &AppState,
     who: &AuthedUser,
     name: &str,
     version: &str,
     bytes: Vec<u8>,
+    format: &str,
+    key_fingerprint: Option<&str>,
     audit_action: &str,
 ) -> std::result::Result<BundleView, Response> {
     let tenant = match TenantRepo::new(&state.db).get(who.tenant_id).await {
@@ -175,6 +256,8 @@ async fn persist_bundle(
             &sha,
             bytes.len() as i64,
             &signature_b64,
+            format,
+            key_fingerprint,
         )
         .await
     {
@@ -209,19 +292,12 @@ async fn persist_bundle(
             "version": row.version,
             "size_bytes": row.size_bytes,
             "sha256": row.sha256,
+            "format": row.format,
         })),
     )
     .await;
 
-    Ok(BundleView {
-        id: row.id,
-        name: row.name,
-        version: row.version,
-        sha256: row.sha256,
-        size_bytes: row.size_bytes,
-        signature: row.signature,
-        uploaded_at: row.uploaded_at,
-    })
+    Ok(row.into())
 }
 
 fn valid_bundle_token(s: &str) -> bool {
@@ -278,14 +354,21 @@ pub async fn compose(
     // Entries carried over from the base bundle (scripts and any other assets).
     let mut carried: Vec<(String, Vec<u8>)> = Vec::new();
     if let Some(base_id) = body.base_bundle_id.as_deref() {
-        if BundlesRepo::new(&state.db)
+        match BundlesRepo::new(&state.db)
             .get(who.tenant_id, base_id)
             .await
             .ok()
             .flatten()
-            .is_none()
         {
-            return (StatusCode::NOT_FOUND, "base bundle not found").into_response();
+            None => return (StatusCode::NOT_FOUND, "base bundle not found").into_response(),
+            Some(base) if base.format != encbundle::FORMAT_PLAIN => {
+                return (
+                    StatusCode::CONFLICT,
+                    "base bundle is encrypted — the server cannot read it; edit and re-encrypt client-side",
+                )
+                    .into_response();
+            }
+            Some(_) => {}
         }
         let base_bytes = match state.bundle_store.get(who.tenant_id, base_id).await {
             Ok(b) => b,
@@ -327,7 +410,18 @@ pub async fn compose(
         }
     };
 
-    match persist_bundle(&state, &who, name, version, bytes, "bundle.composed").await {
+    match persist_bundle(
+        &state,
+        &who,
+        name,
+        version,
+        bytes,
+        encbundle::FORMAT_PLAIN,
+        None,
+        "bundle.composed",
+    )
+    .await
+    {
         Ok(view) => (StatusCode::CREATED, Json(view)).into_response(),
         Err(resp) => resp,
     }
@@ -362,6 +456,13 @@ pub async fn get_config(
             return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
         }
     };
+    if row.format != encbundle::FORMAT_PLAIN {
+        return (
+            StatusCode::CONFLICT,
+            "bundle is encrypted — the server cannot read its contents",
+        )
+            .into_response();
+    }
     let bytes = match state.bundle_store.get(who.tenant_id, &bundle_id).await {
         Ok(b) => b,
         Err(e) => {
@@ -457,20 +558,9 @@ fn read_zip_entries(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
 pub async fn list(State(state): State<AppState>, who: AuthedUser) -> Response {
     let bundles = BundlesRepo::new(&state.db);
     match bundles.list(who.tenant_id).await {
-        Ok(rows) => Json(
-            rows.into_iter()
-                .map(|b| BundleView {
-                    id: b.id,
-                    name: b.name,
-                    version: b.version,
-                    sha256: b.sha256,
-                    size_bytes: b.size_bytes,
-                    signature: b.signature,
-                    uploaded_at: b.uploaded_at,
-                })
-                .collect::<Vec<_>>(),
-        )
-        .into_response(),
+        Ok(rows) => {
+            Json(rows.into_iter().map(BundleView::from).collect::<Vec<_>>()).into_response()
+        }
         Err(e) => {
             tracing::error!(error = %e, "bundles list failed");
             (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response()
@@ -654,11 +744,14 @@ pub async fn download(
 
     match state.bundle_store.get(ctx.tenant_id, &bundle_id).await {
         Ok(bytes) => {
+            let content_type = if encbundle::is_encrypted(&bytes) {
+                "application/octet-stream"
+            } else {
+                "application/zip"
+            };
             let mut resp = Response::new(Body::from(bytes));
-            resp.headers_mut().insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/zip"),
-            );
+            resp.headers_mut()
+                .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
             resp
         }
         Err(e) => {
@@ -666,6 +759,75 @@ pub async fn download(
             (StatusCode::NOT_FOUND, "bundle bytes missing").into_response()
         }
     }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct BundleKeyView {
+    /// Hex fingerprint (16 chars) of the tenant's current bundle-encryption key, or null
+    /// when none has been registered. Never the key itself — the server never sees that.
+    pub fingerprint: Option<String>,
+}
+
+/// `GET /api/bundle-key` — the registered key fingerprint, so the UI can verify a pasted
+/// key before encrypting with it.
+pub async fn get_bundle_key(State(state): State<AppState>, who: AuthedUser) -> Response {
+    match TenantBundleKeysRepo::new(&state.db)
+        .get(who.tenant_id)
+        .await
+    {
+        Ok(fingerprint) => Json(BundleKeyView { fingerprint }).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "bundle key get failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SetBundleKeyBody {
+    pub fingerprint: String,
+}
+
+/// `PUT /api/bundle-key` — register (or rotate to) a new key's fingerprint. The browser
+/// generates the key and sends only this; existing bundles keep the fingerprint they were
+/// encrypted under, which is how the UI can tell them apart after a rotation.
+pub async fn set_bundle_key(
+    State(state): State<AppState>,
+    who: AuthedUser,
+    Json(body): Json<SetBundleKeyBody>,
+) -> Response {
+    if !who.role.can_write_config() {
+        return crate::auth::forbidden("change configuration");
+    }
+    let fp = body.fingerprint.trim().to_ascii_lowercase();
+    if fp.len() != 16 || !fp.chars().all(|c| c.is_ascii_hexdigit()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "fingerprint must be 16 hex characters",
+        )
+            .into_response();
+    }
+    if let Err(e) = TenantBundleKeysRepo::new(&state.db)
+        .set(who.tenant_id, &fp, Some(who.user_id))
+        .await
+    {
+        tracing::error!(error = %e, "bundle key set failed");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+    }
+    crate::audit::record(
+        &state,
+        who.tenant_id,
+        Some(who.user_id),
+        "bundle_key.set",
+        "tenant",
+        &who.tenant_id.to_string(),
+        Some(&serde_json::json!({ "fingerprint": fp })),
+    )
+    .await;
+    Json(BundleKeyView {
+        fingerprint: Some(fp),
+    })
+    .into_response()
 }
 
 async fn sign_with_tenant_key(state: &AppState, tenant_id: i64, payload: &[u8]) -> Result<String> {

@@ -138,6 +138,14 @@ Set in `/etc/nsclient-fleet/env`. Every variable except `MASTER_KEY` has a worki
 **`MASTER_KEY` is not recoverable.** Lose it and every tenant CA and host override in the
 database becomes undecryptable. Store a copy outside the VM and outside its backups.
 
+**Bundle-encryption keys are not the server's.** Tenants can upload *encrypted bundles*
+(secrets sealed in the browser, AES-256-GCM, `enc-v1`). Those keys live only in the
+operator's password manager and in agents' local configuration — the server stores just a
+fingerprint. This is deliberate: a compromised server can neither read nor forge encrypted
+bundle content. It also means the server operator cannot help a tenant who loses their
+key; the bundles encrypted under it are gone and must be re-uploaded. Nothing about
+`MASTER_KEY`, backups, or restore procedures touches these keys.
+
 ### Listeners
 
 | Variable       | Default          | Notes                                                        |

@@ -219,6 +219,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/bundles", get(bundles::list))
         .route("/api/bundles", post(bundles::upload))
+        .route(
+            "/api/bundle-key",
+            get(bundles::get_bundle_key).put(bundles::set_bundle_key),
+        )
         .route("/api/bundles/compose", post(bundles::compose))
         .route("/api/bundles/:id/config", get(bundles::get_config))
         .route("/api/audit", get(audit::list))

@@ -732,6 +732,10 @@ pub struct BundleRow {
     pub size_bytes: i64,
     pub signature: String,
     pub uploaded_at: i64,
+    /// 'plain' or 'enc-v1' (see `fleet_core::encbundle`).
+    pub format: String,
+    /// Hex fingerprint of the client-held encryption key; `None` for plain bundles.
+    pub key_fingerprint: Option<String>,
 }
 
 pub struct BundlesRepo<'a> {
@@ -752,13 +756,15 @@ impl<'a> BundlesRepo<'a> {
         sha256: &str,
         size_bytes: i64,
         signature: &str,
+        format: &str,
+        key_fingerprint: Option<&str>,
     ) -> Result<BundleRow> {
         use ulid::Ulid;
         let id = Ulid::new().to_string();
         let now = now_unix();
         sqlx::query(
-            "INSERT INTO bundles (id, tenant_id, name, version, sha256, size_bytes, signature, uploaded_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO bundles (id, tenant_id, name, version, sha256, size_bytes, signature, uploaded_at, format, key_fingerprint)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(tenant_id)
@@ -768,6 +774,8 @@ impl<'a> BundlesRepo<'a> {
         .bind(size_bytes)
         .bind(signature)
         .bind(now)
+        .bind(format)
+        .bind(key_fingerprint)
         .execute(&self.db.write)
         .await?;
         Ok(BundleRow {
@@ -779,12 +787,14 @@ impl<'a> BundlesRepo<'a> {
             size_bytes,
             signature: signature.to_owned(),
             uploaded_at: now,
+            format: format.to_owned(),
+            key_fingerprint: key_fingerprint.map(str::to_owned),
         })
     }
 
     pub async fn get(&self, tenant_id: i64, id: &str) -> Result<Option<BundleRow>> {
         let row = sqlx::query(
-            "SELECT id, tenant_id, name, version, sha256, size_bytes, signature, uploaded_at
+            "SELECT id, tenant_id, name, version, sha256, size_bytes, signature, uploaded_at, format, key_fingerprint
              FROM bundles WHERE tenant_id = ? AND id = ?",
         )
         .bind(tenant_id)
@@ -796,7 +806,7 @@ impl<'a> BundlesRepo<'a> {
 
     pub async fn list(&self, tenant_id: i64) -> Result<Vec<BundleRow>> {
         let rows = sqlx::query(
-            "SELECT id, tenant_id, name, version, sha256, size_bytes, signature, uploaded_at
+            "SELECT id, tenant_id, name, version, sha256, size_bytes, signature, uploaded_at, format, key_fingerprint
              FROM bundles WHERE tenant_id = ? ORDER BY uploaded_at DESC",
         )
         .bind(tenant_id)
@@ -816,6 +826,8 @@ fn map_bundle(r: sqlx::sqlite::SqliteRow) -> BundleRow {
         size_bytes: r.get("size_bytes"),
         signature: r.get("signature"),
         uploaded_at: r.get("uploaded_at"),
+        format: r.get("format"),
+        key_fingerprint: r.get("key_fingerprint"),
     }
 }
 
@@ -874,7 +886,7 @@ impl<'a> BundleAssignmentsRepo<'a> {
         }
         let placeholders = group_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
-            "SELECT b.id, b.tenant_id, b.name, b.version, b.sha256, b.size_bytes, b.signature, b.uploaded_at, ba.priority
+            "SELECT b.id, b.tenant_id, b.name, b.version, b.sha256, b.size_bytes, b.signature, b.uploaded_at, b.format, b.key_fingerprint, ba.priority
              FROM bundle_assignments ba
              INNER JOIN bundles b ON b.id = ba.bundle_id
              WHERE ba.tenant_id = ? AND ba.group_id IN ({placeholders})"
@@ -901,6 +913,8 @@ fn map_bundle_partial(r: &sqlx::sqlite::SqliteRow) -> BundleRow {
         size_bytes: r.get("size_bytes"),
         signature: r.get("signature"),
         uploaded_at: r.get("uploaded_at"),
+        format: r.get("format"),
+        key_fingerprint: r.get("key_fingerprint"),
     }
 }
 
@@ -1216,6 +1230,51 @@ impl<'a> TenantSecretsRepo<'a> {
                 r.get::<String, _>("tenant_slug"),
             )
         }))
+    }
+}
+
+/// The tenant's bundle-encryption-key *fingerprint*. The key itself is client-side only
+/// (operator password manager + agents); the server keeps just enough to tell the UI and
+/// agents which key a bundle was encrypted with.
+pub struct TenantBundleKeysRepo<'a> {
+    db: &'a Db,
+}
+
+impl<'a> TenantBundleKeysRepo<'a> {
+    pub fn new(db: &'a Db) -> Self {
+        Self { db }
+    }
+
+    pub async fn get(&self, tenant_id: i64) -> Result<Option<String>> {
+        let fp: Option<String> =
+            sqlx::query_scalar("SELECT fingerprint FROM tenant_bundle_keys WHERE tenant_id = ?")
+                .bind(tenant_id)
+                .fetch_optional(&self.db.read)
+                .await?;
+        Ok(fp)
+    }
+
+    pub async fn set(
+        &self,
+        tenant_id: i64,
+        fingerprint: &str,
+        created_by_user: Option<i64>,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO tenant_bundle_keys (tenant_id, fingerprint, created_at, created_by_user)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(tenant_id) DO UPDATE SET
+               fingerprint = excluded.fingerprint,
+               created_at = excluded.created_at,
+               created_by_user = excluded.created_by_user",
+        )
+        .bind(tenant_id)
+        .bind(fingerprint)
+        .bind(now_unix())
+        .bind(created_by_user)
+        .execute(&self.db.write)
+        .await?;
+        Ok(())
     }
 }
 

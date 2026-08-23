@@ -139,7 +139,8 @@ Responses:
       "sha256": "<hex digest of the bundle bytes>",
       "signature": "<base64 Ed25519 signature>",
       "url": "/agent/v1/bundles/<id>",
-      "priority": 10
+      "priority": 10,
+      "format": "plain"
     }
   ]
 }
@@ -170,11 +171,20 @@ For each entry in `bundles` (process in ascending `priority` order):
 3. **Verify authenticity**: `signature` is a base64 Ed25519 signature **over
    the 32-byte SHA-256 digest** (not over the raw bytes), verified with
    `bundle_signing_pub_pem` obtained at enrollment.
-4. Only then unpack (bundles are zip archives) and apply the contents.
+4. **Decrypt if sealed**: bytes starting with the `NSEB1` magic are a
+   client-side-encrypted envelope (`format: "enc-v1"`); decrypt with the
+   locally-configured bundle key, using the advertised `name`/`version` as
+   AAD. Detect by the magic, not the `format` field. Full format, key
+   provisioning, and the `require_encrypted_bundles` hardening flag:
+   `agent-integration.md` §1.2.1; reference implementations in
+   `fleet_core::encbundle` and `EnrolledAgent::open_bundle` in
+   `crates/agent-sim`.
+5. Only then unpack (bundles are zip archives) and apply the contents.
 
-Reject and report (via `errors` in the state report) on any mismatch — never
-apply an unverified bundle. Cache verified bundles by `(id, sha256)` so an
-unchanged bundle in a new desired state is not re-downloaded.
+Reject and report (via `errors` in the state report) on any mismatch or
+decrypt failure — never apply an unverified bundle. Cache verified bundles by
+`(id, sha256)` so an unchanged bundle in a new desired state is not
+re-downloaded.
 
 ## 5. State report
 
