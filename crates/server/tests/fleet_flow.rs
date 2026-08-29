@@ -564,8 +564,8 @@ async fn fifty_agents_converge_on_assigned_bundle() {
             .collect::<Vec<_>>()
     };
 
-    // An hour: past a few poll intervals, well short of a day.
-    age_fleet(3_600).await;
+    // Thirty hours: past the day-long offline grace, well short of the 48h lost threshold.
+    age_fleet(30 * 3_600).await;
     assert!(
         statuses().await.iter().all(|st| st == "offline"),
         "a host that stopped calling home must read offline, not out of sync"

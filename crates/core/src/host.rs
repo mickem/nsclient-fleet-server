@@ -50,9 +50,10 @@ pub enum HostStatus {
     /// Created and never enrolled; the token has expired. This row is unusable: delete it
     /// and add the host again to get a fresh install command.
     NeverEnrolled,
-    /// Enrolled, but nothing has been heard from it for several poll intervals. Whatever it
-    /// is running, it is not picking up changes. Often a reboot, a maintenance window or a
-    /// brief network problem — it may well come back on its own.
+    /// Enrolled, but nothing has been heard from it for a day — see
+    /// [`DEFAULT_OFFLINE_AFTER_SECS`]. Whatever it is running, it is not picking up changes.
+    /// Often a machine powered off, in a maintenance window, or away from the network — it
+    /// may well come back on its own.
     Offline,
     /// Silent past the deployment's `HOST_LOST_AFTER_HOURS` (48h by default): beyond the
     /// point where waiting is a plan. Something has to have happened to it — the service
@@ -88,10 +89,9 @@ impl HostStatus {
 /// How long a host may stay quiet before its silence means something, in the two sizes an
 /// operator reacts to differently.
 ///
-/// The offline grace is derived from the tenant's effective poll interval, because that is
-/// what makes a missed poll meaningful: three of them mean one thing at 30 seconds and quite
-/// another at an hour. The lost threshold is deployment configuration instead — see
-/// [`StatusThresholds::new`].
+/// Both are measured in days rather than poll intervals, because that is the scale the
+/// answer is acted on: a day of silence is the first thing worth reporting, and two days is
+/// where waiting stops being a plan. See [`StatusThresholds::new`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatusThresholds {
     /// Silence past this reads `Offline`.
@@ -99,6 +99,13 @@ pub struct StatusThresholds {
     /// Silence past this reads `Lost`. Always at least `offline_after_secs`.
     pub lost_after_secs: i64,
 }
+
+/// Silence after which a host reads [`HostStatus::Offline`]: one day.
+///
+/// A missed poll or two is not something an operator acts on — agents reboot, laptops close,
+/// networks blip — and a threshold measured in minutes only turns the list amber for things
+/// that fix themselves. What is worth reporting is a machine that has not checked in today.
+pub const DEFAULT_OFFLINE_AFTER_SECS: i64 = 24 * 3_600;
 
 /// Default silence after which a host reads [`HostStatus::Lost`]: two days.
 ///
@@ -112,25 +119,24 @@ impl StatusThresholds {
     /// Build the thresholds for a tenant polling every `min_poll_interval_secs`, with
     /// `lost_after_secs` from the deployment's configuration.
     ///
-    /// Offline after three missed polls, so a single dropped request — or the ±10% jitter
-    /// agents apply — does not turn a fleet amber, with a five-minute floor: at the fast
-    /// tiers three polls is 45 seconds and the list would flicker on any brief blip. The
-    /// multiplier still earns its place at the other end, where a tenant whose
-    /// `min_poll_interval_secs` is overridden upward gets proportional grace instead of
-    /// being reported offline permanently.
+    /// Offline after a day ([`DEFAULT_OFFLINE_AFTER_SECS`]), which is what every shipped
+    /// tier gets: they poll every 15–60 seconds, so three of those never come close to the
+    /// floor. The multiplier still earns its place at the other end, where a tenant whose
+    /// `min_poll_interval_secs` is overridden past eight hours gets proportional grace
+    /// instead of being reported offline while polling on schedule.
     ///
     /// The lost threshold is a human one rather than a protocol one — "we have not heard
     /// from that machine since Tuesday" is the same statement whatever the poll cadence — so
     /// it is configured, not derived. It is floored at the offline grace regardless of what
     /// was configured, because the two inverting would report a host lost while it was still
-    /// polling on schedule. Where the floor bites, `Offline` is never shown and silence goes
+    /// polling on schedule; a `HOST_LOST_AFTER_HOURS` below 24 is therefore clamped up to the
+    /// offline grace, and such a deployment never shows `Offline` at all. Where the floor bites, `Offline` is never shown and silence goes
     /// straight to `Lost`: at a cadence that slow, anything less is not yet evidence.
     pub fn new(min_poll_interval_secs: u32, lost_after_secs: i64) -> Self {
         const MISSED_POLLS: i64 = 3;
-        const OFFLINE_FLOOR_SECS: i64 = 300;
 
         let offline_after_secs =
-            (i64::from(min_poll_interval_secs) * MISSED_POLLS).max(OFFLINE_FLOOR_SECS);
+            (i64::from(min_poll_interval_secs) * MISSED_POLLS).max(DEFAULT_OFFLINE_AFTER_SECS);
         Self {
             offline_after_secs,
             lost_after_secs: lost_after_secs.max(offline_after_secs),
@@ -352,11 +358,16 @@ mod tests {
     fn offline_grace_has_a_floor_and_scales_with_slow_polling() {
         let offline =
             |interval| StatusThresholds::new(interval, DEFAULT_LOST_AFTER_SECS).offline_after_secs;
-        // Every shipped tier polls fast enough that the floor decides.
-        assert_eq!(offline(15), 300);
-        assert_eq!(offline(60), 300);
-        // A tenant with an overridden, much slower interval gets proportional grace.
-        assert_eq!(offline(3600), 10_800);
+        // Every shipped tier polls fast enough that the day-long floor decides.
+        assert_eq!(offline(15), 86_400);
+        assert_eq!(offline(60), 86_400);
+        assert_eq!(
+            offline(3600),
+            86_400,
+            "three hourly polls is still inside the day"
+        );
+        // Only past eight hours does the multiplier overtake the floor.
+        assert_eq!(offline(36_000), 108_000);
     }
 
     /// The lost threshold is whatever the deployment configured, except where that would
@@ -370,9 +381,14 @@ mod tests {
             "two days by default"
         );
         assert_eq!(
+            StatusThresholds::new(60, 96 * 3_600).lost_after_secs,
+            345_600,
+            "a looser deployment is honoured"
+        );
+        assert_eq!(
             StatusThresholds::new(60, 4 * 3_600).lost_after_secs,
-            14_400,
-            "a tighter deployment is honoured"
+            DEFAULT_OFFLINE_AFTER_SECS,
+            "a deployment tighter than the offline grace is clamped up, never inverted"
         );
 
         // Whatever is configured, and however slowly the tenant polls, the order holds.
