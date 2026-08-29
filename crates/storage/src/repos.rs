@@ -413,6 +413,32 @@ impl<'a> HostRepo<'a> {
         Ok(())
     }
 
+    /// Refresh `last_seen_at`, but only once it is older than `stale_after_secs`.
+    ///
+    /// For the paths that run on *every* request from every host, where an unconditional
+    /// write would put a row update per host per poll on the write connection. The row is
+    /// left alone while the stored value is still fresh — the condition lives in the
+    /// statement so this stays one round trip that dirties no page when it matches nothing.
+    pub async fn touch_last_seen_if_stale(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        stale_after_secs: i64,
+    ) -> Result<()> {
+        let now = now_unix();
+        sqlx::query(
+            "UPDATE hosts SET last_seen_at = ?
+             WHERE tenant_id = ? AND id = ? AND (last_seen_at IS NULL OR last_seen_at <= ?)",
+        )
+        .bind(now)
+        .bind(tenant_id)
+        .bind(host_id)
+        .bind(now - stale_after_secs)
+        .execute(&self.db.write)
+        .await?;
+        Ok(())
+    }
+
     /// Record the agent's answer to "do you carry local configuration that outranks ours?".
     ///
     /// Returns true iff this *changed* the stored answer — including the first report on a
