@@ -537,6 +537,32 @@ impl<'a> HostTagsRepo<'a> {
             .collect())
     }
 
+    /// Every tag in the tenant, as `(host_id, key, value, source)`. One query for the host
+    /// list, instead of one per row.
+    pub async fn list_for_tenant(
+        &self,
+        tenant_id: i64,
+    ) -> Result<Vec<(String, String, String, String)>> {
+        let rows = sqlx::query(
+            "SELECT host_id, key, value, source FROM host_tags
+             WHERE tenant_id = ? ORDER BY host_id, key",
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.db.read)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                (
+                    r.get::<String, _>("host_id"),
+                    r.get::<String, _>("key"),
+                    r.get::<String, _>("value"),
+                    r.get::<String, _>("source"),
+                )
+            })
+            .collect())
+    }
+
     pub async fn upsert_manual_tag(
         &self,
         tenant_id: i64,

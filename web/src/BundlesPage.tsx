@@ -11,6 +11,7 @@ import {
   Checkbox,
   Chip,
   FormControlLabel,
+  IconButton,
   Stack,
   Table,
   TableBody,
@@ -23,6 +24,7 @@ import {
   Typography,
 } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
+import DownloadIcon from "@mui/icons-material/Download";
 import EditIcon from "@mui/icons-material/Edit";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import LockIcon from "@mui/icons-material/Lock";
@@ -48,7 +50,7 @@ import {
 import { BundleEditor } from "./BundleEditor";
 import { RefreshButton } from "./RefreshButton";
 
-type EditorState = null | { editBundleId: string | null };
+type EditorState = null | { bundle: BundleView | null };
 
 /** Registered-key state plus whether this browser session holds the matching key. */
 function useBundleKey() {
@@ -108,12 +110,43 @@ function EncryptionKeyCard({
     try {
       const fp = await keyFingerprintHex(pasted);
       if (fp !== fingerprint) {
-        onError(`That key's fingerprint (${fp}) does not match the registered one (${fingerprint}).`);
+        onError(
+          `That key's fingerprint (${fp}) does not match the registered one (${fingerprint}). ` +
+            'To switch this tenant to the pasted key, use "Register pasted key" instead.',
+        );
         return;
       }
       rememberKey(pasted.trim());
       setPasted("");
       setUnlocked(true);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  /** Register a pasted, already-deployed key as the tenant key — the "my agents already
+   *  have a key" path, where generating a fresh one would be exactly wrong. The server
+   *  only ever learns the fingerprint. */
+  const registerPasted = async () => {
+    try {
+      const key = pasted.trim();
+      const fp = await keyFingerprintHex(key);
+      if (
+        fingerprint !== null &&
+        fp !== fingerprint &&
+        !window.confirm(
+          `Replace the registered key (${fingerprint}) with the pasted one (${fp})? New ` +
+            "encrypted bundles will be sealed with the pasted key. Existing encrypted bundles " +
+            "keep the key they were sealed with — agents need both until those are " +
+            "re-encrypted and re-uploaded.",
+        )
+      )
+        return;
+      await apiSend<BundleKeyView>("PUT", "/api/bundle-key", { fingerprint: fp });
+      rememberKey(key);
+      setPasted("");
+      setUnlocked(true);
+      await sync();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
     }
@@ -137,9 +170,11 @@ function EncryptionKeyCard({
       <AccordionDetails>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
           Encrypted bundles are sealed in your browser with this key before upload; the server
-          stores only the ciphertext and the key fingerprint. Give the key to your agents via
-          their local configuration. <strong>It cannot be recovered</strong> — anything
-          encrypted with a lost key is gone.
+          stores only the ciphertext and the key fingerprint. Generate a fresh key, or paste
+          the one your agents already carry to keep working with a deployed fleet. Give the
+          key to your agents via their local configuration.{" "}
+          <strong>It cannot be recovered</strong> — anything encrypted with a lost key is
+          gone.
         </Typography>
         {freshKey && (
           <Alert severity="warning" sx={{ mb: 2 }} onClose={() => setFreshKey(null)}>
@@ -163,18 +198,39 @@ function EncryptionKeyCard({
               Fingerprint: <code>{fingerprint}</code>
             </Typography>
           )}
-          {fingerprint && !unlocked && (
+          {!unlocked && (
             <>
               <TextField
                 size="small"
-                label="paste key to unlock"
+                label={fingerprint ? "paste key to unlock" : "paste existing key"}
                 type="password"
                 value={pasted}
                 onChange={(e) => setPasted(e.target.value)}
               />
-              <Button variant="outlined" onClick={unlock} disabled={!pasted.trim()}>
-                Unlock
-              </Button>
+              {fingerprint && (
+                <Button variant="outlined" onClick={unlock} disabled={!pasted.trim()}>
+                  Unlock
+                </Button>
+              )}
+              <Tooltip
+                title={
+                  fingerprint
+                    ? "Make the pasted key this tenant's bundle key instead of the " +
+                      "registered one — for switching to a key your agents already carry."
+                    : "Register a key your agents already carry, instead of generating a " +
+                      "new one."
+                }
+              >
+                <span>
+                  <Button
+                    variant={fingerprint ? "text" : "outlined"}
+                    onClick={registerPasted}
+                    disabled={!pasted.trim()}
+                  >
+                    {fingerprint ? "Register pasted key" : "Use existing key"}
+                  </Button>
+                </span>
+              </Tooltip>
             </>
           )}
           {fingerprint && unlocked && (
@@ -263,7 +319,7 @@ export function BundlesPage({ me }: { me: Me }) {
             <Button
               variant="contained"
               startIcon={<AddIcon />}
-              onClick={() => setEditor({ editBundleId: null })}
+              onClick={() => setEditor({ bundle: null })}
             >
               New bundle
             </Button>
@@ -284,7 +340,9 @@ export function BundlesPage({ me }: { me: Me }) {
 
       {editor && (
         <BundleEditor
-          editBundleId={editor.editBundleId}
+          key={editor.bundle?.id ?? "new"}
+          editBundle={editor.bundle}
+          keyState={keyState}
           onSaved={() => {
             setEditor(null);
             refresh();
@@ -343,9 +401,33 @@ export function BundlesPage({ me }: { me: Me }) {
                     </Typography>
                   </TableCell>
                   <TableCell align="right">
+                    <Tooltip
+                      title={
+                        b.format === "enc-v1"
+                          ? "Download the sealed bundle (ciphertext)"
+                          : "Download the bundle zip"
+                      }
+                    >
+                      <IconButton
+                        size="small"
+                        component="a"
+                        href={`/api/bundles/${b.id}/download`}
+                      >
+                        <DownloadIcon fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
                     {canWriteConfig(me.role) &&
-                      (b.format === "enc-v1" ? (
-                        <Tooltip title="The server cannot read encrypted bundles — edit locally, re-encrypt, and upload a new version.">
+                      (b.format === "enc-v1" &&
+                      !(keyState.unlocked && b.key_fingerprint === keyState.fingerprint) ? (
+                        <Tooltip
+                          title={
+                            !keyState.unlocked
+                              ? "Unlock the encryption key (below) to open this bundle in " +
+                                "your browser — the server cannot read it."
+                              : "This bundle is sealed with a different key than the one " +
+                                "registered, so it cannot be opened here."
+                          }
+                        >
                           <span>
                             <Button size="small" startIcon={<EditIcon />} disabled>
                               Edit
@@ -356,7 +438,7 @@ export function BundlesPage({ me }: { me: Me }) {
                         <Button
                           size="small"
                           startIcon={<EditIcon />}
-                          onClick={() => setEditor({ editBundleId: b.id })}
+                          onClick={() => setEditor({ bundle: b })}
                         >
                           Edit
                         </Button>

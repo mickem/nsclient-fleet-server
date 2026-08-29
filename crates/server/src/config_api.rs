@@ -414,7 +414,7 @@ async fn host_belongs_to(state: &AppState, tenant_id: i64, host_id: &str) -> boo
         .unwrap_or(false)
 }
 
-async fn bump_config_version(state: &AppState, tenant_id: i64) {
+pub(crate) async fn bump_config_version(state: &AppState, tenant_id: i64) {
     if let Err(e) = TenantRepo::new(&state.db)
         .bump_config_version(tenant_id)
         .await

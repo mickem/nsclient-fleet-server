@@ -435,3 +435,95 @@ async fn encrypted_upload_validation() {
     assert_eq!(v["format"], "plain");
     assert!(v["key_fingerprint"].is_null());
 }
+
+/// The operator-facing download endpoint that backs in-browser editing. The flow for an
+/// encrypted bundle is download → decrypt → edit → re-encrypt → upload as a new version;
+/// the first leg must return the stored bytes verbatim or nothing ever decrypts.
+#[tokio::test]
+async fn operator_download_round_trip() {
+    let s = start().await;
+    signup_login(&s, "gamma", "carol@example.com").await;
+
+    let key = BundleKey::generate();
+    let r = s
+        .cookie_jar
+        .put(format!("{}/api/bundle-key", s.base_url))
+        .json(&serde_json::json!({ "fingerprint": key.fingerprint_hex() }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let plain_zip = b"PK\x03\x04-pretend-zip".to_vec();
+    let blob = key.encrypt("sealed", "1.0.0", &plain_zip);
+    let r = upload_bundle(&s, "sealed", "1.0.0", Some("enc-v1"), blob.clone()).await;
+    assert_eq!(r.status(), 200, "upload: {:?}", r.text().await);
+    let bundle: serde_json::Value = r.json().await.unwrap();
+    let enc_id = bundle["id"].as_str().unwrap().to_string();
+
+    // Encrypted: bytes come back verbatim, marked as an opaque attachment.
+    let r = s
+        .cookie_jar
+        .get(format!("{}/api/bundles/{enc_id}/download", s.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(
+        r.headers()[reqwest::header::CONTENT_TYPE],
+        "application/octet-stream"
+    );
+    assert!(r.headers()[reqwest::header::CONTENT_DISPOSITION]
+        .to_str()
+        .unwrap()
+        .contains("sealed-1.0.0.nseb"));
+    let body = r.bytes().await.unwrap().to_vec();
+    assert_eq!(
+        body, blob,
+        "download must be the stored ciphertext, byte for byte"
+    );
+    let opened = key.decrypt("sealed", "1.0.0", &body).unwrap();
+    assert_eq!(opened, plain_zip, "tenant key must open the download");
+
+    // The browser's edit loop tail: re-encrypt under the new version and upload.
+    let blob2 = key.encrypt("sealed", "1.0.1", b"PK\x03\x04-edited-zip");
+    let r = upload_bundle(&s, "sealed", "1.0.1", Some("enc-v1"), blob2).await;
+    assert_eq!(r.status(), 200, "re-upload: {:?}", r.text().await);
+
+    // Plain: downloads as a zip.
+    let plain_bytes = b"PK\x03\x04plain".to_vec();
+    let r = upload_bundle(&s, "open", "1.0.0", None, plain_bytes.clone()).await;
+    assert_eq!(r.status(), 200);
+    let plain_id = r.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r = s
+        .cookie_jar
+        .get(format!("{}/api/bundles/{plain_id}/download", s.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(
+        r.headers()[reqwest::header::CONTENT_TYPE],
+        "application/zip"
+    );
+    assert!(r.headers()[reqwest::header::CONTENT_DISPOSITION]
+        .to_str()
+        .unwrap()
+        .contains("open-1.0.0.zip"));
+    assert_eq!(r.bytes().await.unwrap().to_vec(), plain_bytes);
+
+    // Unknown id → 404.
+    let r = s
+        .cookie_jar
+        .get(format!(
+            "{}/api/bundles/no-such-bundle/download",
+            s.base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+}
