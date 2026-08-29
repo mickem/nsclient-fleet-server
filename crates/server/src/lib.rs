@@ -177,6 +177,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/login", post(auth::handlers::on_prem_login))
         .route("/api/auth/logout", post(auth::handlers::logout))
         .route("/api/hosts", get(hosts::list).post(hosts::create))
+        .route("/api/hosts/bulk-delete", post(hosts::bulk_delete))
+        .route("/api/hosts/bulk-tags", post(hosts::bulk_tags))
         .route(
             "/api/hosts/:id",
             get(hosts::detail).delete(hosts::delete_host),
@@ -225,6 +227,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/bundles/compose", post(bundles::compose))
         .route("/api/bundles/:id/config", get(bundles::get_config))
+        .route("/api/bundles/:id/download", get(bundles::ui_download))
         .route("/api/audit", get(audit::list))
         .route("/api/keys", get(api_keys::list).post(api_keys::create))
         .route("/api/keys/:id", axum::routing::delete(api_keys::delete_key))

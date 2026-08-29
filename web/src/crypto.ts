@@ -54,6 +54,44 @@ export async function encryptBundle(
   return out;
 }
 
+/** Decrypt an `enc-v1` bundle back to the zip it seals. `name`/`version` must be the ones
+ *  it was encrypted under (they are bound into the authentication as AAD) — for an edit,
+ *  that is the bundle's *current* identity, not the version being written. */
+export async function decryptBundle(
+  keyB64: string,
+  name: string,
+  version: string,
+  sealed: Uint8Array<ArrayBuffer>,
+): Promise<Uint8Array<ArrayBuffer>> {
+  const raw = fromB64(keyB64.trim());
+  if (raw.length !== 32) throw new Error(`key must be 32 bytes base64 (got ${raw.length})`);
+  const headerLen = MAGIC.length + FINGERPRINT_LEN + NONCE_LEN;
+  if (sealed.length < headerLen + 16 || !MAGIC.every((b, i) => sealed[i] === b)) {
+    throw new Error("not an encrypted bundle (NSEB1 header missing)");
+  }
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", raw));
+  const wantFp = toHex(sealed.slice(MAGIC.length, MAGIC.length + FINGERPRINT_LEN));
+  const haveFp = toHex(digest.slice(0, FINGERPRINT_LEN));
+  if (wantFp !== haveFp) {
+    throw new Error(
+      `this bundle was sealed with a different key (its fingerprint ${wantFp}, yours ${haveFp})`,
+    );
+  }
+  const nonce = sealed.slice(MAGIC.length + FINGERPRINT_LEN, headerLen);
+  const key = await crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["decrypt"]);
+  try {
+    return new Uint8Array(
+      await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: nonce, additionalData: aadFor(name, version) },
+        key,
+        sealed.slice(headerLen),
+      ),
+    );
+  } catch {
+    throw new Error("decryption failed — wrong key, or the bundle was tampered with");
+  }
+}
+
 function aadFor(name: string, version: string): Uint8Array<ArrayBuffer> {
   const enc = new TextEncoder();
   const n = enc.encode(name);

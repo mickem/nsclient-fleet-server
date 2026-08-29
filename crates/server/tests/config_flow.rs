@@ -534,6 +534,161 @@ async fn compose_edit_next_version_preserves_scripts() {
     assert_eq!(r.status(), 400);
 }
 
+#[tokio::test]
+async fn bulk_tags_and_bulk_delete() {
+    let s = start().await;
+    signup_login(&s, "delta", "dave@example.com").await;
+
+    // Three pending hosts — enrollment is not needed to exercise the bulk plumbing.
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let r = s
+            .cookie_jar
+            .post(format!("{}/api/hosts", s.base_url))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        let body: serde_json::Value = r.json().await.unwrap();
+        ids.push(body["host_id"].as_str().unwrap().to_string());
+    }
+    let config_version = || async {
+        sqlx::query_scalar::<_, i64>("SELECT config_version FROM tenants WHERE slug = 'delta'")
+            .fetch_one(&s.db.read)
+            .await
+            .unwrap()
+    };
+    let v_before = config_version().await;
+
+    // 1. Tag two hosts, with an unknown id mixed in: applied to the real ones, the ghost
+    //    reported rather than failing the request.
+    let r = s
+        .cookie_jar
+        .post(format!("{}/api/hosts/bulk-tags", s.base_url))
+        .json(&serde_json::json!({
+            "host_ids": [ids[0], ids[1], "no-such-host"],
+            "set": [{"key": "env", "value": "prod"}],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(body["updated"], 2);
+    assert_eq!(body["not_found"], serde_json::json!(["no-such-host"]));
+    let v_after = config_version().await;
+    assert!(v_after > v_before, "bulk tag set must bump config_version");
+
+    // 2. The host list carries the tags (the UI filters on them).
+    let hosts: serde_json::Value = s
+        .cookie_jar
+        .get(format!("{}/api/hosts", s.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let tagged: Vec<&str> = hosts
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|h| {
+            h["tags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["key"] == "env" && t["value"] == "prod" && t["source"] == "manual")
+        })
+        .map(|h| h["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(tagged.len(), 2);
+    assert!(tagged.contains(&ids[0].as_str()) && tagged.contains(&ids[1].as_str()));
+
+    // 3. Remove the tag from one of them.
+    let r = s
+        .cookie_jar
+        .post(format!("{}/api/hosts/bulk-tags", s.base_url))
+        .json(&serde_json::json!({ "host_ids": [ids[0]], "remove": ["env"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(body["updated"], 1);
+    let hosts: serde_json::Value = s
+        .cookie_jar
+        .get(format!("{}/api/hosts", s.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let still_tagged: Vec<&str> = hosts
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|h| !h["tags"].as_array().unwrap().is_empty())
+        .map(|h| h["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(still_tagged, vec![ids[1].as_str()]);
+
+    // 4. Degenerate bodies are rejected.
+    for body in [
+        serde_json::json!({ "host_ids": [ids[0]] }), // nothing to set or remove
+        serde_json::json!({ "host_ids": [], "remove": ["env"] }), // no hosts
+        serde_json::json!({ "host_ids": [ids[0]], "set": [{"key": "", "value": "x"}] }),
+    ] {
+        let r = s
+            .cookie_jar
+            .post(format!("{}/api/hosts/bulk-tags", s.base_url))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400, "body {body} must be rejected");
+    }
+
+    // 5. Bulk delete: duplicate and unknown ids alongside real ones — each real host is
+    //    deleted exactly once and audited, the ghost is reported.
+    let r = s
+        .cookie_jar
+        .post(format!("{}/api/hosts/bulk-delete", s.base_url))
+        .json(&serde_json::json!({ "host_ids": [ids[0], ids[0], ids[1], "gone"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(body["updated"], 2);
+    assert_eq!(body["not_found"], serde_json::json!(["gone"]));
+
+    let hosts: serde_json::Value = s
+        .cookie_jar
+        .get(format!("{}/api/hosts", s.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let remaining: Vec<&str> = hosts
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(remaining, vec![ids[2].as_str()]);
+
+    let audited: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'host.deleted'")
+            .fetch_one(&s.db.read)
+            .await
+            .unwrap();
+    assert_eq!(audited, 2, "one audit record per deleted host");
+}
+
 /// Complete a magic-link sign-in the browser way: GET renders the confirmation page and sets
 /// the `fleet_exchange` double-submit cookie, then the form POST redeems the token. The
 /// client must carry a cookie store so the cookie is resent on the POST.

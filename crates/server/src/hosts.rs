@@ -157,6 +157,10 @@ pub struct HostView {
     /// the honest answer there is that we do not know.
     pub local_config_present: Option<bool>,
     pub created_at: i64,
+    /// All of the host's tags, manual and agent-reported alike. Carried on the list view —
+    /// not just the detail — so the hosts page can filter and bulk-select by tag without a
+    /// request per row.
+    pub tags: Vec<TagView>,
 }
 
 fn host_view(
@@ -164,6 +168,7 @@ fn host_view(
     now: i64,
     thresholds: fleet_core::host::StatusThresholds,
     desired_state_hash: Option<&str>,
+    tags: Vec<TagView>,
 ) -> HostView {
     let status = h.status(now, thresholds, desired_state_hash);
     HostView {
@@ -177,6 +182,7 @@ fn host_view(
         bootstrap_expires_at: h.bootstrap_expires_at,
         local_config_present: h.local_config_present,
         created_at: h.created_at,
+        tags,
     }
 }
 
@@ -218,6 +224,27 @@ pub async fn list(State(state): State<AppState>, who: AuthedUser) -> Response {
         }
     };
 
+    let mut tags_by_host: std::collections::HashMap<String, Vec<TagView>> =
+        match HostTagsRepo::new(&state.db)
+            .list_for_tenant(who.tenant_id)
+            .await
+        {
+            Ok(rows) => {
+                let mut m: std::collections::HashMap<String, Vec<TagView>> =
+                    std::collections::HashMap::new();
+                for (host_id, key, value, source) in rows {
+                    m.entry(host_id)
+                        .or_default()
+                        .push(TagView { key, value, source });
+                }
+                m
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "tags list failed");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+            }
+        };
+
     let now = now_unix();
     let mut views = Vec::with_capacity(hosts.len());
     for host in hosts {
@@ -243,7 +270,8 @@ pub async fn list(State(state): State<AppState>, who: AuthedUser) -> Response {
         } else {
             None
         };
-        views.push(host_view(host, now, thresholds, desired.as_deref()));
+        let tags = tags_by_host.remove(&host.id).unwrap_or_default();
+        views.push(host_view(host, now, thresholds, desired.as_deref(), tags));
     }
     Json(views).into_response()
 }
@@ -264,7 +292,6 @@ pub struct OverrideMeta {
 pub struct HostDetail {
     #[serde(flatten)]
     pub host: HostView,
-    pub tags: Vec<TagView>,
     /// Present iff a host override exists. The patch itself is never returned (it can
     /// contain secrets); only its priority.
     pub override_meta: Option<OverrideMeta>,
@@ -315,12 +342,12 @@ pub async fn detail(
         }
     };
 
+    let tags = tags
+        .into_iter()
+        .map(|(key, value, source)| TagView { key, value, source })
+        .collect();
     Json(HostDetail {
-        host: host_view(host, now_unix(), thresholds, desired_hash.as_deref()),
-        tags: tags
-            .into_iter()
-            .map(|(key, value, source)| TagView { key, value, source })
-            .collect(),
+        host: host_view(host, now_unix(), thresholds, desired_hash.as_deref(), tags),
         override_meta,
     })
     .into_response()
@@ -407,6 +434,209 @@ pub async fn delete_host(
             (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response()
         }
     }
+}
+
+/// How many hosts one bulk request may touch. High enough that "select all" on any fleet the
+/// tiers allow fits in one request; low enough that a runaway client cannot queue unbounded
+/// work behind a single POST.
+const BULK_MAX_HOSTS: usize = 1000;
+
+#[derive(Deserialize)]
+pub struct BulkDeleteBody {
+    pub host_ids: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct BulkResult {
+    pub updated: usize,
+    /// IDs that did not match a host in this tenant. Reported rather than failing the whole
+    /// request: the likely cause is a host deleted from another tab since the list loaded,
+    /// and the operator's intent for the remaining hosts is not in doubt.
+    pub not_found: Vec<String>,
+}
+
+/// Checks and side effects intentionally identical to [`delete_host`], once per row: each
+/// deletion invalidates its cache entry and writes its own audit record, so the audit trail
+/// of a bulk delete reads the same as ten single ones.
+pub async fn bulk_delete(
+    State(state): State<AppState>,
+    who: AuthedUser,
+    Json(body): Json<BulkDeleteBody>,
+) -> Response {
+    if !who.role.can_write_config() {
+        return crate::auth::forbidden("change configuration");
+    }
+    let host_ids = match validate_bulk_ids(body.host_ids) {
+        Ok(ids) => ids,
+        Err(resp) => return resp,
+    };
+
+    let repo = HostRepo::new(&state.db);
+    let mut deleted = 0usize;
+    let mut not_found = Vec::new();
+    for host_id in host_ids {
+        let host = match repo.get(who.tenant_id, &host_id).await {
+            Ok(Some(h)) => h,
+            Ok(None) => {
+                not_found.push(host_id);
+                continue;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "host get failed");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+            }
+        };
+        match repo.delete(who.tenant_id, &host_id).await {
+            Ok(true) => {
+                state
+                    .desired_state_cache
+                    .invalidate_host(who.tenant_id, &host_id);
+                crate::audit::record(
+                    &state,
+                    who.tenant_id,
+                    Some(who.user_id),
+                    "host.deleted",
+                    "host",
+                    &host_id,
+                    Some(&serde_json::json!({
+                        "hostname": host.hostname,
+                        "enrolled": host.enrolled_at.is_some(),
+                    })),
+                )
+                .await;
+                deleted += 1;
+            }
+            Ok(false) => not_found.push(host_id),
+            Err(e) => {
+                tracing::error!(error = %e, "host delete failed");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+            }
+        }
+    }
+    Json(BulkResult {
+        updated: deleted,
+        not_found,
+    })
+    .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct TagSet {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Deserialize)]
+pub struct BulkTagsBody {
+    pub host_ids: Vec<String>,
+    /// Manual tags to upsert on every host.
+    #[serde(default)]
+    pub set: Vec<TagSet>,
+    /// Manual tag keys to delete from every host. A key a host does not carry is simply not
+    /// there afterwards — that is not an error the operator can act on.
+    #[serde(default)]
+    pub remove: Vec<String>,
+}
+
+/// Set and/or remove manual tags on many hosts at once. Same semantics as
+/// [`crate::config_api::put_tag`] / `delete_tag` per (host, key), but the tenant's
+/// config_version is bumped once at the end — one rollout, not one per host.
+pub async fn bulk_tags(
+    State(state): State<AppState>,
+    who: AuthedUser,
+    Json(body): Json<BulkTagsBody>,
+) -> Response {
+    if !who.role.can_write_config() {
+        return crate::auth::forbidden("change configuration");
+    }
+    let host_ids = match validate_bulk_ids(body.host_ids) {
+        Ok(ids) => ids,
+        Err(resp) => return resp,
+    };
+    if body.set.is_empty() && body.remove.is_empty() {
+        return (StatusCode::BAD_REQUEST, "nothing to set or remove").into_response();
+    }
+    for key in body
+        .set
+        .iter()
+        .map(|t| t.key.as_str())
+        .chain(body.remove.iter().map(String::as_str))
+    {
+        if key.trim().is_empty() || key.len() > 128 {
+            return (StatusCode::BAD_REQUEST, "invalid key").into_response();
+        }
+    }
+
+    let hosts_repo = HostRepo::new(&state.db);
+    let tags_repo = HostTagsRepo::new(&state.db);
+    let mut updated = 0usize;
+    let mut not_found = Vec::new();
+    let mut changed = false;
+    for host_id in host_ids {
+        match hosts_repo.get(who.tenant_id, &host_id).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                not_found.push(host_id);
+                continue;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "host get failed");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+            }
+        }
+        for tag in &body.set {
+            match tags_repo
+                .upsert_manual_tag(who.tenant_id, &host_id, &tag.key, &tag.value)
+                .await
+            {
+                Ok(c) => changed |= c,
+                Err(e) => {
+                    tracing::error!(error = %e, "tag upsert failed");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+                }
+            }
+        }
+        for key in &body.remove {
+            match tags_repo
+                .delete_manual_tag(who.tenant_id, &host_id, key)
+                .await
+            {
+                Ok(c) => changed |= c,
+                Err(e) => {
+                    tracing::error!(error = %e, "tag delete failed");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+                }
+            }
+        }
+        updated += 1;
+    }
+    if changed {
+        crate::config_api::bump_config_version(&state, who.tenant_id).await;
+    }
+    Json(BulkResult { updated, not_found }).into_response()
+}
+
+/// Shared body validation for the bulk endpoints: deduplicated (an id sent twice must not
+/// delete-then-report-missing), non-empty, and capped at [`BULK_MAX_HOSTS`].
+// A Response Err is large, but this is called once per request — not worth a Box.
+#[allow(clippy::result_large_err)]
+fn validate_bulk_ids(host_ids: Vec<String>) -> Result<Vec<String>, Response> {
+    let mut seen = std::collections::HashSet::new();
+    let ids: Vec<String> = host_ids
+        .into_iter()
+        .filter(|id| seen.insert(id.clone()))
+        .collect();
+    if ids.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "host_ids is empty").into_response());
+    }
+    if ids.len() > BULK_MAX_HOSTS {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("too many hosts (max {BULK_MAX_HOSTS})"),
+        )
+            .into_response());
+    }
+    Ok(ids)
 }
 
 #[derive(Serialize)]

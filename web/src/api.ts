@@ -89,14 +89,20 @@ export type HostView = {
    *  configuration is ever uploaded. */
   local_config_present: boolean | null;
   created_at: number;
+  /** All tags, manual and agent-reported. Present on the list view too, so the hosts page
+   *  can filter and bulk-select by tag without a request per row. */
+  tags: TagView[];
 };
 
 export type TagView = { key: string; value: string; source: "manual" | "agent" };
 
 export type HostDetail = HostView & {
-  tags: TagView[];
   override_meta: { priority: number } | null;
 };
+
+/** Response of the bulk host endpoints. `not_found` lists ids that no longer exist (deleted
+ *  from another tab since the list loaded); the rest were processed. */
+export type BulkResult = { updated: number; not_found: string[] };
 
 export type DesiredBundleView = {
   id: string;
@@ -277,6 +283,21 @@ async function handle<T>(r: Response): Promise<T> {
 
 export function apiGet<T>(path: string): Promise<T> {
   return fetch(path, { credentials: "include" }).then((r) => handle<T>(r));
+}
+
+/** Like `apiGet`, but for binary responses (bundle bytes). */
+export async function apiGetBytes(path: string): Promise<Uint8Array<ArrayBuffer>> {
+  const r = await fetch(path, { credentials: "include" });
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`;
+    try {
+      msg = (await r.text()) || msg;
+    } catch {
+      /* keep default */
+    }
+    throw new ApiError(r.status, msg);
+  }
+  return new Uint8Array(await r.arrayBuffer());
 }
 
 export function apiSend<T>(method: string, path: string, body?: unknown): Promise<T> {
