@@ -169,6 +169,8 @@ export type BundleConfigView = {
   version: string;
   config_json: Record<string, unknown>;
   scripts: string[];
+  /** Template id recorded in bundle.toml when created from a UI template, else null. */
+  template: string | null;
 };
 
 export type AssignmentView = {

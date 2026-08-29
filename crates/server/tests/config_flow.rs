@@ -535,6 +535,110 @@ async fn compose_edit_next_version_preserves_scripts() {
 }
 
 #[tokio::test]
+async fn compose_records_template_and_round_trips_it() {
+    let s = start().await;
+    signup_login(&s, "templater", "templater@example.com").await;
+
+    // 1. Compose from a UI template: the id is recorded and comes back on read.
+    let r = s
+        .cookie_jar
+        .post(format!("{}/api/bundles/compose", s.base_url))
+        .json(&serde_json::json!({
+            "name": "win-health",
+            "version": "1.0.0",
+            "config_json": { "settings": { "log": { "level": "info" } } },
+            "template": "windows-server-health",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "compose: {:?}", r.text().await);
+    let created: serde_json::Value = r.json().await.unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let cfg: serde_json::Value = s
+        .cookie_jar
+        .get(format!("{}/api/bundles/{}/config", s.base_url, id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cfg["template"], "windows-server-health");
+
+    // 2. The association lives in the artifact itself: the downloaded zip's manifest
+    //    carries the template line, so it survives download/re-upload.
+    let bytes = s
+        .cookie_jar
+        .get(format!("{}/api/bundles/{}/download", s.base_url, id))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
+    let mut manifest = String::new();
+    {
+        use std::io::Read;
+        archive
+            .by_name("bundle.toml")
+            .unwrap()
+            .read_to_string(&mut manifest)
+            .unwrap();
+    }
+    assert!(
+        manifest.contains("template = \"windows-server-health\""),
+        "manifest missing template line: {manifest}"
+    );
+
+    // 3. A bundle composed without a template reads back null.
+    let r = s
+        .cookie_jar
+        .post(format!("{}/api/bundles/compose", s.base_url))
+        .json(&serde_json::json!({
+            "name": "blank",
+            "version": "1.0.0",
+            "config_json": {},
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201);
+    let blank: serde_json::Value = r.json().await.unwrap();
+    let cfg: serde_json::Value = s
+        .cookie_jar
+        .get(format!(
+            "{}/api/bundles/{}/config",
+            s.base_url,
+            blank["id"].as_str().unwrap()
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(cfg["template"].is_null());
+
+    // 4. Template ids outside the token charset are rejected (manifest quoting safety).
+    let r = s
+        .cookie_jar
+        .post(format!("{}/api/bundles/compose", s.base_url))
+        .json(&serde_json::json!({
+            "name": "x",
+            "version": "1",
+            "config_json": {},
+            "template": "bad\"template",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+}
+
+#[tokio::test]
 async fn bulk_tags_and_bulk_delete() {
     let s = start().await;
     signup_login(&s, "delta", "dave@example.com").await;
