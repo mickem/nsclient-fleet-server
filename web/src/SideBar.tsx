@@ -11,9 +11,17 @@ import HistoryIcon from "@mui/icons-material/History";
 import GroupIcon from "@mui/icons-material/Group";
 import KeyIcon from "@mui/icons-material/Key";
 import AdminPanelSettingsIcon from "@mui/icons-material/AdminPanelSettings";
+import { Link as RouterLink, useLocation } from "react-router-dom";
 import { canManageUsers, Me } from "./api";
 
+/** A page id is also its URL segment: "bundles" ⇄ /bundles. */
 export type Page = "hosts" | "groups" | "bundles" | "audit" | "users" | "keys" | "platform";
+
+/** Whether `pathname` is this page or one of its sub-pages (/hosts/:id keeps Hosts lit).
+ *  Compared segment-wise so "/keys" never matches a hypothetical "/keys-of-something". */
+function isActive(pathname: string, id: Page): boolean {
+  return pathname === `/${id}` || pathname.startsWith(`/${id}/`);
+}
 
 const drawerWidth = 240;
 
@@ -56,15 +64,8 @@ function menuFor(me: Me): MenuItemDef[][] {
   return groups;
 }
 
-function SideMenu({
-  me,
-  page,
-  onNavigate,
-}: {
-  me: Me;
-  page: Page;
-  onNavigate: (p: Page) => void;
-}) {
+function SideMenu({ me, onNavigate }: { me: Me; onNavigate: () => void }) {
+  const { pathname } = useLocation();
   return (
     <div>
       <Toolbar />
@@ -74,7 +75,14 @@ function SideMenu({
           <List>
             {group.map((item) => (
               <ListItem key={item.id} disablePadding>
-                <ListItemButton selected={page === item.id} onClick={() => onNavigate(item.id)}>
+                {/* A real anchor, so the entries can be middle-clicked, opened in a new
+                    tab, and copied as links like any other URL. */}
+                <ListItemButton
+                  component={RouterLink}
+                  to={`/${item.id}`}
+                  selected={isActive(pathname, item.id)}
+                  onClick={onNavigate}
+                >
                   <ListItemIcon>{item.icon}</ListItemIcon>
                   <ListItemText primary={item.label} />
                 </ListItemButton>
@@ -89,14 +97,14 @@ function SideMenu({
 
 type Props = {
   me: Me;
-  page: Page;
-  onNavigate: (p: Page) => void;
+  /** Called after following a menu link — the mobile drawer closes behind it. */
+  onNavigate: () => void;
   mobileOpen: boolean;
   onTransitionEnd: () => void;
   onClose: () => void;
 };
 
-export function SideBar({ me, page, onNavigate, mobileOpen, onTransitionEnd, onClose }: Props) {
+export function SideBar({ me, onNavigate, mobileOpen, onTransitionEnd, onClose }: Props) {
   return (
     <Box component="nav" sx={{ width: { sm: drawerWidth }, flexShrink: { sm: 0 } }}>
       <Toolbar />
@@ -111,7 +119,7 @@ export function SideBar({ me, page, onNavigate, mobileOpen, onTransitionEnd, onC
           "& .MuiDrawer-paper": { boxSizing: "border-box", width: drawerWidth },
         }}
       >
-        <SideMenu me={me} page={page} onNavigate={onNavigate} />
+        <SideMenu me={me} onNavigate={onNavigate} />
       </Drawer>
       <Drawer
         variant="permanent"
@@ -121,7 +129,7 @@ export function SideBar({ me, page, onNavigate, mobileOpen, onTransitionEnd, onC
         }}
         open
       >
-        <SideMenu me={me} page={page} onNavigate={onNavigate} />
+        <SideMenu me={me} onNavigate={onNavigate} />
       </Drawer>
     </Box>
   );

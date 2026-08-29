@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Alert,
   Autocomplete,
@@ -41,7 +42,7 @@ import { ConfirmDeleteHostDialog } from "./ConfirmDeleteHostDialog";
 import { HostStatusChip, LocalConfigChip } from "./HostStatusChip";
 import { RefreshButton } from "./RefreshButton";
 
-type Props = { me: Me; onOpen: (hostId: string) => void };
+type Props = { me: Me };
 
 /** The concrete statuses plus the two composites an operator actually sweeps by: "everything
  *  that ever became an agent" and "everything we are not hearing from". */
@@ -74,7 +75,8 @@ const matchesStatus = (h: HostView, f: StatusFilter): boolean => {
 
 type BulkDialog = "delete" | "add-tag" | "remove-tag" | null;
 
-export function HostsPage({ me, onOpen }: Props) {
+export function HostsPage({ me }: Props) {
+  const navigate = useNavigate();
   const [hosts, setHosts] = useState<HostView[] | null>(null);
   const [issued, setIssued] = useState<CreateHostResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -363,7 +365,7 @@ export function HostsPage({ me, onOpen }: Props) {
                 <TableRow
                   key={h.id}
                   hover
-                  onClick={() => onOpen(h.id)}
+                  onClick={() => navigate(`/hosts/${h.id}`)}
                   selected={selected.has(h.id)}
                   sx={{ cursor: "pointer" }}
                 >
