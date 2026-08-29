@@ -27,7 +27,14 @@ impl EmailSender {
                 Ok(Self::Stdout)
             }
             Some(cfg) => {
-                let transport = AsyncSmtpTransport::<Tokio1Executor>::relay(&cfg.host)?
+                // Port 465 expects implicit TLS (`relay`); 587 and 25 expect a plaintext
+                // greeting followed by STARTTLS (`starttls_relay`).
+                let builder = if cfg.port == 465 {
+                    AsyncSmtpTransport::<Tokio1Executor>::relay(&cfg.host)?
+                } else {
+                    AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&cfg.host)?
+                };
+                let transport = builder
                     .port(cfg.port)
                     .credentials(Credentials::new(cfg.user.clone(), cfg.password.clone()))
                     .build();
