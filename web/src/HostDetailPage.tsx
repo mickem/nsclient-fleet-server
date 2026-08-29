@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 import {
   Alert,
   Box,
@@ -33,7 +34,7 @@ import {
   Me,
 } from "./api";
 
-type Props = { me: Me; hostId: string; onBack: () => void };
+type Props = { me: Me };
 
 /** The enrolment clause of the summary line — what happened, or what still needs to.
  *  The live states all share it: the chip beside the hostname carries what they add. */
@@ -53,7 +54,12 @@ function enrollmentSummary(host: HostDetail): string {
   }
 }
 
-export function HostDetailPage({ me, hostId, onBack }: Props) {
+export function HostDetailPage({ me }: Props) {
+  // The route owns the identity of the host on screen, so a detail page can be linked
+  // to, refreshed, and reached with the browser's back/forward buttons.
+  const { hostId = "" } = useParams();
+  const navigate = useNavigate();
+  const onBack = () => navigate("/hosts");
   const [host, setHost] = useState<HostDetail | null>(null);
   const [desired, setDesired] = useState<DesiredStateView | null>(null);
   const [error, setError] = useState<string | null>(null);

@@ -1,16 +1,9 @@
 import { useState } from "react";
 import { Box, Toolbar } from "@mui/material";
+import { Outlet } from "react-router-dom";
 import { Me } from "./api";
 import { AppNavbar } from "./AppNavbar";
-import { Page, SideBar } from "./SideBar";
-import { HostsPage } from "./HostsPage";
-import { HostDetailPage } from "./HostDetailPage";
-import { GroupsPage } from "./GroupsPage";
-import { BundlesPage } from "./BundlesPage";
-import { AuditPage } from "./AuditPage";
-import { UsersPage } from "./UsersPage";
-import { ApiKeysPage } from "./ApiKeysPage";
-import { PlatformPage } from "./PlatformPage";
+import { SideBar } from "./SideBar";
 
 const drawerWidth = 240;
 
@@ -19,9 +12,8 @@ type Props = {
   onLogout: () => void;
 };
 
+/** The signed-in chrome: navbar, sidebar, and whichever page the route selected. */
 export function Dashboard({ me, onLogout }: Props) {
-  const [page, setPage] = useState<Page>("hosts");
-  const [hostId, setHostId] = useState<string | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
 
@@ -34,19 +26,12 @@ export function Dashboard({ me, onLogout }: Props) {
     if (!isClosing) setMobileOpen(!mobileOpen);
   };
 
-  const navigate = (p: Page) => {
-    setPage(p);
-    setHostId(null);
-    setMobileOpen(false);
-  };
-
   return (
     <Box sx={{ display: "flex" }}>
       <AppNavbar me={me} onLogout={onLogout} handleDrawerToggle={handleDrawerToggle} />
       <SideBar
         me={me}
-        page={page}
-        onNavigate={navigate}
+        onNavigate={() => setMobileOpen(false)}
         mobileOpen={mobileOpen}
         onClose={handleDrawerClose}
         onTransitionEnd={handleDrawerTransitionEnd}
@@ -60,18 +45,7 @@ export function Dashboard({ me, onLogout }: Props) {
         }}
       >
         <Toolbar />
-        {page === "hosts" &&
-          (hostId ? (
-            <HostDetailPage me={me} hostId={hostId} onBack={() => setHostId(null)} />
-          ) : (
-            <HostsPage me={me} onOpen={setHostId} />
-          ))}
-        {page === "groups" && <GroupsPage me={me} />}
-        {page === "bundles" && <BundlesPage me={me} />}
-        {page === "audit" && <AuditPage />}
-        {page === "users" && <UsersPage me={me} />}
-        {page === "keys" && <ApiKeysPage me={me} />}
-        {page === "platform" && <PlatformPage me={me} />}
+        <Outlet />
       </Box>
     </Box>
   );
