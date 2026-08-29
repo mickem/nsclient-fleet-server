@@ -5,9 +5,12 @@ import {
   Card,
   CardContent,
   Checkbox,
+  Chip,
   FormControlLabel,
   Stack,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Tooltip,
   Typography,
 } from "@mui/material";
@@ -22,6 +25,9 @@ import {
 import { buildBundleZip, CarriedEntries, readBundleZip } from "./bundlezip";
 import { decryptBundle, encryptBundle, recalledKey } from "./crypto";
 import { ConfigObject, iniToJson, jsonToIni, suggestNextVersion } from "./ini";
+import { TemplateForm } from "./TemplateForm";
+import { TemplatePicker } from "./TemplatePicker";
+import { templateById } from "./templates";
 
 type Props = {
   /** When set, the editor loads this bundle's config and saves as a new version. Plain
@@ -48,9 +54,16 @@ const TOKEN_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
 export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props) {
   const [loading, setLoading] = useState(editBundle !== null);
+  // New bundles start at the template picker; edits go straight to the INI.
+  const [picking, setPicking] = useState(editBundle === null);
   const [name, setName] = useState("");
   const [version, setVersion] = useState("1.0.0");
   const [ini, setIni] = useState(NEW_BUNDLE_TEMPLATE);
+  // Template this bundle was created from (kept through edits via bundle.toml metadata).
+  const [template, setTemplate] = useState<string | null>(null);
+  // Visual (form) vs raw INI editing. Both edit the same INI text, so switching is
+  // lossless; visual is only offered while the template is known.
+  const [view, setView] = useState<"form" | "ini">("form");
   const [scripts, setScripts] = useState<string[]>([]);
   const [encrypt, setEncrypt] = useState(editBundle?.format === "enc-v1");
   const [error, setError] = useState<string | null>(null);
@@ -76,11 +89,13 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
         const opened = readBundleZip(zip);
         setIni(jsonToIni(opened.configJson as ConfigObject));
         setScripts(opened.scripts);
+        setTemplate(opened.template);
         setCarried(opened.carried);
       } else {
         const cfg = await apiGet<BundleConfigView>(`/api/bundles/${editBundle.id}/config`);
         setIni(jsonToIni(cfg.config_json as ConfigObject));
         setScripts(cfg.scripts);
+        setTemplate(cfg.template);
       }
       setName(editBundle.name);
       setVersion(suggestNextVersion(editBundle.version));
@@ -123,6 +138,9 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
       setError(e instanceof Error ? e.message : String(e));
       return;
     }
+    // Belt-and-braces: template ids are ours and read back token-validated, but the
+    // manifest quoting must never be breakable.
+    const tmpl = template !== null && TOKEN_RE.test(template) ? template : null;
     setBusy(true);
     try {
       if (encrypt) {
@@ -130,7 +148,7 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
         if (!key || !keyState.unlocked) {
           throw new Error("Unlock the encryption key first (see the Encryption key section).");
         }
-        const zip = buildBundleZip(n, v, config, await carriedEntries());
+        const zip = buildBundleZip(n, v, config, await carriedEntries(), tmpl);
         const sealed = await encryptBundle(key, n, v, zip);
         const form = new FormData();
         form.set("name", n);
@@ -141,7 +159,7 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
       } else if (encBase) {
         // The base was decrypted in this browser; the server cannot compose from a bundle
         // it cannot read, so the plain zip is built here too and uploaded as-is.
-        const zip = buildBundleZip(n, v, config, await carriedEntries());
+        const zip = buildBundleZip(n, v, config, await carriedEntries(), tmpl);
         const form = new FormData();
         form.set("name", n);
         form.set("version", v);
@@ -153,6 +171,7 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
           version: v,
           config_json: config,
           base_bundle_id: editBundle?.id ?? null,
+          template: tmpl,
         });
       }
       onSaved();
@@ -169,6 +188,33 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
   };
 
   if (loading) return <Typography>Loading bundle…</Typography>;
+
+  const tmplInfo = template !== null ? templateById(template) : undefined;
+  const formCapable = tmplInfo !== undefined && tmplInfo.fields.length > 0;
+  const effectiveView = formCapable && view === "form" ? "form" : "ini";
+
+  if (picking) {
+    return (
+      <Card sx={{ my: 2 }}>
+        <CardContent>
+          <Typography variant="h5" gutterBottom>
+            New bundle
+          </Typography>
+          <TemplatePicker
+            onPick={(t) => {
+              if (t !== null) {
+                setTemplate(t.id);
+                setName(t.id);
+                setIni(t.ini);
+              }
+              setPicking(false);
+            }}
+            onCancel={onCancel}
+          />
+        </CardContent>
+      </Card>
+    );
+  }
 
   return (
     <Card sx={{ my: 2 }}>
@@ -222,7 +268,28 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
               label="Encrypted"
             />
           </Tooltip>
+          {template !== null && (
+            <Tooltip
+              title={
+                tmplInfo?.description ??
+                "Created from a template this UI no longer knows. Remove to detach."
+              }
+            >
+              <Chip
+                size="small"
+                variant="outlined"
+                label={`template: ${tmplInfo?.title ?? template}`}
+                onDelete={() => setTemplate(null)}
+              />
+            </Tooltip>
+          )}
         </Stack>
+        {tmplInfo?.sensitive && !encrypt && (
+          <Alert severity="info" sx={{ mb: 2 }}>
+            This template carries credentials — consider ticking <strong>Encrypted</strong>{" "}
+            so the server only ever stores ciphertext.
+          </Alert>
+        )}
         {encBase && !encrypt && (
           <Alert severity="warning" sx={{ mb: 2 }}>
             The new version will be saved <strong>unencrypted</strong> — its contents,
@@ -242,19 +309,35 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
             <code>{scripts.join(", ")}</code> (script editing comes later).
           </Alert>
         )}
-        <TextField
-          multiline
-          minRows={14}
-          fullWidth
-          spellCheck={false}
-          value={ini}
-          onChange={(e) => setIni(e.target.value)}
-          slotProps={{
-            input: {
-              sx: { fontFamily: "monospace", fontSize: "0.9rem", whiteSpace: "pre" },
-            },
-          }}
-        />
+        {formCapable && (
+          <ToggleButtonGroup
+            size="small"
+            exclusive
+            value={effectiveView}
+            onChange={(_, v: "form" | "ini" | null) => v !== null && setView(v)}
+            sx={{ mb: 1 }}
+          >
+            <ToggleButton value="form">Visual</ToggleButton>
+            <ToggleButton value="ini">INI</ToggleButton>
+          </ToggleButtonGroup>
+        )}
+        {effectiveView === "form" && tmplInfo ? (
+          <TemplateForm template={tmplInfo} ini={ini} onChange={setIni} />
+        ) : (
+          <TextField
+            multiline
+            minRows={14}
+            fullWidth
+            spellCheck={false}
+            value={ini}
+            onChange={(e) => setIni(e.target.value)}
+            slotProps={{
+              input: {
+                sx: { fontFamily: "monospace", fontSize: "0.9rem", whiteSpace: "pre" },
+              },
+            }}
+          />
+        )}
         {error && (
           <Alert severity="error" sx={{ mt: 1 }}>
             {error}

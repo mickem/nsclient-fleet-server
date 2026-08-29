@@ -318,6 +318,34 @@ pub struct ComposeBody {
     /// preserves the bundle's scripts untouched.
     #[serde(default)]
     pub base_bundle_id: Option<String>,
+    /// Id of the UI template this bundle was created from (e.g. "windows-server-health").
+    /// Recorded in bundle.toml so later edits can keep showing the association; agents
+    /// ignore it.
+    #[serde(default)]
+    pub template: Option<String>,
+}
+
+/// The bundle.toml the compose paths (server here, browser in web/src/bundlezip.ts) write.
+/// All values are token-validated before this is called, so the quoting cannot be broken.
+fn manifest_toml(name: &str, version: &str, template: Option<&str>) -> String {
+    let mut m = format!("name = \"{name}\"\nversion = \"{version}\"\nschema_version = 1\n");
+    if let Some(t) = template {
+        m.push_str(&format!("template = \"{t}\"\n"));
+    }
+    m
+}
+
+/// Pull the `template = "<token>"` line back out of a stored bundle's manifest. The
+/// manifest is machine-written, so a line parse suffices; token validation keeps anything
+/// odd from a hand-built zip out of the API.
+fn template_from_manifest(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    text.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("template")?.trim_start();
+        let value = rest.strip_prefix('=')?.trim();
+        let value = value.strip_prefix('"')?.strip_suffix('"')?;
+        valid_bundle_token(value).then(|| value.to_string())
+    })
 }
 
 /// `POST /api/bundles/compose` — build a bundle server-side from an edited config.
@@ -349,6 +377,20 @@ pub async fn compose(
     }
     if !body.config_json.is_object() {
         return (StatusCode::BAD_REQUEST, "config_json must be a JSON object").into_response();
+    }
+    let template = body
+        .template
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(t) = template {
+        if !valid_bundle_token(t) {
+            return (
+                StatusCode::BAD_REQUEST,
+                "invalid template (allowed: alphanumerics, dot, dash, underscore)",
+            )
+                .into_response();
+        }
     }
 
     // Entries carried over from the base bundle (scripts and any other assets).
@@ -400,7 +442,7 @@ pub async fn compose(
 
     let config_pretty =
         serde_json::to_string_pretty(&body.config_json).unwrap_or_else(|_| "{}".to_string());
-    let manifest = format!("name = \"{name}\"\nversion = \"{version}\"\nschema_version = 1\n");
+    let manifest = manifest_toml(name, version, template);
 
     let bytes = match build_zip(&manifest, &config_pretty, &carried) {
         Ok(b) => b,
@@ -436,6 +478,9 @@ pub struct BundleConfigView {
     /// Script entries present in the zip (paths under scripts/). Read-only for now —
     /// the editor preserves them via compose's base_bundle_id.
     pub scripts: Vec<String>,
+    /// Template id recorded in bundle.toml when the bundle was created from a UI
+    /// template; null for blank/uploaded bundles.
+    pub template: Option<String>,
 }
 
 /// `GET /api/bundles/:id/config` — extract config.json (and the script listing) from a
@@ -483,8 +528,11 @@ pub async fn get_config(
 
     let mut config_json = serde_json::json!({});
     let mut scripts = Vec::new();
+    let mut template = None;
     for (entry_name, data) in &entries {
-        if entry_name == "config.json" {
+        if entry_name == "bundle.toml" {
+            template = template_from_manifest(data);
+        } else if entry_name == "config.json" {
             match serde_json::from_slice(data) {
                 Ok(v) => config_json = v,
                 Err(e) => {
@@ -507,6 +555,7 @@ pub async fn get_config(
         version: row.version,
         config_json,
         scripts,
+        template,
     })
     .into_response()
 }
