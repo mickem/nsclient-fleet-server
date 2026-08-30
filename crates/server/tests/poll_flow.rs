@@ -223,6 +223,76 @@ async fn host_id_from_db(db: &Db) -> String {
         .unwrap()
 }
 
+async fn last_seen(db: &Db, host_id: &str) -> Option<i64> {
+    sqlx::query_scalar("SELECT last_seen_at FROM hosts WHERE id = ?")
+        .bind(host_id)
+        .fetch_one(&db.read)
+        .await
+        .unwrap()
+}
+
+async fn set_last_seen(db: &Db, host_id: &str, at: i64) {
+    sqlx::query("UPDATE hosts SET last_seen_at = ? WHERE id = ?")
+        .bind(at)
+        .bind(host_id)
+        .execute(&db.write)
+        .await
+        .unwrap();
+}
+
+/// A host in steady state has nothing to say: it polls, gets a 304, and sends no state
+/// report until the configuration changes. That poll has to count as contact — otherwise
+/// `last_seen_at` freezes at the last applied change and a fleet polling perfectly on
+/// schedule reads `offline`, and then `lost`.
+#[tokio::test]
+async fn a_304_poll_counts_as_contact() {
+    let s = start().await;
+    signup_login(&s, "gamma", "gina@example.com").await;
+    let agent = enroll_a_host(&s).await;
+
+    let st = agent
+        .fetch_desired_state(None)
+        .await
+        .unwrap()
+        .expect("first call must return 200");
+    let host_id = host_id_from_db(&s.db).await;
+
+    // Two days of silence: past the lost threshold, so nothing but the poll below can
+    // rescue this host.
+    let stale = fleet_core::time::now_unix() - 2 * 86_400;
+    set_last_seen(&s.db, &host_id, stale).await;
+
+    s.agent_limits.forget_last_poll(&host_id);
+    assert!(
+        agent
+            .fetch_desired_state(Some(&st.state_hash))
+            .await
+            .unwrap()
+            .is_none(),
+        "matching hash must produce 304"
+    );
+    let refreshed = last_seen(&s.db, &host_id).await.expect("last_seen_at set");
+    assert!(
+        refreshed > stale,
+        "a 304 poll must refresh last_seen_at (was {stale}, still {refreshed})"
+    );
+
+    // The refresh is skipped while the stored value is still fresh, so a large fleet does
+    // not write a row per host per poll.
+    let fresh = fleet_core::time::now_unix() - 5;
+    set_last_seen(&s.db, &host_id, fresh).await;
+    s.agent_limits.forget_last_poll(&host_id);
+    agent
+        .fetch_desired_state(Some(&st.state_hash))
+        .await
+        .unwrap();
+    assert_eq!(
+        last_seen(&s.db, &host_id).await,
+        Some(fresh),
+        "a last_seen_at inside the refresh window must be left alone"
+    );
+}
+
 #[tokio::test]
 async fn state_report_records_tags_and_bumps_config_version() {
     let s = start().await;

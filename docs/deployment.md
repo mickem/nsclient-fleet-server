@@ -188,9 +188,11 @@ key; the bundles encrypted under it are gone and must be re-uploaded. Nothing ab
 ### Host status thresholds
 
 The hosts list carries one status per host, and two of its values are about silence:
-**offline** after three missed polls (floored at five minutes, derived from the tenant's
-tier), and **lost** after `HOST_LOST_AFTER_HOURS`. The split exists because the responses
-differ — offline is a reboot or a blip you wait out, lost is a machine to go and look at.
+**offline** after 24 hours of silence, and **lost** after `HOST_LOST_AFTER_HOURS`. The split
+exists because the responses differ — offline is a machine that is off or away and that you
+wait out, lost is a machine to go and look at. Because the two must never invert, a
+`HOST_LOST_AFTER_HOURS` below 24 is clamped up to the offline grace, and such a deployment
+reports silence as **lost** without ever showing **offline**.
 
 Set it to whatever "this should have called home by now" means for your fleet: shorter for
 always-on servers, longer where laptops go away for a week. It is a reporting threshold

@@ -12,6 +12,18 @@ use std::collections::BTreeMap;
 use crate::mtls::PeerHostContext;
 use crate::AppState;
 
+/// How stale a host's `last_seen_at` may get before a poll rewrites it.
+///
+/// Every poll from every host passes through the desired-state handler, so refreshing on
+/// each one would mean a row update per host per poll interval — a fleet of 5 000 polling
+/// every 15 seconds would put a few hundred writes a second on the write connection, for a
+/// field whose only consumer is a threshold measured in days. Refreshing at most every five
+/// minutes keeps "last seen" accurate to the minute in the UI while dropping the great
+/// majority of those writes, and still leaves the offline grace
+/// ([`fleet_core::host::DEFAULT_OFFLINE_AFTER_SECS`], 24 hours) nearly three orders of
+/// magnitude of headroom.
+const LAST_SEEN_REFRESH_SECS: i64 = 300;
+
 #[derive(Deserialize)]
 pub struct DesiredStateQuery {
     #[serde(default)]
@@ -63,6 +75,18 @@ pub async fn desired_state(
         _ => (fleet_core::tier::FREE, None),
     };
     let next_poll = tier.min_poll_interval_secs;
+
+    // The poll itself is contact, and for a host in steady state it is the *only* contact:
+    // it polls, gets a 304, and has nothing to report until the configuration changes. Were
+    // this not recorded, `last_seen_at` would sit at whenever the host last applied
+    // something and the whole fleet would read `offline` while polling exactly on schedule.
+    if let Err(e) = HostRepo::new(&state.db)
+        .touch_last_seen_if_stale(ctx.tenant_id, &ctx.host_id, LAST_SEEN_REFRESH_SECS)
+        .await
+    {
+        // Liveness is not worth failing a poll over: the agent still needs its answer.
+        tracing::error!(error = %e, "touch_last_seen_if_stale failed");
+    }
 
     // No tenant row means no trustworthy cache key; fall back to computing directly rather
     // than caching against a version we invented.

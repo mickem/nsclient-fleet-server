@@ -73,8 +73,8 @@ export function HostStatusChip({ host }: { host: HostView }) {
           size="small"
           title={
             `Nothing heard from this host since ${fmtTime(host.last_seen_at ?? host.enrolled_at)}` +
-            " — several poll intervals ago. It may be rebooting or briefly off the network, but" +
-            " it is not picking up changes in the meantime."
+            " — over a day. It may be powered off or away from the network, but it is not" +
+            " picking up changes in the meantime."
           }
         />
       );

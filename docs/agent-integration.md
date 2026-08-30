@@ -193,7 +193,7 @@ All fields are optional. Semantics, exactly as the server implements them:
 
   | silence | status | what the operator reads into it |
   |---|---|---|
-  | three poll intervals (min. 5 minutes) | **offline** | a reboot or a blip; it may come back on its own |
+  | 24 hours | **offline** | powered off, away or off the network; it may come back on its own |
   | `HOST_LOST_AFTER_HOURS`, 48h by default | **lost** | the agent is stopped, removed, firewalled or the machine is gone |
 
   Both are measured from the last contact of any kind — a poll, a heartbeat or a state
