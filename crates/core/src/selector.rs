@@ -30,8 +30,17 @@ use std::collections::HashMap;
 const MAX_NODES: usize = 64;
 const MAX_DEPTH: usize = 8;
 const MAX_IN_VALUES: usize = 64;
-const MAX_KEY_LEN: usize = 128;
-const MAX_VALUE_LEN: usize = 256;
+
+/// Longest tag key a selector will compare, and therefore the longest one worth storing.
+/// Public so the tag write paths enforce the same bound: a key longer than this can never
+/// be matched, so accepting one is storing something that cannot be used.
+pub const MAX_KEY_LEN: usize = 128;
+/// Longest tag value, for the same reason.
+pub const MAX_VALUE_LEN: usize = 256;
+/// Most tags one host may carry. Selectors cap at 64 clauses, so a host with more tags than
+/// this has more than any selector could distinguish; the cap exists so an agent cannot
+/// grow a row set nothing bounds.
+pub const MAX_TAGS_PER_HOST: usize = 128;
 
 /// Where a stored tag came from. A fact about the row, not a policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

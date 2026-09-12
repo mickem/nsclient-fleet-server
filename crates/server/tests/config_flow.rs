@@ -472,18 +472,79 @@ async fn an_agent_tag_cannot_supplement_a_manual_one_into_matching() {
     );
 }
 
+/// A host's tags decide that host's group membership and nothing else, so a tag write must
+/// not disturb what every other host in the tenant has cached. It used to bump the tenant's
+/// config_version, which invalidated all of them — one host toggling a value at its allowed
+/// request rate kept the whole tenant recomputing, on every poll and every hosts-page load.
 #[tokio::test]
-async fn manual_tag_endpoint_bumps_config_version() {
+async fn a_manual_tag_write_changes_that_host_and_leaves_the_tenant_alone() {
     let s = start().await;
     signup_login(&s, "beta", "bob@example.com").await;
-    let (_agent, host_id) = enroll_a_host(&s).await;
+    let (agent, host_id) = enroll_a_host(&s).await;
 
-    let v_before: i64 =
-        sqlx::query_scalar("SELECT config_version FROM tenants WHERE slug = 'beta'")
+    let config_version = || async {
+        sqlx::query_scalar::<_, i64>("SELECT config_version FROM tenants WHERE slug = 'beta'")
             .fetch_one(&s.db.read)
             .await
-            .unwrap();
+            .unwrap()
+    };
 
+    // A group only this host will join, so the tag write has something to change.
+    let g = s
+        .cookie_jar
+        .post(format!("{}/api/groups", s.base_url))
+        .json(&serde_json::json!({
+            "name": "prod",
+            "selector": { "clauses": [{"op": "eq", "key": "env", "value": "prod"}] }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let group_id = g.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let form = reqwest::multipart::Form::new()
+        .text("name", "prod-bundle")
+        .text("version", "1.0.0")
+        .part(
+            "bundle",
+            reqwest::multipart::Part::bytes(b"prod".to_vec()).file_name("b.zip"),
+        );
+    let bundle_id = s
+        .cookie_jar
+        .post(format!("{}/api/bundles", s.base_url))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    s.cookie_jar
+        .post(format!("{}/api/groups/{}/bundles", s.base_url, group_id))
+        .json(&serde_json::json!({"bundle_id": bundle_id, "priority": 1}))
+        .send()
+        .await
+        .unwrap();
+
+    // Warm the cache for this host.
+    s.agent_limits.forget_last_poll(&host_id);
+    assert_eq!(
+        agent
+            .fetch_desired_state(None)
+            .await
+            .unwrap()
+            .unwrap()
+            .bundles
+            .len(),
+        0
+    );
+
+    let v_before = config_version().await;
     let r = s
         .cookie_jar
         .put(format!("{}/api/hosts/{}/tags/env", s.base_url, host_id))
@@ -493,16 +554,27 @@ async fn manual_tag_endpoint_bumps_config_version() {
         .unwrap();
     assert_eq!(r.status(), 204);
 
-    let v_after: i64 = sqlx::query_scalar("SELECT config_version FROM tenants WHERE slug = 'beta'")
-        .fetch_one(&s.db.read)
-        .await
-        .unwrap();
-    assert!(
-        v_after > v_before,
-        "manual tag PUT must bump config_version"
+    assert_eq!(
+        config_version().await,
+        v_before,
+        "a tag write must not invalidate every other host in the tenant"
     );
 
-    // Re-PUT with same value: changed=false, no bump
+    // ...and the writing host's own cached state is gone, so the new tag takes effect.
+    s.agent_limits.forget_last_poll(&host_id);
+    assert_eq!(
+        agent
+            .fetch_desired_state(None)
+            .await
+            .unwrap()
+            .unwrap()
+            .bundles
+            .len(),
+        1,
+        "the tagged host must see its new group on the next poll"
+    );
+
+    // A no-op write changes nothing and invalidates nothing.
     let r2 = s
         .cookie_jar
         .put(format!("{}/api/hosts/{}/tags/env", s.base_url, host_id))
@@ -511,57 +583,61 @@ async fn manual_tag_endpoint_bumps_config_version() {
         .await
         .unwrap();
     assert_eq!(r2.status(), 204);
-    let v_after2: i64 =
-        sqlx::query_scalar("SELECT config_version FROM tenants WHERE slug = 'beta'")
-            .fetch_one(&s.db.read)
-            .await
-            .unwrap();
-    assert_eq!(v_after2, v_after, "no-op tag PUT must not bump");
+    assert_eq!(config_version().await, v_before);
 }
 
+/// A host's report is its full view of itself, so a key it has stopped reporting has stopped
+/// being true. Merging left those keys in place forever: an agent that once reported
+/// `role=sql_server` kept satisfying selectors over it, and nothing but deleting the host
+/// removed them.
 #[tokio::test]
-async fn host_override_is_encrypted_at_rest() {
+async fn an_agent_report_replaces_its_tags_rather_than_accumulating_them() {
     let s = start().await;
-    signup_login(&s, "gamma", "carol@example.com").await;
-    let (_agent, host_id) = enroll_a_host(&s).await;
+    signup_login(&s, "replace", "rep@example.com").await;
+    let (agent, host_id) = enroll_a_host(&s).await;
 
-    let secret = "super-secret-db-password-123";
+    let agent_tags = || async {
+        sqlx::query_scalar::<_, String>(
+            "SELECT key FROM host_tags WHERE host_id = ? AND source = 'agent' ORDER BY key",
+        )
+        .bind(&host_id)
+        .fetch_all(&s.db.read)
+        .await
+        .unwrap()
+    };
+
+    let mut first = BTreeMap::new();
+    first.insert("role".to_string(), "sql_server".to_string());
+    first.insert("os".to_string(), "linux".to_string());
+    agent.report_state(None, first).await.unwrap();
+    assert_eq!(agent_tags().await, ["os", "role"]);
+
+    // The role is gone. So is the tag.
+    let mut second = BTreeMap::new();
+    second.insert("os".to_string(), "linux".to_string());
+    agent.report_state(None, second).await.unwrap();
+    assert_eq!(agent_tags().await, ["os"]);
+
+    // An operator tag under the same key belongs to the operator and is untouched.
     let r = s
         .cookie_jar
-        .put(format!("{}/api/hosts/{}/override", s.base_url, host_id))
-        .json(&serde_json::json!({
-            "patch": { "db": { "password": secret } },
-            "priority": 1500
-        }))
+        .put(format!("{}/api/hosts/{}/tags/os", s.base_url, host_id))
+        .json(&serde_json::json!({"value": "windows"}))
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), 204);
-
-    // The raw blob in the DB must NOT contain the secret in plaintext.
-    let raw: Vec<u8> =
-        sqlx::query_scalar("SELECT patch_encrypted FROM host_overrides WHERE host_id = ?")
+    agent.report_state(None, BTreeMap::new()).await.unwrap();
+    assert!(agent_tags().await.is_empty(), "agent tags cleared");
+    let manual: Vec<String> =
+        sqlx::query_scalar("SELECT value FROM host_tags WHERE host_id = ? AND source = 'manual'")
             .bind(&host_id)
-            .fetch_one(&s.db.read)
+            .fetch_all(&s.db.read)
             .await
             .unwrap();
-    let needle = secret.as_bytes();
-    let leaks = raw.windows(needle.len()).any(|w| w == needle);
-    assert!(!leaks, "secret leaked into encrypted blob");
-
-    // After delete, override row gone.
-    let d = s
-        .cookie_jar
-        .delete(format!("{}/api/hosts/{}/override", s.base_url, host_id))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(d.status(), 204);
+    assert_eq!(manual, ["windows"], "the operator's tag survives");
 }
 
-/// At-rest encryption exists to blunt database access, so a ciphertext has to be tied to
-/// the row it was written to. Otherwise someone with write access — and no key — can move
-/// one host's encrypted override onto another host and have the server decrypt and serve it.
 #[tokio::test]
 async fn an_override_ciphertext_moved_to_another_host_is_refused() {
     let s = start().await;
@@ -995,8 +1071,11 @@ async fn bulk_tags_and_bulk_delete() {
     let body: serde_json::Value = r.json().await.unwrap();
     assert_eq!(body["updated"], 2);
     assert_eq!(body["not_found"], serde_json::json!(["no-such-host"]));
-    let v_after = config_version().await;
-    assert!(v_after > v_before, "bulk tag set must bump config_version");
+    assert_eq!(
+        config_version().await,
+        v_before,
+        "a bulk tag write invalidates the hosts it touched, not the whole tenant"
+    );
 
     // 2. The host list carries the tags (the UI filters on them).
     let hosts: serde_json::Value = s

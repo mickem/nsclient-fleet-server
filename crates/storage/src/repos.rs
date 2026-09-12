@@ -549,9 +549,19 @@ impl<'a> HostTagsRepo<'a> {
         Self { db }
     }
 
-    /// Upsert agent-reported tags. Returns true iff at least one tag's value changed
-    /// (so callers know whether to bump config_version).
-    pub async fn upsert_agent_tags(
+    /// Replace a host's agent-reported tags with exactly `tags`.
+    ///
+    /// Replace, not merge: the report carries the host's full view of itself, so a key it
+    /// has stopped reporting has stopped being true. Merging left those keys in place
+    /// forever — an agent that reported `role=sql_server` once kept satisfying selectors
+    /// over it after the role was gone, and nothing but deleting the host removed them.
+    ///
+    /// Manual tags are untouched. They live under the same keys with `source = 'manual'`
+    /// and belong to the operator.
+    ///
+    /// Returns true iff the stored set actually changed, so callers know whether anything
+    /// downstream needs invalidating.
+    pub async fn replace_agent_tags(
         &self,
         tenant_id: i64,
         host_id: &str,
@@ -560,6 +570,28 @@ impl<'a> HostTagsRepo<'a> {
         let now = now_unix();
         let mut changed = false;
         let mut tx = self.db.write.begin().await?;
+
+        let stale: Vec<String> = sqlx::query_scalar(
+            "SELECT key FROM host_tags
+             WHERE tenant_id = ? AND host_id = ? AND source = 'agent'",
+        )
+        .bind(tenant_id)
+        .bind(host_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        for key in stale.iter().filter(|k| !tags.contains_key(*k)) {
+            sqlx::query(
+                "DELETE FROM host_tags
+                 WHERE tenant_id = ? AND host_id = ? AND key = ? AND source = 'agent'",
+            )
+            .bind(tenant_id)
+            .bind(host_id)
+            .bind(key)
+            .execute(&mut *tx)
+            .await?;
+            changed = true;
+        }
+
         for (key, value) in tags {
             let existing: Option<String> = sqlx::query_scalar(
                 "SELECT value FROM host_tags

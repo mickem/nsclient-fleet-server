@@ -213,12 +213,19 @@ All fields are optional server-side (`crates/server/src/agent_api.rs`,
 - `applied_state_hash` set → server records it and updates `last_seen_at`.
   Omit it (null) when nothing was applied; the server still touches
   `last_seen_at`.
-- `reported_tags` → upserted as agent-reported tags, stored with
-  `source = "agent"` and kept distinct from tags an operator set. If any value
-  actually changed, the server bumps the tenant `config_version`, which can
-  change the result of your *next* desired-state poll (tags feed group
-  selectors). The call is idempotent — resending identical tags is a no-op —
-  so it is safe to send the full tag map every time.
+- `reported_tags` → **the host's complete set of self-reported tags**, stored
+  with `source = "agent"` and kept distinct from tags an operator set. Send the
+  full map every time: it *replaces* what was stored, so a key you stop
+  reporting is removed rather than left standing. Omitting the field entirely
+  means "no answer" and leaves the stored set alone; an explicit `{}` is an
+  answer and clears it. Resending an identical map is a no-op.
+
+  Capped at 128 tags, keys at 128 bytes and values at 256 bytes — the same
+  limits a selector can compare, so anything longer could never be matched. Over
+  any of them the whole report is refused with `400`.
+
+  A change here affects only *this* host's next desired-state poll (tags feed
+  group selectors); it does not disturb any other host in the tenant.
 
   **Trust boundary.** These tags are the host's claims about itself and are
   treated as such. A selector clause reads operator-set tags only unless it

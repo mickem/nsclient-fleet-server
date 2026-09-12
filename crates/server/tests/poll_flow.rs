@@ -295,8 +295,12 @@ async fn a_304_poll_counts_as_contact() {
     );
 }
 
+/// The report stores the host's tags — and does *not* touch the tenant's config version.
+/// A host's own tags change only its own group membership, so bumping the version
+/// invalidated every other host's memoized state for nothing; one host toggling a value at
+/// its allowed request rate kept the whole tenant recomputing.
 #[tokio::test]
-async fn state_report_records_tags_and_bumps_config_version() {
+async fn state_report_records_tags_without_disturbing_the_tenant() {
     let s = start().await;
     signup_login(&s, "beta", "bob@example.com").await;
     let agent = enroll_a_host(&s).await;
@@ -319,7 +323,10 @@ async fn state_report_records_tags_and_bumps_config_version() {
         .fetch_one(&s.db.read)
         .await
         .unwrap();
-    assert!(v_after > v_before, "config_version must bump on tag change");
+    assert_eq!(
+        v_after, v_before,
+        "a host's own tags must not invalidate the rest of the tenant"
+    );
 
     let row_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM host_tags WHERE source = 'agent'")

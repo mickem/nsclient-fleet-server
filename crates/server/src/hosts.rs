@@ -668,7 +668,9 @@ pub async fn bulk_tags(
     let tags_repo = HostTagsRepo::new(&state.db);
     let mut updated = 0usize;
     let mut not_found = Vec::new();
-    let mut changed = false;
+    // Which hosts actually changed, so only their memoized state is dropped rather than
+    // the whole tenant's.
+    let mut touched: Vec<String> = Vec::new();
     for host_id in host_ids {
         match hosts_repo.get(who.tenant_id, &host_id).await {
             Ok(Some(_)) => {}
@@ -681,12 +683,13 @@ pub async fn bulk_tags(
                 return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
             }
         }
+        let mut host_changed = false;
         for tag in &body.set {
             match tags_repo
                 .upsert_manual_tag(who.tenant_id, &host_id, &tag.key, &tag.value)
                 .await
             {
-                Ok(c) => changed |= c,
+                Ok(c) => host_changed |= c,
                 Err(e) => {
                     tracing::error!(error = %e, "tag upsert failed");
                     return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
@@ -698,17 +701,38 @@ pub async fn bulk_tags(
                 .delete_manual_tag(who.tenant_id, &host_id, key)
                 .await
             {
-                Ok(c) => changed |= c,
+                Ok(c) => host_changed |= c,
                 Err(e) => {
                     tracing::error!(error = %e, "tag delete failed");
                     return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
                 }
             }
         }
+        if host_changed {
+            touched.push(host_id.clone());
+        }
         updated += 1;
     }
-    if changed {
-        crate::config_api::bump_config_version(&state, who.tenant_id).await;
+    for host_id in &touched {
+        state
+            .desired_state_cache
+            .invalidate_host(who.tenant_id, host_id);
+    }
+    if !touched.is_empty() {
+        crate::audit::record(
+            &state,
+            who.tenant_id,
+            Some(who.user_id),
+            "host.tags_bulk_changed",
+            "host",
+            &touched.join(","),
+            Some(&serde_json::json!({
+                "set": body.set.iter().map(|t| &t.key).collect::<Vec<_>>(),
+                "remove": &body.remove,
+                "hosts": touched.len(),
+            })),
+        )
+        .await;
     }
     Json(BulkResult { updated, not_found }).into_response()
 }
