@@ -96,13 +96,28 @@ pub struct AcmeConfig {
     pub production: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SmtpConfig {
     pub host: String,
     pub port: u16,
     pub user: String,
     pub password: String,
     pub from: String,
+}
+
+/// Hand-written so the password cannot be printed. Nothing logs this today, but a derived
+/// `Debug` means the next `?cfg` in a tracing call is a relay credential in the journal —
+/// and that is exactly the kind of thing that gets added without anyone noticing.
+impl std::fmt::Debug for SmtpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SmtpConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("password", &"<redacted>")
+            .field("from", &self.from)
+            .finish()
+    }
 }
 
 impl Config {

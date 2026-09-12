@@ -26,6 +26,13 @@ updates:
         patterns: ["*"]
         update-types: ["minor", "patch"]
 
+  # The Dockerfile pins its base by digest, for the same reason the workflows pin actions
+  # by SHA. This is what keeps that pin current instead of merely frozen.
+  - package-ecosystem: docker
+    directory: /docker
+    schedule:
+      interval: weekly
+
   - package-ecosystem: npm
     directory: /web
     schedule:

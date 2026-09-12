@@ -181,6 +181,8 @@ async fn build_state(db: &Db, server_cert_pem: &str, server_key_pem: &str) -> Re
     let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
         .build()
         .map_err(|e| anyhow!("verifier build: {e}"))?;
+    // Wrapped so the CertificateRequest carries no hint list — see `NoRootHints`.
+    let verifier = Arc::new(NoRootHints(verifier));
 
     let mut cfg = ServerConfig::builder()
         .with_client_cert_verifier(verifier)
@@ -458,6 +460,63 @@ fn parse_leaf(
         host_id,
         serial_hex,
     })
+}
+
+/// A client-certificate verifier that answers the same as the one it wraps, except that it
+/// hints at no trust anchors at all.
+///
+/// rustls puts the DN of every root in the trust store into the `certificate_authorities`
+/// extension of the CertificateRequest. That store is one CA per tenant, and the subject
+/// carries the tenant's slug — so anyone who could open a connection on the agent branch was
+/// handed a list of every customer. The hints exist to help a client choose among several
+/// certificates; our agents hold exactly one and present it unconditionally, and an empty
+/// list is specified to mean "send whatever you have".
+#[derive(Debug)]
+struct NoRootHints(Arc<dyn rustls::server::danger::ClientCertVerifier>);
+
+impl rustls::server::danger::ClientCertVerifier for NoRootHints {
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        &[]
+    }
+
+    fn offer_client_auth(&self) -> bool {
+        self.0.offer_client_auth()
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        self.0.client_auth_mandatory()
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+        self.0.verify_client_cert(end_entity, intermediates, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.0.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.0.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.supported_verify_schemes()
+    }
 }
 
 /// The raw DER of a CA certificate's subject, which is exactly the bytes a leaf issued by

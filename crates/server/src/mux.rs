@@ -17,9 +17,10 @@
 //! agent connectivity stays independent of ACME succeeding. That matters on-prem and it
 //! means a Let's Encrypt outage can't strand a fleet.
 //!
-//! Why not one config with optional client auth: rustls puts the DN of every trusted root
-//! in the CertificateRequest, so a shared config would broadcast every tenant CA's DN to
-//! anyone who opens the login page — and browsers would prompt for a certificate.
+//! Why not one config with optional client auth: browsers would prompt for a certificate on
+//! the login page. (The other half of this reason — that rustls puts the DN of every trusted
+//! root in the CertificateRequest, listing every tenant — no longer holds: the agent branch
+//! now sends no hint list at all. See `NoRootHints` in `crate::mtls`.)
 
 use std::net::SocketAddr;
 use std::sync::Arc;
