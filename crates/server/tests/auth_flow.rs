@@ -163,6 +163,68 @@ fn hash_token(token: &str) -> String {
     d.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Every response carries the headers, including the SPA fallback — which is served by
+/// `Router::fallback` and so sits outside the layers registered before it. That is the one
+/// route where getting the layering order wrong is invisible until an injected script has
+/// already read the tenant's bundle key out of `sessionStorage`.
+#[tokio::test]
+async fn security_headers_are_set_on_api_and_on_the_spa() {
+    let s = start().await;
+    let c = reqwest::Client::new();
+
+    for path in ["/api/public-config", "/", "/hosts", "/healthz"] {
+        let r = c
+            .get(format!("{}{}", s.base_url, path))
+            .send()
+            .await
+            .unwrap();
+        let h = r.headers();
+        assert_eq!(
+            h.get("x-content-type-options").map(|v| v.to_str().unwrap()),
+            Some("nosniff"),
+            "{path}"
+        );
+        assert_eq!(
+            h.get("x-frame-options").map(|v| v.to_str().unwrap()),
+            Some("DENY"),
+            "{path}"
+        );
+        assert_eq!(
+            h.get("referrer-policy").map(|v| v.to_str().unwrap()),
+            Some("strict-origin-when-cross-origin"),
+            "{path}"
+        );
+        let csp = h
+            .get("content-security-policy")
+            .unwrap_or_else(|| panic!("no CSP on {path}"))
+            .to_str()
+            .unwrap();
+        assert!(csp.contains("default-src 'self'"), "{path}: {csp}");
+        assert!(csp.contains("frame-ancestors 'none'"), "{path}: {csp}");
+        assert!(csp.contains("object-src 'none'"), "{path}: {csp}");
+        // No Turnstile configured in the fixture, so the policy admits no third party at
+        // all — a deployment that does not use the widget should not be told to trust it.
+        assert!(
+            csp.contains("script-src 'self';") || csp.ends_with("script-src 'self'"),
+            "{path}: {csp}"
+        );
+        assert!(!csp.contains("cloudflare"), "{path}: {csp}");
+    }
+}
+
+/// HSTS is gated on actually terminating TLS: promising a browser that this origin is
+/// HTTPS-only when it is served over plain HTTP locks the operator out for a year.
+#[tokio::test]
+async fn hsts_is_not_sent_when_we_are_not_the_tls_terminator() {
+    let s = start().await;
+    let r = reqwest::Client::new()
+        .get(format!("{}/healthz", s.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.headers().get("strict-transport-security").is_none());
+}
+
 #[tokio::test]
 async fn signup_creates_tenant_user_and_magic_link() {
     let s = start().await;

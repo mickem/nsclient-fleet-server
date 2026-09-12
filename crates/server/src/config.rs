@@ -30,6 +30,9 @@ pub struct Config {
     /// [`fleet_core::host::StatusThresholds`].
     pub host_lost_after_secs: i64,
     pub client_cert_lifetime_days: i64,
+    /// `Secure` on the session cookie. Defaults to whether this process terminates TLS —
+    /// see [`Config::terminates_tls`] — rather than to false, so the one deployment shape
+    /// that gets this wrong is the one that explicitly asks for it.
     pub cookie_secure: bool,
     pub daily_email_budget: u32,
     pub smtp: Option<SmtpConfig>,
@@ -92,6 +95,12 @@ pub struct SmtpConfig {
 }
 
 impl Config {
+    /// True when this process is the TLS terminator, from either certificate source.
+    /// What `cookie_secure` defaults to and what HSTS is gated on.
+    pub fn terminates_tls(&self) -> bool {
+        self.acme.is_some() || self.tls.is_some()
+    }
+
     pub fn from_env() -> anyhow::Result<Self> {
         let on_prem = bool_env("ON_PREM", false);
 
@@ -209,6 +218,27 @@ impl Config {
         let agent_mtls_url = std::env::var("MTLS_URL")
             .unwrap_or_else(|_| derive_agent_mtls_url(&base_url, &listen_https, &listen_mtls));
 
+        // Derived, not defaulted to false. A hand-written env file that simply omits
+        // COOKIE_SECURE used to leave the session cookie willing to travel in clear on a
+        // server that terminates TLS; the bootstrap template and the container entrypoint
+        // set it, so the gap was exactly the deployment nobody generated. Explicitly
+        // setting it still wins — including setting it false, which is occasionally right
+        // behind a terminating proxy on a private network, and which now says so out loud.
+        let cookie_secure = match std::env::var("COOKIE_SECURE") {
+            Ok(v) => {
+                let want = matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+                if !want && terminates_tls {
+                    tracing::warn!(
+                        "COOKIE_SECURE is explicitly false while this server terminates TLS — \
+                         the session cookie will be sent over plain HTTP if a browser is ever \
+                         pointed at one. Unset it to take the safe default."
+                    );
+                }
+                want
+            }
+            Err(_) => terminates_tls,
+        };
+
         Ok(Self {
             listen: std::env::var("LISTEN").unwrap_or_else(|_| "0.0.0.0:3000".into()),
             listen_https,
@@ -227,7 +257,7 @@ impl Config {
             bootstrap_ttl_secs: 3600,
             host_lost_after_secs: host_lost_after_secs(),
             client_cert_lifetime_days: 90,
-            cookie_secure: bool_env("COOKIE_SECURE", false),
+            cookie_secure,
             daily_email_budget: std::env::var("DAILY_EMAIL_BUDGET")
                 .ok()
                 .and_then(|v| v.parse().ok())

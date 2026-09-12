@@ -33,8 +33,7 @@ ACME_CONTACT=admin@example.com
 ACME_CACHE_DIR=/opt/nsclient-fleet/data/acme
 LISTEN_HTTPS=0.0.0.0:443
 
-# Cookies must be Secure when served over HTTPS
-COOKIE_SECURE=true
+# COOKIE_SECURE is derived: on whenever this server terminates TLS, which ACME does.
 
 # DB
 DATABASE_PATH=/opt/nsclient-fleet/data/fleet.db

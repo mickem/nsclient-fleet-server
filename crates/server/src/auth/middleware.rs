@@ -8,7 +8,7 @@ use axum::{
 use axum_extra::extract::CookieJar;
 use fleet_storage::{ApiKeyRepo, SessionRepo, UserRepo};
 
-use super::{tokens::hash_token, AuthedUser, SESSION_COOKIE};
+use super::{session_cookie_name, tokens::hash_token, AuthedUser};
 use crate::AppState;
 
 /// Reads the session cookie and, if valid, attaches `AuthedUser` to the request extensions.
@@ -25,7 +25,7 @@ pub async fn session_layer(
     mut req: Request<Body>,
     next: Next,
 ) -> Response {
-    let identified = match jar.get(SESSION_COOKIE) {
+    let identified = match jar.get(session_cookie_name(state.config.cookie_secure)) {
         Some(cookie) => from_session(&state, cookie.value()).await,
         None => match bearer_token(&req) {
             Some(token) => from_api_key(&state, &token).await,

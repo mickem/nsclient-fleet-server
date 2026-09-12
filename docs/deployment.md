@@ -170,7 +170,24 @@ should not have to guess which certificate it ended up serving.
 | `ACME_CONTACT`   | unset        | Email registered with the ACME account; required with the above |
 | `ACME_CACHE_DIR` | `data/acme`  | Persist it, or restarts re-issue and hit rate limits       |
 | `ACME_STAGING`   | `false`      | Use the staging directory while testing a deploy           |
-| `COOKIE_SECURE`  | `false`      | **Set `true` in production**                               |
+| `COOKIE_SECURE`  | on when we terminate TLS | Derived from `ACME_DOMAINS`/`TLS_*`; set it only to override |
+
+### Response headers
+
+Set on every response, including the SPA and error pages, and derived from the
+configuration rather than separately switchable:
+
+| Header                      | Value                                  | When                      |
+| --------------------------- | -------------------------------------- | ------------------------- |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains`  | only when we terminate TLS |
+| `Content-Security-Policy`   | `default-src 'self'`, no third party except the Turnstile widget when it is configured | always |
+| `X-Content-Type-Options`    | `nosniff`                              | always                    |
+| `X-Frame-Options`           | `DENY` (and `frame-ancestors 'none'`)  | always                    |
+| `Referrer-Policy`           | `strict-origin-when-cross-origin`      | always                    |
+
+HSTS is gated on terminating TLS here: sending it from a plain-HTTP listener locks a
+browser out of that origin for a year. Behind a TLS-terminating reverse proxy, the proxy
+is the one that should send it.
 
 ### TLS from disk (no ACME)
 
@@ -270,7 +287,7 @@ and `/etc/nsclient-fleet`, installs the systemd unit, and writes a template `/et
 Then:
 
 1. Edit `/etc/nsclient-fleet/env` — at minimum `MASTER_KEY`, `BASE_URL`, `ACME_DOMAINS`,
-   `ACME_CONTACT`, `COOKIE_SECURE=true`.
+   `ACME_CONTACT`.
 2. Confirm DNS resolves to this VM.
 3. Install the binary at `/opt/nsclient-fleet/nsclient-fleet` (`chown nsclient-fleet:nsclient-fleet`, mode 755).
 4. `systemctl enable --now nsclient-fleet`
@@ -533,7 +550,6 @@ to have one generated and persisted on first start:
 
 ```
 TLS_SELF_SIGNED=true
-COOKIE_SECURE=true
 LISTEN_HTTPS=0.0.0.0:9443
 ```
 

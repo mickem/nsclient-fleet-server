@@ -13,6 +13,7 @@ pub mod https;
 pub mod mtls;
 pub mod mux;
 pub mod platform;
+pub mod security_headers;
 pub mod tenant_setup;
 pub mod trial_expiry;
 pub mod users;
@@ -278,6 +279,12 @@ pub fn router(state: AppState) -> Router {
             auth::middleware::session_layer,
         ))
         .fallback(frontend)
+        // Outermost, and deliberately after `.fallback`, so the headers reach the SPA and
+        // every error response as well as the API routes.
+        .layer(axum::middleware::from_fn_with_state(
+            security_headers::SecurityHeaders::from_config(&state.config),
+            security_headers::layer,
+        ))
         .with_state(state)
 }
 

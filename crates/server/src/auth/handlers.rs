@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     rate_limit::RateDecision,
+    session_cookie_name,
     tokens::{hash_token, random_token},
-    AuthedUser, EXCHANGE_COOKIE, SESSION_COOKIE,
+    AuthedUser, EXCHANGE_COOKIE,
 };
 use crate::AppState;
 
@@ -494,7 +495,7 @@ async fn issue_session_cookie(
         return (StatusCode::INTERNAL_SERVER_ERROR, "session create failed").into_response();
     }
 
-    let mut cookie = Cookie::new(SESSION_COOKIE, token);
+    let mut cookie = Cookie::new(session_cookie_name(state.config.cookie_secure), token);
     cookie.set_http_only(true);
     cookie.set_same_site(SameSite::Lax);
     cookie.set_path("/");
@@ -516,11 +517,12 @@ fn time_dur(secs: i64) -> time::Duration {
 }
 
 pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> Response {
-    if let Some(c) = jar.get(SESSION_COOKIE) {
+    let name = session_cookie_name(state.config.cookie_secure);
+    if let Some(c) = jar.get(name) {
         let hash = hash_token(c.value());
         let _ = SessionRepo::new(&state.db).delete(&hash).await;
     }
-    let mut clear = Cookie::new(SESSION_COOKIE, "");
+    let mut clear = Cookie::new(name, "");
     clear.set_path("/");
     clear.set_max_age(time::Duration::ZERO);
     let jar = jar.remove(clear);

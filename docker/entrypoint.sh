@@ -79,11 +79,8 @@ serve() {
     check_base_url
     configure_tls
 
-    # Session cookies travel over TLS in every mode this script leaves enabled, so mark
-    # them Secure unless the operator has explicitly chosen otherwise.
-    if [ -z "${COOKIE_SECURE:-}" ] && [ "${TLS_SELF_SIGNED:-}" != "false" ]; then
-        export COOKIE_SECURE=true
-    fi
+    # COOKIE_SECURE is derived by the server from whether it terminates TLS, so there is
+    # nothing to set here — configure_tls above is what decides it.
 
     log "starting nsclient-fleet"
     exec nsclient-fleet

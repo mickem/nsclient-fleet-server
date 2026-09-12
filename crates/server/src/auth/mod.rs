@@ -11,7 +11,28 @@ use axum::{
 };
 use fleet_core::user::Role;
 
+/// The session cookie's name when we are not serving over TLS.
 pub const SESSION_COOKIE: &str = "fleet_session";
+
+/// The session cookie's name when we are.
+///
+/// `__Host-` is enforced by the browser, not by us: it refuses to store a cookie under this
+/// name unless it is `Secure`, `Path=/`, and carries no `Domain`. The last of those is the
+/// point — without it, anything that can write cookies for a sibling subdomain of the same
+/// registrable domain can plant a session cookie on this origin, and the browser will send
+/// it in preference to nothing. With it, that is not expressible.
+pub const SESSION_COOKIE_SECURE: &str = "__Host-fleet_session";
+
+/// Which of the two names this deployment uses. The name has to vary because `__Host-`
+/// requires `Secure`, and a cookie that requires `Secure` cannot be stored at all over
+/// plain HTTP — so a fixed prefixed name would break the no-TLS development path outright.
+pub fn session_cookie_name(cookie_secure: bool) -> &'static str {
+    if cookie_secure {
+        SESSION_COOKIE_SECURE
+    } else {
+        SESSION_COOKIE
+    }
+}
 
 /// Short-lived, HttpOnly, SameSite=Strict cookie set when the magic-link confirmation page is
 /// rendered. Its value is echoed back in the confirmation form and compared server-side
