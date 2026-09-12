@@ -214,6 +214,7 @@ export type TierLimits = {
   min_poll_interval_secs: number;
   per_host_requests_per_minute: number;
   max_bundle_mb: number;
+  max_bundles: number;
 };
 
 /** The numeric fields that may be overridden per tenant. `null` in any field means "inherit
@@ -223,6 +224,7 @@ export type TierOverrides = {
   min_poll_interval_secs: number | null;
   per_host_requests_per_minute: number | null;
   max_bundle_mb: number | null;
+  max_bundles: number | null;
 };
 
 export type PlatformTenantView = {

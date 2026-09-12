@@ -117,6 +117,7 @@ pub struct TierLimitsView {
     pub min_poll_interval_secs: u32,
     pub per_host_requests_per_minute: u32,
     pub max_bundle_mb: u32,
+    pub max_bundles: u32,
 }
 
 impl From<TierLimits> for TierLimitsView {
@@ -127,6 +128,7 @@ impl From<TierLimits> for TierLimitsView {
             min_poll_interval_secs: t.min_poll_interval_secs,
             per_host_requests_per_minute: t.per_host_requests_per_minute,
             max_bundle_mb: t.max_bundle_mb,
+            max_bundles: t.max_bundles,
         }
     }
 }
@@ -532,6 +534,7 @@ fn is_empty_overrides(ov: &TierOverrides) -> bool {
         && ov.min_poll_interval_secs.is_none()
         && ov.per_host_requests_per_minute.is_none()
         && ov.max_bundle_mb.is_none()
+        && ov.max_bundles.is_none()
 }
 
 // ---------------------------------------------------------------------------------------

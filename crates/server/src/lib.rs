@@ -273,6 +273,10 @@ pub fn router(state: AppState) -> Router {
             get(bundles::get_bundle_key).put(bundles::set_bundle_key),
         )
         .route("/api/bundles/compose", post(bundles::compose))
+        .route(
+            "/api/bundles/:id",
+            axum::routing::delete(bundles::delete_bundle),
+        )
         .route("/api/bundles/:id/config", get(bundles::get_config))
         .route("/api/bundles/:id/download", get(bundles::ui_download))
         .route("/api/audit", get(audit::list))

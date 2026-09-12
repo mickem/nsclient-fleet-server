@@ -10,6 +10,14 @@ pub struct TierLimits {
     pub min_poll_interval_secs: u32,
     pub per_host_requests_per_minute: u32,
     pub max_bundle_mb: u32,
+    /// Bundles a tenant may hold at once.
+    ///
+    /// Bundles are immutable and were never deletable, so uploading was a one-way ratchet
+    /// on disk with nothing to reclaim it: a config writer could fill the volume, and the
+    /// per-bundle size cap did not help because nothing capped the count. Deleting is now
+    /// possible, and this is what makes it necessary before the next upload rather than
+    /// after the disk is full.
+    pub max_bundles: u32,
 }
 
 /// Numeric subset of `TierLimits` that may be overridden per tenant. Anything not present
@@ -21,6 +29,8 @@ pub struct TierOverrides {
     pub min_poll_interval_secs: Option<u32>,
     pub per_host_requests_per_minute: Option<u32>,
     pub max_bundle_mb: Option<u32>,
+    #[serde(default)]
+    pub max_bundles: Option<u32>,
 }
 
 impl TierOverrides {
@@ -39,6 +49,7 @@ impl TierOverrides {
                 .per_host_requests_per_minute
                 .unwrap_or(base.per_host_requests_per_minute),
             max_bundle_mb: self.max_bundle_mb.unwrap_or(base.max_bundle_mb),
+            max_bundles: self.max_bundles.unwrap_or(base.max_bundles),
         }
     }
 }
@@ -49,6 +60,7 @@ pub const FREE: TierLimits = TierLimits {
     min_poll_interval_secs: 60,
     per_host_requests_per_minute: 10,
     max_bundle_mb: 10,
+    max_bundles: 50,
 };
 pub const STARTER: TierLimits = TierLimits {
     name: "starter",
@@ -56,6 +68,7 @@ pub const STARTER: TierLimits = TierLimits {
     min_poll_interval_secs: 30,
     per_host_requests_per_minute: 30,
     max_bundle_mb: 50,
+    max_bundles: 200,
 };
 pub const PRO: TierLimits = TierLimits {
     name: "pro",
@@ -63,6 +76,7 @@ pub const PRO: TierLimits = TierLimits {
     min_poll_interval_secs: 30,
     per_host_requests_per_minute: 60,
     max_bundle_mb: 100,
+    max_bundles: 500,
 };
 pub const ENTERPRISE: TierLimits = TierLimits {
     name: "enterprise",
@@ -70,6 +84,7 @@ pub const ENTERPRISE: TierLimits = TierLimits {
     min_poll_interval_secs: 15,
     per_host_requests_per_minute: 120,
     max_bundle_mb: 250,
+    max_bundles: 2000,
 };
 pub const ONPREM: TierLimits = TierLimits {
     name: "onprem",
@@ -77,6 +92,9 @@ pub const ONPREM: TierLimits = TierLimits {
     min_poll_interval_secs: 15,
     per_host_requests_per_minute: 120,
     max_bundle_mb: 250,
+    // Unbounded like max_hosts: on-prem is the customer's own disk, and a count here would
+    // be this product deciding how they use it. The size cap still applies per bundle.
+    max_bundles: u32::MAX,
 };
 
 pub const ALL: &[TierLimits] = &[FREE, STARTER, PRO, ENTERPRISE, ONPREM];

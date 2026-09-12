@@ -743,6 +743,92 @@ async fn bad_selector_rejected() {
 
 /// The server never extracts, so traversal is an agent-side risk — but a hand-crafted base
 /// bundle used to carry `../../` entries straight through compose into output we sign.
+/// Bundles are immutable and there was no way to delete one, so uploading was a one-way
+/// ratchet on disk with nothing to reclaim it.
+#[tokio::test]
+async fn deleting_a_bundle_takes_its_assignments_and_bytes_with_it() {
+    let s = start().await;
+    signup_login(&s, "reclaim", "rec@example.com").await;
+
+    let form = reqwest::multipart::Form::new()
+        .text("name", "doomed")
+        .text("version", "1.0.0")
+        .part(
+            "bundle",
+            reqwest::multipart::Part::bytes(b"bytes".to_vec()).file_name("b.zip"),
+        );
+    let bundle_id = s
+        .cookie_jar
+        .post(format!("{}/api/bundles", s.base_url))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let group_id = s
+        .cookie_jar
+        .post(format!("{}/api/groups", s.base_url))
+        .json(&serde_json::json!({"name": "g", "selector": {"clauses": []}}))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    s.cookie_jar
+        .post(format!("{}/api/groups/{}/bundles", s.base_url, group_id))
+        .json(&serde_json::json!({"bundle_id": bundle_id, "priority": 1}))
+        .send()
+        .await
+        .unwrap();
+
+    let stored = s
+        ._tempdir
+        .path()
+        .join("bundles")
+        .join("1")
+        .join(format!("{bundle_id}.zip"));
+    assert!(stored.exists());
+
+    let r = s
+        .cookie_jar
+        .delete(format!("{}/api/bundles/{}", s.base_url, bundle_id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+
+    // The row, the bytes, and — the part that would otherwise break desired state for every
+    // host in that group — the assignment.
+    assert!(!stored.exists(), "the stored bytes must be reclaimed");
+    let assignments: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM bundle_assignments WHERE bundle_id = ?")
+            .bind(&bundle_id)
+            .fetch_one(&s.db.read)
+            .await
+            .unwrap();
+    assert_eq!(assignments, 0);
+
+    assert_eq!(
+        s.cookie_jar
+            .delete(format!("{}/api/bundles/{}", s.base_url, bundle_id))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+}
+
 #[tokio::test]
 async fn a_zip_entry_that_escapes_the_archive_is_refused() {
     let s = start().await;

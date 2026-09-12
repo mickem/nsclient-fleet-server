@@ -1017,6 +1017,37 @@ impl<'a> BundlesRepo<'a> {
         Ok(row.map(map_bundle))
     }
 
+    pub async fn count(&self, tenant_id: i64) -> Result<i64> {
+        Ok(
+            sqlx::query_scalar("SELECT COUNT(*) FROM bundles WHERE tenant_id = ?")
+                .bind(tenant_id)
+                .fetch_one(&self.db.read)
+                .await?,
+        )
+    }
+
+    /// Delete a bundle and every assignment referencing it, in one transaction.
+    ///
+    /// The assignments have to go with it or a group keeps pointing at a bundle that is not
+    /// there, and the next desired-state computation for every host in that group fails.
+    /// The stored bytes are the caller's to remove — this layer does not know where they
+    /// live — and are deleted after this returns true.
+    pub async fn delete(&self, tenant_id: i64, id: &str) -> Result<bool> {
+        let mut tx = self.db.write.begin().await?;
+        sqlx::query("DELETE FROM bundle_assignments WHERE tenant_id = ? AND bundle_id = ?")
+            .bind(tenant_id)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        let res = sqlx::query("DELETE FROM bundles WHERE tenant_id = ? AND id = ?")
+            .bind(tenant_id)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(res.rows_affected() > 0)
+    }
+
     pub async fn list(&self, tenant_id: i64) -> Result<Vec<BundleRow>> {
         let rows = sqlx::query(
             "SELECT id, tenant_id, name, version, sha256, size_bytes, signature, uploaded_at, format, key_fingerprint

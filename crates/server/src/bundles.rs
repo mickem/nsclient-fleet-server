@@ -31,7 +31,6 @@ use crate::AppState;
 pub trait BundleStore: Send + Sync {
     async fn put(&self, tenant_id: i64, bundle_id: &str, bytes: &[u8]) -> Result<()>;
     async fn get(&self, tenant_id: i64, bundle_id: &str) -> Result<Vec<u8>>;
-    #[allow(dead_code)]
     async fn delete(&self, tenant_id: i64, bundle_id: &str) -> Result<()>;
 }
 
@@ -234,6 +233,30 @@ async fn persist_bundle(
         _ => return Err((StatusCode::INTERNAL_SERVER_ERROR, "tenant missing").into_response()),
     };
     let limits = fleet_core::tier::effective(&tenant.tier, tenant.tier_overrides_json.as_deref());
+
+    // Bundles are immutable and, until now, undeletable, so uploading was a one-way ratchet
+    // on disk: a config writer could fill the volume and nothing would ever reclaim it. The
+    // per-bundle size cap did not help, because nothing capped the count.
+    match BundlesRepo::new(&state.db).count(who.tenant_id).await {
+        Ok(n) if n as u64 >= limits.max_bundles as u64 => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(crate::hosts::TierLimitError {
+                    error: "tier_limit",
+                    limit: limits.max_bundles,
+                    current: n,
+                    tier: limits.name.to_string(),
+                }),
+            )
+                .into_response());
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "bundle count failed");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response());
+        }
+    }
+
     let max = (limits.max_bundle_mb as usize) * 1024 * 1024;
     if bytes.len() > max {
         return Err((
@@ -670,6 +693,62 @@ fn read_zip_entries_within(bytes: &[u8], mut budget: u64) -> Result<Vec<(String,
         out.push((name, data));
     }
     Ok(out)
+}
+
+/// `DELETE /api/bundles/:id` — remove a bundle, its assignments and its bytes.
+///
+/// There was no way to delete one at all, which is why the disk only ever grew. Assignments
+/// go in the same transaction: a group left pointing at a bundle that is not there fails
+/// desired-state computation for every host in it.
+pub async fn delete_bundle(
+    State(state): State<AppState>,
+    who: AuthedUser,
+    Path(bundle_id): Path<String>,
+) -> Response {
+    if !who.role.can_write_config() {
+        return crate::auth::forbidden("change configuration");
+    }
+    let bundles = BundlesRepo::new(&state.db);
+    let row = match bundles.get(who.tenant_id, &bundle_id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return (StatusCode::NOT_FOUND, "bundle not found").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "bundle lookup failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+        }
+    };
+
+    match bundles.delete(who.tenant_id, &bundle_id).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "bundle not found").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "bundle delete failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+        }
+    }
+
+    // After the row, not before: a file with no row is wasted disk, a row with no file is a
+    // bundle that 500s on download. If this fails the row is still gone and the file is
+    // orphaned, which is the direction to fail in.
+    if let Err(e) = state.bundle_store.delete(who.tenant_id, &bundle_id).await {
+        tracing::error!(error = %e, %bundle_id, "bundle bytes could not be removed");
+    }
+
+    // Assignments changed, so every host's memoized state may have.
+    crate::config_api::bump_config_version(&state, who.tenant_id).await;
+
+    crate::audit::record(
+        &state,
+        who.tenant_id,
+        Some(who.user_id),
+        "bundle.deleted",
+        "bundle",
+        &bundle_id,
+        Some(&serde_json::json!({ "name": row.name, "version": row.version })),
+    )
+    .await;
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn list(State(state): State<AppState>, who: AuthedUser) -> Response {

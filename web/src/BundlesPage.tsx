@@ -25,6 +25,7 @@ import {
 } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
 import DownloadIcon from "@mui/icons-material/Download";
+import DeleteIcon from "@mui/icons-material/Delete";
 import EditIcon from "@mui/icons-material/Edit";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import LockIcon from "@mui/icons-material/Lock";
@@ -263,6 +264,25 @@ export function BundlesPage({ me }: { me: Me }) {
   };
   useEffect(refresh, []);
 
+  /** Bundles are immutable, so there is no editing one in place — which made uploading a
+   *  one-way ratchet on disk until this existed. Deleting also drops the bundle from every
+   *  group that carries it, so it is confirmed rather than one click. */
+  const remove = async (b: BundleView) => {
+    if (
+      !confirm(
+        `Delete ${b.name} ${b.version}? It is removed from every group that carries it, ` +
+          `and hosts stop receiving it on their next poll.`,
+      )
+    )
+      return;
+    try {
+      await apiSend("DELETE", `/api/bundles/${b.id}`);
+      refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
   // The editor needs the bundle's list row (format, fingerprint…). Until the list has
   // loaded there is nothing to show; once it has, an id it does not contain is a stale
   // link — say so and fall back to the list.
@@ -442,6 +462,13 @@ export function BundlesPage({ me }: { me: Me }) {
                           Edit
                         </Button>
                       ))}
+                    {canWriteConfig(me.role) && (
+                      <Tooltip title="Delete this bundle, and remove it from every group">
+                        <IconButton size="small" color="error" onClick={() => remove(b)}>
+                          <DeleteIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    )}
                   </TableCell>
                 </TableRow>
               ))}
