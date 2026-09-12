@@ -7,6 +7,7 @@ pub mod bundles;
 pub mod config;
 pub mod config_api;
 pub mod conn;
+pub mod csrf;
 pub mod desired_state;
 pub mod hosts;
 pub mod https;
@@ -313,6 +314,9 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             auth::middleware::session_layer,
         ))
+        // Outside the session layer, so a refused cross-origin request never reaches the
+        // point of resolving who it claims to be.
+        .layer(axum::middleware::from_fn(csrf::layer))
         .fallback(frontend)
         // Outermost, and deliberately after `.fallback`, so the headers reach the SPA and
         // every error response as well as the API routes.

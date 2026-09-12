@@ -353,6 +353,52 @@ async fn signup_creates_tenant_user_and_magic_link() {
 /// Signup used to answer "email already registered" to an anonymous caller, while
 /// `send-link` next door is carefully uniform about exactly that. With a free slug, anyone
 /// could test any address.
+/// SameSite=Lax treats a sibling subdomain of the same registrable domain as same-site and
+/// sends the cookie, so `evil.example.com` posting multipart to the bundle upload was the
+/// one shape Lax did not cover. `Sec-Fetch-Site` is the browser's own account of where a
+/// request came from, and a page cannot forge it.
+#[tokio::test]
+async fn a_mutating_request_from_another_site_is_refused() {
+    let s = start().await;
+    let c = reqwest::Client::new();
+    let url = format!("{}/api/hosts", s.base_url);
+
+    for site in ["cross-site", "same-site"] {
+        let r = c
+            .post(&url)
+            .header("sec-fetch-site", site)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "{site} must be refused");
+    }
+
+    // Same-origin, and a request with no such header at all (curl, the agent, a script),
+    // both get through the check — they fail later on authentication instead, which is the
+    // 401 below rather than the 403 above.
+    for headers in [Some("same-origin"), Some("none"), None] {
+        let mut req = c.post(&url).json(&serde_json::json!({}));
+        if let Some(h) = headers {
+            req = req.header("sec-fetch-site", h);
+        }
+        let status = req.send().await.unwrap().status();
+        assert_ne!(
+            status, 403,
+            "{headers:?} must not be refused as cross-origin"
+        );
+    }
+
+    // A safe method is out of scope: the magic-link GET is a top-level navigation.
+    let r = c
+        .get(format!("{}/healthz", s.base_url))
+        .header("sec-fetch-site", "cross-site")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+}
+
 #[tokio::test]
 async fn signup_does_not_reveal_whether_an_address_has_an_account() {
     let s = start().await;
