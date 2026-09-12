@@ -501,11 +501,14 @@ enough that most free tiers cover it.
 ```bash
 # /etc/cron.daily/nsclient-fleet-backup
 set -euo pipefail
-sqlite3 /opt/nsclient-fleet/data/fleet.db ".backup /tmp/fleet.db"   # consistent copy under WAL
+# A private 0700 directory, not a fixed /tmp path: /tmp is world-writable, and this copy
+# is the whole database — every tenant's encrypted CA key and every session hash.
+stage=$(mktemp -d)
+trap 'rm -rf "$stage"' EXIT
+sqlite3 /opt/nsclient-fleet/data/fleet.db ".backup $stage/fleet.db"   # consistent copy under WAL
 restic -r s3:https://<endpoint>/<bucket> backup \
-  /tmp/fleet.db /opt/nsclient-fleet/data/mtls-server.crt /opt/nsclient-fleet/data/mtls-server.key \
+  "$stage/fleet.db" /opt/nsclient-fleet/data/mtls-server.crt /opt/nsclient-fleet/data/mtls-server.key \
   /opt/nsclient-fleet/data/bundles
-rm -f /tmp/fleet.db
 ```
 
 Do not copy `fleet.db` with `cp` while the service runs — use `.backup`, or you may capture a

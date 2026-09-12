@@ -21,16 +21,36 @@ if [[ ! -f "$ARTIFACT" ]]; then
   exit 1
 fi
 
-echo "deploy: copying $ARTIFACT to ${VM_USER}@${VM_HOST}"
-scp -q "$ARTIFACT" "${VM_USER}@${VM_HOST}:/tmp/nsclient-fleet.new"
+# Staged in a private directory, not at a fixed /tmp path. `/tmp` is world-writable and
+# sticky, so another local account could pre-create /tmp/nsclient-fleet.new and win the
+# race, or swap its contents between the copy landing and the install running it as root.
+# `mktemp -d` gives a 0700 directory with an unpredictable name, which closes both.
+STAGE=$(ssh "${VM_USER}@${VM_HOST}" 'mktemp -d')
+if [[ -z "$STAGE" ]]; then
+  echo "deploy: could not create a staging directory on ${VM_HOST}" >&2
+  exit 1
+fi
+
+echo "deploy: copying $ARTIFACT to ${VM_USER}@${VM_HOST}:${STAGE}"
+scp -q "$ARTIFACT" "${VM_USER}@${VM_HOST}:${STAGE}/nsclient-fleet.new"
+
+# What we sent, so the remote side can confirm it is installing that and not something else.
+EXPECTED=$(sha256sum "$ARTIFACT" | cut -d' ' -f1)
 
 ssh "${VM_USER}@${VM_HOST}" bash -s <<EOF
 set -euo pipefail
+trap 'rm -rf ${STAGE}' EXIT
+
+actual=\$(sha256sum ${STAGE}/nsclient-fleet.new | cut -d' ' -f1)
+if [[ "\$actual" != "${EXPECTED}" ]]; then
+  echo "deploy: staged binary does not match what was sent (\$actual != ${EXPECTED})" >&2
+  exit 1
+fi
+
 # root-owned: the service must not be able to rewrite its own executable. ProtectSystem=strict
 # already makes /opt read-only to it, but ownership costs nothing and does not depend on the
 # unit staying as it is.
-sudo install -o root -g root -m 755 /tmp/nsclient-fleet.new ${REMOTE_DIR}/nsclient-fleet
-rm -f /tmp/nsclient-fleet.new
+sudo install -o root -g root -m 755 ${STAGE}/nsclient-fleet.new ${REMOTE_DIR}/nsclient-fleet
 sudo systemctl restart nsclient-fleet
 sleep 1
 sudo systemctl is-active --quiet nsclient-fleet
