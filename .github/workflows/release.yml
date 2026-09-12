@@ -56,7 +56,7 @@ jobs:
       draft: ${{ steps.compute.outputs.draft }}
       prerelease: ${{ steps.compute.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # git-version walks back to the last tag; a shallow clone has no tags to find.
           fetch-depth: 0
@@ -66,7 +66,7 @@ jobs:
       - name: Derive version from tags
         id: gitversion
         if: github.ref_type != 'tag'
-        uses: codacy/git-version@2.8.7
+        uses: codacy/git-version@e81d6fdad74f9e114420d69ca8b47658f1182afb # 2.8.7
         with:
           release-branch: main
           prefix: v
@@ -121,10 +121,10 @@ jobs:
     name: Frontend
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
           cache: "npm"
@@ -136,7 +136,7 @@ jobs:
           npm ci
           npm run build
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: web-dist
           path: web/dist
@@ -183,18 +183,18 @@ jobs:
             ext: ".exe"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: web-dist
           path: web/dist
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}
 
@@ -202,7 +202,7 @@ jobs:
       # Windows images. Harmless on the ARM64 target, which uses different sources.
       - name: Install NASM
         if: runner.os == 'Windows'
-        uses: ilammy/setup-nasm@v1
+        uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
 
       # Fail here, with an actionable message, rather than several minutes later inside
       # aws-lc-sys's CMake invocation with an error that does not name the real cause.
@@ -262,7 +262,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nsclient-fleet-${{ matrix.target }}
           path: dist/*
@@ -278,9 +278,9 @@ jobs:
       contents: write
     steps:
       # Only so bootstrap-vm.sh can be attached as an asset.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           pattern: nsclient-fleet-*
@@ -294,7 +294,7 @@ jobs:
           cat SHA256SUMS
 
       - name: Attach to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ needs.version.outputs.tag }}
           name: ${{ needs.version.outputs.name }}

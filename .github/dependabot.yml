@@ -1,0 +1,36 @@
+# Keeps the pinned dependencies moving.
+#
+# Workflow actions are pinned to commit SHAs, which is the point — a tag can be moved to
+# point at different code, and the job that publishes releases holds `contents: write`. The
+# cost of pinning is that nothing updates on its own, so Dependabot is what turns "pinned"
+# into "pinned and current" rather than "pinned and forgotten". It rewrites the SHA and
+# keeps the trailing version comment in step.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    # Security updates still arrive individually and immediately; this only batches the
+    # routine ones so they are one review rather than a dozen.
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
