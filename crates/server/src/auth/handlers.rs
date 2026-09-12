@@ -228,11 +228,7 @@ pub async fn send_link(
     Json(body): Json<SendLinkBody>,
 ) -> Response {
     if state.config.on_prem {
-        return (
-            StatusCode::NOT_FOUND,
-            "magic-link login disabled in on-prem mode",
-        )
-            .into_response();
+        return magic_links_disabled();
     }
 
     let email = body.email.trim().to_lowercase();
@@ -321,6 +317,21 @@ pub struct ConfirmForm {
     pub csrf: String,
 }
 
+/// The single refusal, so the three routes that make up magic-link sign-in cannot drift
+/// apart on whether on-prem has them.
+///
+/// On-prem authenticates one administrator from configuration and has no mail path at all.
+/// `send-link` refused already, but the exchange routes did not — so a platform admin could
+/// mint a link through the console and sign in a second user, which is exactly the invariant
+/// `crate::users` says holds.
+fn magic_links_disabled() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        "magic-link login disabled in on-prem mode",
+    )
+        .into_response()
+}
+
 /// GET is the click target in the magic-link email. It deliberately does NOT sign anyone in:
 /// a link click is a top-level GET that a cross-site page can trigger, so redeeming the token
 /// and setting a session here would be login CSRF — an attacker who minted a link for their
@@ -335,6 +346,9 @@ pub async fn exchange(
     jar: CookieJar,
     Query(q): Query<ExchangeQuery>,
 ) -> Response {
+    if state.config.on_prem {
+        return magic_links_disabled();
+    }
     let csrf = random_token();
     let mut cookie = Cookie::new(EXCHANGE_COOKIE, csrf.clone());
     cookie.set_http_only(true);
@@ -366,6 +380,9 @@ pub async fn exchange_confirm(
     jar: CookieJar,
     Form(form): Form<ConfirmForm>,
 ) -> Response {
+    if state.config.on_prem {
+        return magic_links_disabled();
+    }
     let matches = jar
         .get(EXCHANGE_COOKIE)
         .map(|c| constant_time_eq(c.value().as_bytes(), form.csrf.as_bytes()))

@@ -294,6 +294,17 @@ pub async fn create_tenant(
         }
         other => other,
     };
+    // Inviting an owner means minting a magic link, which on-prem does not have — it
+    // authenticates one administrator from configuration. Creating the tenant is still
+    // fine; naming an owner for it is the part that would sign in a second user.
+    if state.config.on_prem && owner_email.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "on-prem mode has no magic links, so a tenant cannot be created with an owner. \
+             Create it without one.",
+        )
+            .into_response();
+    }
 
     let tenants = TenantRepo::new(&state.db);
     let users = UserRepo::new(&state.db);
