@@ -307,8 +307,17 @@ pub fn host_of(url: &str) -> String {
 /// Build the URL agents dial for `/agent/v1/*`.
 ///
 /// The hostname always comes from `base_url` — that is the name agents can resolve and the
-/// name the pinned mTLS server certificate must cover (see `MTLS_HOST`). Only the port
-/// varies: the dedicated mTLS port when one is bound, otherwise the shared HTTPS port.
+/// name the pinned mTLS server certificate must cover (see `MTLS_HOST`). The port depends
+/// on which listener agents land on:
+///
+/// - A dedicated mTLS listener: its bind port. `base_url` may point at a plain-HTTP dev
+///   port that agents must never dial.
+/// - The shared TLS listener: `base_url`'s port. Agents and browsers then hit the *same*
+///   listener, and `base_url` is by definition its reachable address — the bind port is
+///   only right when nothing rewrites ports in between, and a container's `-p 9443:8443`
+///   or a NAT rule routinely does. `MTLS_URL` remains the override for setups where even
+///   `base_url` is not what agents can reach.
+///
 /// `:443` is left implicit so the URL matches what an operator would type.
 fn derive_agent_mtls_url(base_url: &str, listen_https: &str, listen_mtls: &str) -> String {
     let host = host_of(base_url);
@@ -320,10 +329,14 @@ fn derive_agent_mtls_url(base_url: &str, listen_https: &str, listen_mtls: &str) 
             .unwrap_or(fallback)
     };
 
-    let port = if listen_mtls.is_empty() {
-        port_of(listen_https, 443)
-    } else {
+    let port = if !listen_mtls.is_empty() {
         port_of(listen_mtls, 9443)
+    } else if base_url.starts_with("https://") {
+        port_of_url(base_url).unwrap_or(443)
+    } else {
+        // A plain-HTTP base_url with a shared TLS listener is a misconfiguration (browsers
+        // would be sent somewhere agents are not), but the bind port is the best guess.
+        port_of(listen_https, 443)
     };
 
     if port == 443 {
@@ -331,6 +344,25 @@ fn derive_agent_mtls_url(base_url: &str, listen_https: &str, listen_mtls: &str) 
     } else {
         format!("https://{host}:{port}")
     }
+}
+
+/// The explicit port in a URL's authority, if any. Understands bracketed IPv6 literals.
+fn port_of_url(url: &str) -> Option<u16> {
+    let authority = url
+        .split("//")
+        .nth(1)
+        .unwrap_or(url)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("");
+    let after_host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split(']').nth(1).unwrap_or("")
+    } else {
+        authority
+    };
+    after_host
+        .rsplit_once(':')
+        .and_then(|(_, p)| p.parse().ok())
 }
 
 impl Config {
@@ -394,7 +426,7 @@ fn bool_env(key: &str, default: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_agent_mtls_url, host_of, parse_lost_after_hours};
+    use super::{derive_agent_mtls_url, host_of, parse_lost_after_hours, port_of_url};
     use fleet_core::host::DEFAULT_LOST_AFTER_SECS;
 
     #[test]
@@ -462,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn base_url_port_never_leaks_into_the_agent_url() {
+    fn dedicated_port_ignores_the_base_url_port() {
         // Dev: BASE_URL carries :3000, but agents must dial the mTLS port, not that one.
         assert_eq!(
             derive_agent_mtls_url("http://localhost:3000", "0.0.0.0:443", "0.0.0.0:9443"),
@@ -473,8 +505,42 @@ mod tests {
     #[test]
     fn non_standard_https_port_is_explicit() {
         assert_eq!(
-            derive_agent_mtls_url("https://app.example.com", "0.0.0.0:8443", ""),
-            "https://app.example.com:8443"
+            derive_agent_mtls_url("https://app.example.com:9443", "0.0.0.0:9443", ""),
+            "https://app.example.com:9443"
         );
+    }
+
+    #[test]
+    fn shared_listener_uses_the_published_port_not_the_bind_port() {
+        // Container: bound on 8443 inside, published as 9443 outside, BASE_URL says so.
+        assert_eq!(
+            derive_agent_mtls_url("https://fleet.example.internal:9443", "0.0.0.0:8443", ""),
+            "https://fleet.example.internal:9443"
+        );
+        // `-p 443:9443`: BASE_URL carries no port, so neither does the agent URL.
+        assert_eq!(
+            derive_agent_mtls_url("https://fleet.example.com", "0.0.0.0:9443", ""),
+            "https://fleet.example.com"
+        );
+    }
+
+    #[test]
+    fn shared_listener_with_http_base_url_falls_back_to_the_bind_port() {
+        assert_eq!(
+            derive_agent_mtls_url("http://localhost:3000", "0.0.0.0:8443", ""),
+            "https://localhost:8443"
+        );
+    }
+
+    #[test]
+    fn port_of_url_reads_the_authority_only() {
+        assert_eq!(
+            port_of_url("https://app.example.com:9443/x?y=1:2"),
+            Some(9443)
+        );
+        assert_eq!(port_of_url("https://app.example.com/a:b"), None);
+        assert_eq!(port_of_url("https://[::1]:8443"), Some(8443));
+        assert_eq!(port_of_url("https://[::1]"), None);
+        assert_eq!(port_of_url("https://10.0.0.5:9443"), Some(9443));
     }
 }

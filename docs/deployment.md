@@ -153,7 +153,7 @@ key; the bundles encrypted under it are gone and must be re-uploaded. Nothing ab
 | `LISTEN_HTTPS` | `0.0.0.0:443`    | The shared port, used when ACME is on                        |
 | `LISTEN`       | `0.0.0.0:3000`   | Plain HTTP; used **only** when ACME is off                   |
 | `LISTEN_MTLS`  | unset with ACME on; `0.0.0.0:9443` with ACME off | Setting it binds a dedicated agent port *in addition* to the mux. Leave unset in production |
-| `MTLS_URL`     | derived          | Overrides the URL handed to agents. For proxies/NAT where the reachable address differs from `BASE_URL` |
+| `MTLS_URL`     | derived          | Overrides the URL handed to agents. Derived from `BASE_URL`'s host and port on the shared listener (so a remapped container port works), or from the `LISTEN_MTLS` port when one is bound. For proxies/NAT where even `BASE_URL` is not what agents can reach |
 | `MTLS_SNI`     | unset            | Hostname that also routes to the agent branch, for TLS stacks without ALPN |
 | `MTLS_HOST`    | host of `BASE_URL` | SAN of the pinned agent certificate. Changing it regenerates that cert |
 | `MTLS_STATE_DIR` | `data`         | Where `mtls-server.{crt,key}` live                           |
@@ -533,7 +533,7 @@ to have one generated and persisted on first start:
 ```
 TLS_SELF_SIGNED=true
 COOKIE_SECURE=true
-LISTEN_HTTPS=0.0.0.0:8443
+LISTEN_HTTPS=0.0.0.0:9443
 ```
 
 That gives on-prem the same single port as a hosted install — the mux needs a TLS listener

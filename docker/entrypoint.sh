@@ -67,7 +67,7 @@ configure_tls() {
 # from inside the container is worth one line of warning.
 check_base_url() {
     if [ -z "${BASE_URL:-}" ]; then
-        https_addr="${LISTEN_HTTPS:-0.0.0.0:8443}"
+        https_addr="${LISTEN_HTTPS:-0.0.0.0:9443}"
         export BASE_URL="https://localhost:${https_addr##*:}"
         log "BASE_URL not set, using ${BASE_URL}. Agents and email links need an address"
         log "that resolves from outside this container — set BASE_URL before enrolling anything."

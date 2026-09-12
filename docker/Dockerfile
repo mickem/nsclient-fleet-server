@@ -95,14 +95,18 @@ ENV DATABASE_PATH=/data/fleet.db \
     ACME_CACHE_DIR=/data/acme \
     MTLS_STATE_DIR=/data \
     TLS_STATE_DIR=/data \
-    LISTEN_HTTPS=0.0.0.0:8443 \
+    LISTEN_HTTPS=0.0.0.0:9443 \
     LISTEN=0.0.0.0:8080
 VOLUME ["/data"]
 
-# Unprivileged: nothing here needs root, and 8443 is above the privileged range precisely
-# so it does not have to. Publish it as :443 on the host if you want the standard port.
+# Unprivileged: nothing here needs root, and 9443 is above the privileged range precisely
+# so it does not have to. Not 8443: that is the NSClient++ web UI, and a server sharing a
+# host with an agent would collide with it. 9443 is also the port agents get in plain-HTTP
+# mode (LISTEN_MTLS), so agents dial 9443 whichever way the container runs. Publish it as
+# :443 on the host if you want the standard port — BASE_URL's port is what agents are told
+# to dial, so any mapping works as long as BASE_URL matches it.
 USER fleet:fleet
-EXPOSE 8443
+EXPOSE 9443
 
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 CMD ["serve"]
