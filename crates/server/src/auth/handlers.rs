@@ -93,6 +93,11 @@ pub async fn signup(
     if email.is_empty() || slug.is_empty() || body.tenant_name.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "missing field").into_response();
     }
+    // The same rule the platform console applies. Signup used to only trim and lowercase,
+    // and the slug becomes a CA subject — see `fleet_core::tenant::valid_slug`.
+    if !fleet_core::tenant::valid_slug(&slug) {
+        return (StatusCode::BAD_REQUEST, fleet_core::tenant::SLUG_RULE).into_response();
+    }
 
     // Before the Turnstile round trip, the tenant CA generation and the SMTP send, because
     // all three are expensive and this is the only thing standing between an anonymous

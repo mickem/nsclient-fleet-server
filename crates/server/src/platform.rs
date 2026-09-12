@@ -270,19 +270,6 @@ pub struct CreateTenantResponse {
     pub owner_invited: bool,
 }
 
-/// Slug rules, applied here and not at signup.
-///
-/// The slug reaches a certificate subject DN (`fleet_enrollment::generate_tenant_ca`) and
-/// operator-facing URLs, so it is restricted to what is safe in both.
-fn valid_slug(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 63
-        && s.chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        && !s.starts_with('-')
-        && !s.ends_with('-')
-}
-
 pub async fn create_tenant(
     State(state): State<AppState>,
     PlatformAdmin(who): PlatformAdmin,
@@ -291,12 +278,8 @@ pub async fn create_tenant(
 ) -> Response {
     let slug = body.slug.trim().to_lowercase();
     let name = body.name.trim();
-    if !valid_slug(&slug) {
-        return (
-            StatusCode::BAD_REQUEST,
-            "slug must be 1-63 characters of a-z, 0-9 and dashes, not starting or ending with a dash",
-        )
-            .into_response();
+    if !fleet_core::tenant::valid_slug(&slug) {
+        return (StatusCode::BAD_REQUEST, fleet_core::tenant::SLUG_RULE).into_response();
     }
     if name.is_empty() {
         return (StatusCode::BAD_REQUEST, "name is required").into_response();
@@ -833,19 +816,6 @@ async fn actor_email(state: &AppState, user_id: i64) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn slug_rules() {
-        assert!(valid_slug("acme"));
-        assert!(valid_slug("acme-corp-2"));
-        assert!(!valid_slug(""));
-        assert!(!valid_slug("-acme"));
-        assert!(!valid_slug("acme-"));
-        assert!(!valid_slug("Acme"), "uppercase is not allowed");
-        assert!(!valid_slug("acme corp"), "spaces reach a certificate DN");
-        assert!(!valid_slug("acme.corp"));
-        assert!(!valid_slug(&"a".repeat(64)));
-    }
 
     #[test]
     fn all_null_overrides_are_no_overrides() {

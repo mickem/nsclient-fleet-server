@@ -260,6 +260,54 @@ async fn signup_creates_tenant_user_and_magic_link() {
     assert_eq!(links_count, 1);
 }
 
+/// Signup used to only trim and lowercase the slug while the strict validator lived in the
+/// platform console with a comment saying it was not applied here. The slug becomes a CA
+/// subject, and the mTLS issuer map used to match on a whitespace-stripped printed DN — so
+/// `ac me` collided with an existing `acme` and could take that tenant's fleet offline.
+#[tokio::test]
+async fn signup_refuses_a_slug_the_console_would_refuse() {
+    let s = start().await;
+    let c = reqwest::Client::new();
+
+    // "Acme" is deliberately absent: both paths lowercase before validating, so it is a
+    // valid request for the tenant `acme` rather than a refusal.
+    for bad in ["ac me", "acme.corp", "-acme", "acme-", &"a".repeat(64)] {
+        let r = c
+            .post(format!("{}/api/auth/signup", s.base_url))
+            .json(&serde_json::json!({
+                "email": format!("{}@example.com", bad.len()),
+                "tenant_slug": bad,
+                "tenant_name": "Acme",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400, "slug {bad:?} should be refused");
+    }
+
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tenants")
+        .fetch_one(&s.db.read)
+        .await
+        .unwrap();
+    assert_eq!(n, 0, "no tenant should have been created");
+}
+
+/// The schema backstop, for a path that forgets the application check.
+#[tokio::test]
+async fn the_database_refuses_a_malformed_slug_outright() {
+    let s = start().await;
+    let err = sqlx::query(
+        "INSERT INTO tenants (slug, name, tier, created_at) VALUES ('ac me','X','free',0)",
+    )
+    .execute(&s.db.write)
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("slug must be"),
+        "unexpected error: {err}"
+    );
+}
+
 #[tokio::test]
 async fn send_link_unknown_email_returns_204_with_no_link() {
     let s = start().await;
