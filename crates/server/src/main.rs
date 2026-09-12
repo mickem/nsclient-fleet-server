@@ -63,6 +63,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(parent) = Path::new(&cfg.database_path).parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
+            fleet_server::restrict_dir(parent);
         }
     }
 
@@ -111,6 +112,10 @@ async fn main() -> anyhow::Result<()> {
 
     let bundle_dir = std::env::var("BUNDLE_DIR").unwrap_or_else(|_| "data/bundles".into());
     std::fs::create_dir_all(&bundle_dir)?;
+    // Bundles can carry scripts and, in the plain format, secrets. Same reasoning as the
+    // ACME cache: the unit's UMask covers new files, this covers a directory that already
+    // exists with a wider mode.
+    fleet_server::restrict_dir(std::path::Path::new(&bundle_dir));
     let bundle_store: Arc<dyn fleet_server::bundles::BundleStore> = Arc::new(
         fleet_server::bundles::LocalBundleStore::new(std::path::PathBuf::from(bundle_dir)),
     );

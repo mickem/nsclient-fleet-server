@@ -26,7 +26,10 @@ scp -q "$ARTIFACT" "${VM_USER}@${VM_HOST}:/tmp/nsclient-fleet.new"
 
 ssh "${VM_USER}@${VM_HOST}" bash -s <<EOF
 set -euo pipefail
-sudo install -o nsclient-fleet -g nsclient-fleet -m 755 /tmp/nsclient-fleet.new ${REMOTE_DIR}/nsclient-fleet
+# root-owned: the service must not be able to rewrite its own executable. ProtectSystem=strict
+# already makes /opt read-only to it, but ownership costs nothing and does not depend on the
+# unit staying as it is.
+sudo install -o root -g root -m 755 /tmp/nsclient-fleet.new ${REMOTE_DIR}/nsclient-fleet
 rm -f /tmp/nsclient-fleet.new
 sudo systemctl restart nsclient-fleet
 sleep 1

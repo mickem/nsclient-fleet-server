@@ -58,6 +58,24 @@ pub struct AppState {
     pub desired_state_cache: Arc<crate::desired_state::DesiredStateCache>,
 }
 
+/// Narrow a directory we own to owner-only access.
+///
+/// Best-effort and Unix-only: a failure is logged, not fatal, because a deployment that has
+/// deliberately widened a directory should not be unable to start. Windows has no mode bits
+/// worth setting here — the on-prem Windows install is a single-administrator machine and
+/// inherits the parent ACL.
+pub fn restrict_dir(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)) {
+            tracing::warn!(path = %path.display(), error = %e, "could not restrict directory permissions");
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
 async fn healthz(State(state): State<AppState>) -> Response {
     match state.db.ping().await {
         Ok(_) => (StatusCode::OK, "OK").into_response(),

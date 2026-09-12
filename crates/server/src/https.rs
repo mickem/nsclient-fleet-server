@@ -46,6 +46,10 @@ pub async fn serve_acme(
     tokio::fs::create_dir_all(&cfg.cache_dir)
         .await
         .with_context(|| format!("create acme cache dir {}", cfg.cache_dir.display()))?;
+    // The ACME account key lives here. `UMask=0077` in the unit covers a fresh install, but
+    // a directory created by an older version — or by a hand-rolled deployment — keeps
+    // whatever mode it was made with, so narrow it every time rather than only on creation.
+    crate::restrict_dir(&cfg.cache_dir);
 
     let directory = if cfg.production {
         rustls_acme::acme::LETS_ENCRYPT_PRODUCTION_DIRECTORY

@@ -16,6 +16,14 @@ RestartSec=5
 TimeoutStopSec=30
 
 # Filesystem hardening
+#
+# UMask first, because it is the one that decides what everything the service *creates*
+# looks like. Only the two private keys were chmodded explicitly; the database, its WAL and
+# SHM files, the stored bundles and the ACME account key were all written under the
+# inherited umask, which on most distributions makes them world-readable. The database holds
+# every tenant's encrypted CA key and every session hash, so "readable by any local account"
+# is not a footnote.
+UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes

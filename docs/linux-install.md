@@ -67,8 +67,15 @@ Prefer to do it by hand, or the script does not suit your distribution:
 
 ```bash
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin nsclient-fleet
-sudo mkdir -p /opt/nsclient-fleet/data/{bundles,acme} /etc/nsclient-fleet
-sudo chown -R nsclient-fleet:nsclient-fleet /opt/nsclient-fleet
+sudo install -d -m 0755 /opt/nsclient-fleet
+# 0750, not the default 0755: the data directory holds the database — every tenant's
+# encrypted CA key and every session hash — plus the ACME account key and the bundles.
+sudo install -d -m 0750 /opt/nsclient-fleet/data \
+  /opt/nsclient-fleet/data/bundles /opt/nsclient-fleet/data/acme
+sudo install -d -m 0750 -o root -g nsclient-fleet /etc/nsclient-fleet
+# Only the data the service writes. /opt/nsclient-fleet itself, and the binary in it,
+# stay root-owned.
+sudo chown -R nsclient-fleet:nsclient-fleet /opt/nsclient-fleet/data
 sudo curl -L -o /etc/systemd/system/nsclient-fleet.service \
   https://github.com/mickem/nsclient-fleet-server/releases/latest/download/nsclient-fleet.service
 ```
@@ -84,7 +91,8 @@ curl -L -O https://github.com/mickem/nsclient-fleet-server/releases/latest/downl
 curl -L -O https://github.com/mickem/nsclient-fleet-server/releases/latest/download/SHA256SUMS
 grep ' nsclient-fleet-x86_64-unknown-linux-musl$' SHA256SUMS | sha256sum -c -
 
-sudo install -o nsclient-fleet -g nsclient-fleet -m 0755 \
+# root-owned: the service should not be able to rewrite its own executable.
+sudo install -o root -g root -m 0755 \
   nsclient-fleet-x86_64-unknown-linux-musl /opt/nsclient-fleet/nsclient-fleet
 /opt/nsclient-fleet/nsclient-fleet --version
 ```

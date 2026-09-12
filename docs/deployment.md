@@ -314,7 +314,8 @@ Then:
 1. Edit `/etc/nsclient-fleet/env` — at minimum `MASTER_KEY`, `BASE_URL`, `ACME_DOMAINS`,
    `ACME_CONTACT`.
 2. Confirm DNS resolves to this VM.
-3. Install the binary at `/opt/nsclient-fleet/nsclient-fleet` (`chown nsclient-fleet:nsclient-fleet`, mode 755).
+3. Install the binary at `/opt/nsclient-fleet/nsclient-fleet` (`chown root:root`, mode 755 — the
+   service should not be able to rewrite its own executable).
 4. `systemctl enable --now nsclient-fleet`
 
 Firewall: allow 443 from anywhere and 22 from your own addresses. Nothing else.
@@ -423,7 +424,7 @@ Then push it to the VM:
 VM_HOST=app.example.com VM_USER=deploy ./scripts/deploy.sh
 ```
 
-`deploy.sh` copies the artifact to `/tmp`, installs it as `nsclient-fleet:nsclient-fleet` mode 755, restarts the
+`deploy.sh` copies the artifact to a private staging directory, installs it as `root:root` mode 755, restarts the
 service, and tails the journal.
 
 There is **no graceful shutdown for in-flight requests** — `TimeoutStopSec=30` gives them 30

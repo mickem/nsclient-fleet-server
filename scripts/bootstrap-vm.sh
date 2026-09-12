@@ -13,7 +13,10 @@ fi
 
 useradd --system --home-dir /opt/nsclient-fleet --shell /usr/sbin/nologin nsclient-fleet 2>/dev/null || true
 
-install -d -m 755 -o nsclient-fleet -g nsclient-fleet /opt/nsclient-fleet
+# The install directory and the binary in it are root's; only the data below is the
+# service's to write. ProtectSystem=strict already makes /opt read-only to the service, but
+# ownership costs nothing and does not depend on the unit staying as it is.
+install -d -m 755 -o root -g root /opt/nsclient-fleet
 install -d -m 750 -o nsclient-fleet -g nsclient-fleet /opt/nsclient-fleet/data
 install -d -m 750 -o nsclient-fleet -g nsclient-fleet /opt/nsclient-fleet/data/bundles
 install -d -m 750 -o nsclient-fleet -g nsclient-fleet /opt/nsclient-fleet/data/acme
@@ -103,6 +106,6 @@ systemctl daemon-reload
 echo
 echo "next steps:"
 echo "  1. edit /etc/nsclient-fleet/env"
-echo "  2. drop the binary at /opt/nsclient-fleet/nsclient-fleet (chown nsclient-fleet:nsclient-fleet, mode 755)"
+echo "  2. drop the binary at /opt/nsclient-fleet/nsclient-fleet (chown root:root, mode 755)"
 echo "  3. systemctl enable --now nsclient-fleet"
 echo "  4. journalctl -u nsclient-fleet -f"
