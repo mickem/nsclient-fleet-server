@@ -47,29 +47,10 @@ import {
   recalledKey,
   rememberKey,
 } from "./crypto";
+import { useMatch, useNavigate, useParams } from "react-router-dom";
 import { BundleEditor } from "./BundleEditor";
 import { RefreshButton } from "./RefreshButton";
-
-type EditorState = null | { bundle: BundleView | null };
-
-/** Registered-key state plus whether this browser session holds the matching key. */
-function useBundleKey() {
-  const [fingerprint, setFingerprint] = useState<string | null>(null);
-  const [unlocked, setUnlocked] = useState(false);
-
-  const sync = async () => {
-    const v = await apiGet<BundleKeyView>("/api/bundle-key");
-    setFingerprint(v.fingerprint);
-    const key = recalledKey();
-    setUnlocked(
-      key !== null && v.fingerprint !== null && (await keyFingerprintHex(key)) === v.fingerprint,
-    );
-  };
-  useEffect(() => {
-    void sync().catch(() => {});
-  }, []);
-  return { fingerprint, unlocked, sync, setUnlocked };
-}
+import { useBundleKey } from "./bundleKey";
 
 /** Key registration, unlock, and rotation. The key exists only in this browser and on
  *  agents — the server sees the fingerprint alone, so losing the key loses the bundles. */
@@ -255,7 +236,13 @@ function EncryptionKeyCard({
 
 export function BundlesPage({ me }: { me: Me }) {
   const [bundles, setBundles] = useState<BundleView[] | null>(null);
-  const [editor, setEditor] = useState<EditorState>(null);
+  // Which editor is open is the URL's business: /bundles/new or /bundles/:id. Nothing
+  // else holds it, so the "Bundles" sidebar entry (→ /bundles) is a way out of an editor
+  // and a refresh lands back in it.
+  const navigate = useNavigate();
+  const creating = useMatch("/bundles/new") !== null;
+  const { bundleId } = useParams();
+  const closeEditor = () => navigate("/bundles");
   const [name, setName] = useState("");
   const [version, setVersion] = useState("");
   const [encrypt, setEncrypt] = useState(false);
@@ -275,6 +262,18 @@ export function BundlesPage({ me }: { me: Me }) {
       .finally(() => setRefreshing(false));
   };
   useEffect(refresh, []);
+
+  // The editor needs the bundle's list row (format, fingerprint…). Until the list has
+  // loaded there is nothing to show; once it has, an id it does not contain is a stale
+  // link — say so and fall back to the list.
+  const editing = bundleId !== undefined ? (bundles?.find((b) => b.id === bundleId) ?? null) : null;
+  useEffect(() => {
+    if (bundleId !== undefined && bundles !== null && editing === null) {
+      setError(`No bundle with id ${bundleId} — it may have been deleted.`);
+      navigate("/bundles", { replace: true });
+    }
+  }, [bundleId, bundles, editing, navigate]);
+  const editorOpen = creating || editing !== null;
 
   const upload = async () => {
     const file = fileRef.current?.files?.[0];
@@ -315,11 +314,11 @@ export function BundlesPage({ me }: { me: Me }) {
         <Typography variant="h4">Bundles</Typography>
         <Stack direction="row" spacing={1} alignItems="center">
           <RefreshButton refreshing={refreshing} onClick={refresh} />
-          {!editor && canWriteConfig(me.role) && (
+          {!editorOpen && canWriteConfig(me.role) && (
             <Button
               variant="contained"
               startIcon={<AddIcon />}
-              onClick={() => setEditor({ bundle: null })}
+              onClick={() => navigate("/bundles/new")}
             >
               New bundle
             </Button>
@@ -338,16 +337,16 @@ export function BundlesPage({ me }: { me: Me }) {
         </Alert>
       )}
 
-      {editor && (
+      {editorOpen && (
         <BundleEditor
-          key={editor.bundle?.id ?? "new"}
-          editBundle={editor.bundle}
+          key={editing?.id ?? "new"}
+          editBundle={editing}
           keyState={keyState}
           onSaved={() => {
-            setEditor(null);
+            closeEditor();
             refresh();
           }}
-          onCancel={() => setEditor(null)}
+          onCancel={closeEditor}
         />
       )}
 
@@ -438,7 +437,7 @@ export function BundlesPage({ me }: { me: Me }) {
                         <Button
                           size="small"
                           startIcon={<EditIcon />}
-                          onClick={() => setEditor({ bundle: b })}
+                          onClick={() => navigate(`/bundles/${b.id}`)}
                         >
                           Edit
                         </Button>

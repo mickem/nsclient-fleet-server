@@ -25,8 +25,14 @@ function AuthedRoutes({ me, onLogout }: { me: Me; onLogout: () => void }) {
       <Route element={<Dashboard me={me} onLogout={onLogout} />}>
         <Route path="hosts" element={<HostsPage me={me} />} />
         <Route path="hosts/:hostId" element={<HostDetailPage me={me} />} />
+        {/* Editors are URLs too (/groups/new, /bundles/:id, …): a refresh keeps them open,
+            and the sidebar entry for the list is a real way back out of one. */}
         <Route path="groups" element={<GroupsPage me={me} />} />
+        <Route path="groups/new" element={<GroupsPage me={me} />} />
+        <Route path="groups/:groupId" element={<GroupsPage me={me} />} />
         <Route path="bundles" element={<BundlesPage me={me} />} />
+        <Route path="bundles/new" element={<BundlesPage me={me} />} />
+        <Route path="bundles/:bundleId" element={<BundlesPage me={me} />} />
         <Route path="audit" element={<AuditPage />} />
         <Route path="keys" element={<ApiKeysPage me={me} />} />
         {canManageUsers(me.role) && <Route path="users" element={<UsersPage me={me} />} />}
@@ -44,25 +50,25 @@ function AuthedRoutes({ me, onLogout }: { me: Me; onLogout: () => void }) {
 function AnonRoutes({
   onDone,
   signupsEnabled,
+  onPrem,
 }: {
   onDone: () => void;
   signupsEnabled: boolean;
+  onPrem: boolean;
 }) {
   const navigate = useNavigate();
   const login = (
-  onPrem,
     <Login
       onDone={onDone}
       onSwitchToSignup={() => navigate("/signup")}
-  onPrem: boolean;
       signupsEnabled={signupsEnabled}
+      onPrem={onPrem}
     />
   );
   return (
     <Routes>
       <Route
         path="/signup"
-      onPrem={onPrem}
         element={
           signupsEnabled ? (
             <Signup onDone={onDone} onSwitchToLogin={() => navigate("/login")} />
@@ -85,15 +91,15 @@ export default function App() {
   // until then, so a slow response cannot flash a form that the server would refuse.
   const [publicConfig, setPublicConfig] = useState<PublicConfig | null>(null);
   const signupsEnabled = publicConfig?.signups_enabled ?? false;
+  // Until the answer arrives the magic-link form shows; on-prem swaps in the password
+  // form as soon as the server says so.
+  const onPrem = publicConfig?.on_prem ?? false;
 
   const refresh = async () => {
     try {
       const r = await fetch("/api/me", { credentials: "include" });
       setMe(r.ok ? await r.json() : null);
     } catch {
-  // Until the answer arrives the magic-link form shows; on-prem swaps in the password
-  // form as soon as the server says so.
-  const onPrem = publicConfig?.on_prem ?? false;
       setMe(null);
     } finally {
       setReady(true);
