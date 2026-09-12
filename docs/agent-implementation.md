@@ -165,8 +165,12 @@ Notes:
 For each entry in `bundles` (process in ascending `priority` order):
 
 1. `GET {mtls_url}{bundle.url}` — the server re-checks that the bundle is in
-   this host's effective set and returns `403` otherwise, so a compromised
-   host cannot fetch arbitrary tenant bundles.
+   this host's effective set and returns `403` otherwise. What bounds that set
+   is group membership, and group membership is only as trustworthy as the
+   tags the selectors read: a selector clause that accepts `agent`-sourced
+   tags can be satisfied by a host claiming the tag in its own state report.
+   Clauses default to operator-set tags precisely so that the effective set is
+   not something the host chooses — see §5.
 2. **Verify integrity**: SHA-256 of the raw bytes must equal `sha256` (hex).
 3. **Verify authenticity**: `signature` is a base64 Ed25519 signature **over
    the 32-byte SHA-256 digest** (not over the raw bytes), verified with
@@ -209,11 +213,20 @@ All fields are optional server-side (`crates/server/src/agent_api.rs`,
 - `applied_state_hash` set → server records it and updates `last_seen_at`.
   Omit it (null) when nothing was applied; the server still touches
   `last_seen_at`.
-- `reported_tags` → upserted as agent-reported tags. If any value actually
-  changed, the server bumps the tenant `config_version`, which can change the
-  result of your *next* desired-state poll (tags feed group selectors). The
-  call is idempotent — resending identical tags is a no-op — so it is safe to
-  send the full tag map every time.
+- `reported_tags` → upserted as agent-reported tags, stored with
+  `source = "agent"` and kept distinct from tags an operator set. If any value
+  actually changed, the server bumps the tenant `config_version`, which can
+  change the result of your *next* desired-state poll (tags feed group
+  selectors). The call is idempotent — resending identical tags is a no-op —
+  so it is safe to send the full tag map every time.
+
+  **Trust boundary.** These tags are the host's claims about itself and are
+  treated as such. A selector clause reads operator-set tags only unless it
+  says `"source": "agent"` or `"source": "any"`, so reporting `role=sql_server`
+  does not by itself put a host in the SQL group. An operator who does write a
+  clause over agent tags is stating that hosts in that tenant may place
+  themselves in that group, and the console says so at the point they write it.
+  Anything gating access to scripts or secrets should stay on operator tags.
 - `errors` → logged server-side; use it for bundle verification or apply
   failures.
 - `local_config_present` → whether the host has configuration of its own that
@@ -224,7 +237,10 @@ All fields are optional server-side (`crates/server/src/agent_api.rs`,
   [agent-integration.md §2.1](agent-integration.md#21-local-configuration).
 
 Report tags early (right after enrollment, before the first apply) so the host
-gets matched into groups and receives its real desired state promptly.
+gets matched into groups and receives its real desired state promptly — for the
+groups whose selectors opt into agent tags. A host that matches only
+operator-set selectors is placed by the operator, and reporting tags changes
+nothing about its membership.
 
 ## 6. Certificate renewal
 

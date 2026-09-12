@@ -255,15 +255,46 @@ async fn end_to_end_tag_group_bundle_assign_and_fetch() {
     let ds = agent.fetch_desired_state(None).await.unwrap().unwrap();
     assert_eq!(ds.bundles.len(), 0, "no role tag → no matching bundle");
 
-    // 5. Agent reports `role=sql_server` via state-report → tag added
+    // 5. Agent claims `role=sql_server` about itself. The tag is stored, but the selector
+    //    above did not ask for agent-reported values, so this must not move the host into
+    //    the group. This is the whole point of the source filter: otherwise any host that
+    //    can talk to us helps itself to the SQL group's bundles.
     let mut tags = BTreeMap::new();
     tags.insert("role".into(), "sql_server".into());
     agent.report_state(None, tags).await.unwrap();
 
-    // 6. Next poll → bundle now matches
     s.agent_limits.forget_last_poll(&host_id);
     let ds2 = agent.fetch_desired_state(None).await.unwrap().unwrap();
-    assert_eq!(ds2.bundles.len(), 1, "role match should pull in bundle");
+    assert_eq!(
+        ds2.bundles.len(),
+        0,
+        "a host claiming a tag must not put itself in a group selecting on operator tags"
+    );
+
+    // ...and the download endpoint agrees, rather than relying on the poll alone to keep
+    // the host away from the bytes.
+    let forbidden = agent
+        .fetch_bundle(&bundle_id, &expected_sha, &signature)
+        .await;
+    assert!(
+        forbidden.is_err(),
+        "download must refuse a bundle the host is not actually assigned"
+    );
+
+    // 6. The operator sets the same tag. Now it is an operator's assertion, and the host
+    //    joins the group.
+    let r = s
+        .cookie_jar
+        .put(format!("{}/api/hosts/{}/tags/role", s.base_url, host_id))
+        .json(&serde_json::json!({"value": "sql_server"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+
+    s.agent_limits.forget_last_poll(&host_id);
+    let ds3 = agent.fetch_desired_state(None).await.unwrap().unwrap();
+    assert_eq!(ds3.bundles.len(), 1, "operator tag should pull in bundle");
 
     // 7. Agent downloads the bundle and verifies sha256 + signature
     let downloaded = agent
@@ -271,6 +302,174 @@ async fn end_to_end_tag_group_bundle_assign_and_fetch() {
         .await
         .unwrap();
     assert_eq!(downloaded, bundle_bytes);
+}
+
+/// The opt-in half: an operator who writes `"source": "agent"` is saying hosts may place
+/// themselves in this group, and that is exactly what happens.
+#[tokio::test]
+async fn a_selector_that_opts_into_agent_tags_matches_what_the_host_reports() {
+    let s = start().await;
+    signup_login(&s, "delta", "dave@example.com").await;
+    let (agent, host_id) = enroll_a_host(&s).await;
+
+    let g = s
+        .cookie_jar
+        .post(format!("{}/api/groups", s.base_url))
+        .json(&serde_json::json!({
+            "name": "linux-hosts",
+            "selector": { "clauses": [
+                {"op": "eq", "key": "os", "value": "linux", "source": "agent"}
+            ] }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(g.status(), 201);
+    let group: serde_json::Value = g.json().await.unwrap();
+    let group_id = group["id"].as_str().unwrap().to_string();
+
+    let form = reqwest::multipart::Form::new()
+        .text("name", "linux-checks")
+        .text("version", "1.0.0")
+        .part(
+            "bundle",
+            reqwest::multipart::Part::bytes(b"linux-bundle".to_vec())
+                .file_name("bundle.zip")
+                .mime_str("application/zip")
+                .unwrap(),
+        );
+    let bres = s
+        .cookie_jar
+        .post(format!("{}/api/bundles", s.base_url))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bres.status(), 200);
+    let bundle: serde_json::Value = bres.json().await.unwrap();
+    let bundle_id = bundle["id"].as_str().unwrap().to_string();
+
+    let a = s
+        .cookie_jar
+        .post(format!("{}/api/groups/{}/bundles", s.base_url, group_id))
+        .json(&serde_json::json!({"bundle_id": bundle_id, "priority": 10}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(a.status(), 204);
+
+    s.agent_limits.forget_last_poll(&host_id);
+    assert_eq!(
+        agent
+            .fetch_desired_state(None)
+            .await
+            .unwrap()
+            .unwrap()
+            .bundles
+            .len(),
+        0
+    );
+
+    let mut tags = BTreeMap::new();
+    tags.insert("os".into(), "linux".into());
+    agent.report_state(None, tags).await.unwrap();
+
+    s.agent_limits.forget_last_poll(&host_id);
+    assert_eq!(
+        agent
+            .fetch_desired_state(None)
+            .await
+            .unwrap()
+            .unwrap()
+            .bundles
+            .len(),
+        1,
+        "an agent-sourced selector is satisfied by what the agent reports"
+    );
+}
+
+/// A manual tag and an agent tag can sit on the same key with different values. The agent's
+/// cannot be used to satisfy a manual clause the operator's value does not satisfy — a
+/// supplement is not an overwrite, but before the source filter it worked like one.
+#[tokio::test]
+async fn an_agent_tag_cannot_supplement_a_manual_one_into_matching() {
+    let s = start().await;
+    signup_login(&s, "epsilon", "erin@example.com").await;
+    let (agent, host_id) = enroll_a_host(&s).await;
+
+    let g = s
+        .cookie_jar
+        .post(format!("{}/api/groups", s.base_url))
+        .json(&serde_json::json!({
+            "name": "prod",
+            "selector": { "clauses": [{"op": "eq", "key": "env", "value": "prod"}] }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(g.status(), 201);
+    let group_id = g.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let form = reqwest::multipart::Form::new()
+        .text("name", "prod-secrets")
+        .text("version", "1.0.0")
+        .part(
+            "bundle",
+            reqwest::multipart::Part::bytes(b"prod-bundle".to_vec())
+                .file_name("bundle.zip")
+                .mime_str("application/zip")
+                .unwrap(),
+        );
+    let bundle_id = s
+        .cookie_jar
+        .post(format!("{}/api/bundles", s.base_url))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    s.cookie_jar
+        .post(format!("{}/api/groups/{}/bundles", s.base_url, group_id))
+        .json(&serde_json::json!({"bundle_id": bundle_id, "priority": 1}))
+        .send()
+        .await
+        .unwrap();
+
+    // The operator says this host is dev.
+    let r = s
+        .cookie_jar
+        .put(format!("{}/api/hosts/{}/tags/env", s.base_url, host_id))
+        .json(&serde_json::json!({"value": "dev"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+
+    // The host says it is prod.
+    let mut tags = BTreeMap::new();
+    tags.insert("env".into(), "prod".into());
+    agent.report_state(None, tags).await.unwrap();
+
+    s.agent_limits.forget_last_poll(&host_id);
+    assert_eq!(
+        agent
+            .fetch_desired_state(None)
+            .await
+            .unwrap()
+            .unwrap()
+            .bundles
+            .len(),
+        0,
+        "the operator's answer is the one that counts"
+    );
 }
 
 #[tokio::test]

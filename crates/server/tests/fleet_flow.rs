@@ -339,7 +339,12 @@ async fn fifty_agents_converge_on_assigned_bundle() {
         .post(format!("{}/api/groups", s.base_url))
         .json(&serde_json::json!({
             "name": "prod",
-            "selector": { "clauses": [ { "op": "eq", "key": "env", "value": "prod" } ] },
+            // Agent-sourced on purpose: this test is about fifty agents converging on
+            // their own, so the group has to be one they can place themselves in. See
+            // `fleet_core::selector` for what that opt-in costs.
+            "selector": { "clauses": [
+                { "op": "eq", "key": "env", "value": "prod", "source": "agent" }
+            ] },
         }))
         .send()
         .await

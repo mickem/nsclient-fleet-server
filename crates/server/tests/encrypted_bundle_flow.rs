@@ -3,7 +3,6 @@
 //! refuses to read it, and that an agent holding the key — and only such an agent —
 //! can open it.
 
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -344,9 +343,17 @@ async fn encrypted_bundle_end_to_end() {
         .unwrap();
     assert_eq!(a.status(), 204);
 
-    let mut tags = BTreeMap::new();
-    tags.insert("role".into(), "db".into());
-    agent.report_state(None, tags).await.unwrap();
+    // The operator places the host, not the host itself: this group carries secrets, and a
+    // selector over operator tags is the only kind a compromised host cannot talk its way
+    // into. See `fleet_core::selector`.
+    let t = s
+        .cookie_jar
+        .put(format!("{}/api/hosts/{}/tags/role", s.base_url, host_id))
+        .json(&serde_json::json!({"value": "db"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(t.status(), 204);
     s.agent_limits.forget_last_poll(&host_id);
     let ds = agent.fetch_desired_state(None).await.unwrap().unwrap();
     assert_eq!(ds.bundles.len(), 1);

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use fleet_core::api_key::ApiKey;
 use fleet_core::host::{new_host_id, Host};
+use fleet_core::selector::{HostTags, TagSource, TagValue};
 use fleet_core::session::Session;
 use fleet_core::tenant::Tenant;
 use fleet_core::time::now_unix;
@@ -639,24 +640,26 @@ impl<'a> HostTagsRepo<'a> {
         Ok(res.rows_affected() > 0)
     }
 
-    /// Returns tags as map<key, list<value>> (multi-source: a key can have manual + agent values).
-    pub async fn map_for_host(
-        &self,
-        tenant_id: i64,
-        host_id: &str,
-    ) -> Result<std::collections::HashMap<String, Vec<String>>> {
-        let rows =
-            sqlx::query("SELECT key, value FROM host_tags WHERE tenant_id = ? AND host_id = ?")
-                .bind(tenant_id)
-                .bind(host_id)
-                .fetch_all(&self.db.read)
-                .await?;
-        let mut out: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
+    /// Every tag on a host, keyed by tag key, with each value carrying its source.
+    ///
+    /// The source is part of the result and not an afterthought: selector evaluation needs
+    /// it to tell an operator's assertion from a claim the host made about itself. This
+    /// used to return bare strings, which is what let a host tag its way into any group.
+    pub async fn map_for_host(&self, tenant_id: i64, host_id: &str) -> Result<HostTags> {
+        let rows = sqlx::query(
+            "SELECT key, value, source FROM host_tags WHERE tenant_id = ? AND host_id = ?",
+        )
+        .bind(tenant_id)
+        .bind(host_id)
+        .fetch_all(&self.db.read)
+        .await?;
+        let mut out: HostTags = std::collections::HashMap::new();
         for r in rows {
             let k: String = r.get("key");
-            let v: String = r.get("value");
-            out.entry(k).or_default().push(v);
+            out.entry(k).or_default().push(TagValue {
+                value: r.get("value"),
+                source: TagSource::from_db(&r.get::<String, _>("source")),
+            });
         }
         Ok(out)
     }

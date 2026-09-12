@@ -130,11 +130,17 @@ export type CreateHostResponse = {
   expires_at: number;
 };
 
+/** Which tag source a leaf will accept a value from. Omitted means `manual`, which is
+ *  what every selector written before this field existed means. `agent` and `any` accept
+ *  values the host reports about itself, so a leaf using either lets hosts decide their
+ *  own membership — and therefore which bundles they are served. */
+export type SourceFilter = "manual" | "agent" | "any";
+
 // Selector expression tree — mirrors fleet_core::selector::Expr (serde tag = "op").
 export type Expr =
-  | { op: "eq"; key: string; value: string }
-  | { op: "in"; key: string; values: string[] }
-  | { op: "exists"; key: string }
+  | { op: "eq"; key: string; value: string; source?: SourceFilter }
+  | { op: "in"; key: string; values: string[]; source?: SourceFilter }
+  | { op: "exists"; key: string; source?: SourceFilter }
   | { op: "not"; expr: Expr }
   | { op: "and"; exprs: Expr[] }
   | { op: "or"; exprs: Expr[] };

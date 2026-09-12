@@ -1,4 +1,5 @@
 import {
+  Alert,
   Autocomplete,
   Box,
   Button,
@@ -7,11 +8,12 @@ import {
   Select,
   Stack,
   TextField,
+  Tooltip,
   Typography,
 } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
 import AddIcon from "@mui/icons-material/Add";
-import { Expr, HostView, Selector } from "./api";
+import { Expr, HostView, Selector, SourceFilter } from "./api";
 
 // Structured selector editor — every field is a discrete input; the selector is never
 // entered as raw text (locked design decision from PLAN.md).
@@ -107,6 +109,55 @@ const OPS: { id: Expr["op"]; label: string }[] = [
   { id: "or", label: "OR group" },
 ];
 
+/** The three trust settings a leaf can have, in the order an operator should consider
+ *  them: the safe default first, then the two that hand the decision to the host. */
+const SOURCES: { id: SourceFilter; label: string; help: string }[] = [
+  {
+    id: "manual",
+    label: "operator tags",
+    help: "Only tags an operator set here. Hosts cannot put themselves in this group.",
+  },
+  {
+    id: "agent",
+    label: "host-reported",
+    help:
+      "Only tags the host reports about itself. A compromised host can claim this tag and " +
+      "join the group, so it will receive whatever bundles the group carries.",
+  },
+  {
+    id: "any",
+    label: "either source",
+    help:
+      "An operator tag or one the host reports. A compromised host can claim this tag and " +
+      "join the group, so it will receive whatever bundles the group carries.",
+  },
+];
+
+type Leaf = Extract<Expr, { op: "eq" | "in" | "exists" }>;
+
+/** Leaves default to operator-set tags, matching the server's serde default. */
+function sourceOf(e: Leaf): SourceFilter {
+  return e.source ?? "manual";
+}
+
+function isHostControlled(e: Expr): boolean {
+  switch (e.op) {
+    case "eq":
+    case "in":
+    case "exists":
+      return sourceOf(e) !== "manual";
+    case "not":
+      return isHostControlled(e.expr);
+    case "and":
+    case "or":
+      return e.exprs.some(isHostControlled);
+  }
+}
+
+export function selectorIsHostControlled(s: Selector): boolean {
+  return (s.clauses ?? []).some(isHostControlled);
+}
+
 export function defaultExpr(op: Expr["op"]): Expr {
   switch (op) {
     case "eq":
@@ -147,6 +198,28 @@ export function ExprEditor({ expr, onChange, onRemove, known }: ExprProps) {
       ))}
     </Select>
   );
+
+  /** Rendered on every leaf, because which source a clause trusts is as much part of what
+   *  it means as the key and the value. */
+  const sourceSelect = (leaf: Leaf) => {
+    const current = sourceOf(leaf);
+    return (
+      <Tooltip title={SOURCES.find((s) => s.id === current)?.help ?? ""}>
+        <Select
+          size="small"
+          value={current}
+          color={current === "manual" ? undefined : "warning"}
+          onChange={(e) => onChange({ ...leaf, source: e.target.value as SourceFilter })}
+        >
+          {SOURCES.map((s) => (
+            <MenuItem key={s.id} value={s.id}>
+              {s.label}
+            </MenuItem>
+          ))}
+        </Select>
+      </Tooltip>
+    );
+  };
   const removeBtn = onRemove ? (
     <IconButton size="small" onClick={onRemove} title="remove clause">
       <CloseIcon fontSize="small" />
@@ -180,6 +253,7 @@ export function ExprEditor({ expr, onChange, onRemove, known }: ExprProps) {
           {keyInput(expr.key, (key) => onChange({ ...expr, key }))}
           <Typography>=</Typography>
           {valueInput(expr.key, expr.value, (value) => onChange({ ...expr, value }), "value")}
+          {sourceSelect(expr)}
           {removeBtn}
         </Stack>
       );
@@ -211,6 +285,7 @@ export function ExprEditor({ expr, onChange, onRemove, known }: ExprProps) {
               − value
             </Button>
           )}
+          {sourceSelect(expr)}
           {removeBtn}
         </Stack>
       );
@@ -219,6 +294,7 @@ export function ExprEditor({ expr, onChange, onRemove, known }: ExprProps) {
         <Stack direction="row" spacing={1} alignItems="center" useFlexGap sx={{ flexWrap: "wrap" }}>
           {opSelect}
           {keyInput(expr.key, (key) => onChange({ ...expr, key }))}
+          {sourceSelect(expr)}
           {removeBtn}
         </Stack>
       );
@@ -293,7 +369,16 @@ export function SelectorEditor({ selector, onChange, known }: SelectorProps) {
     <Stack spacing={1}>
       <Typography variant="caption" color="text.secondary">
         All top-level clauses must match (implicit AND). An empty selector matches every host.
+        Each clause says which tags it trusts: operator-set tags, tags the host reports about
+        itself, or either.
       </Typography>
+      {selectorIsHostControlled(selector) && (
+        <Alert severity="warning">
+          A clause here trusts host-reported tags, so a host can put <em>itself</em> in this
+          group by claiming that tag — and will then be served this group&apos;s bundles.
+          Use operator tags for anything that gates access to scripts or secrets.
+        </Alert>
+      )}
       {selector.clauses.map((c, i) => (
         <ExprEditor
           key={i}
@@ -319,14 +404,20 @@ export function SelectorEditor({ selector, onChange, known }: SelectorProps) {
   );
 }
 
+/** Only shown when it is not the default, so the common selector reads as it always did. */
+function sourceSuffix(e: Leaf): string {
+  const src = sourceOf(e);
+  return src === "manual" ? "" : ` [${src}]`;
+}
+
 export function describeExpr(e: Expr): string {
   switch (e.op) {
     case "eq":
-      return `${e.key} = "${e.value}"`;
+      return `${e.key} = "${e.value}"${sourceSuffix(e)}`;
     case "in":
-      return `${e.key} IN (${e.values.map((v) => `"${v}"`).join(", ")})`;
+      return `${e.key} IN (${e.values.map((v) => `"${v}"`).join(", ")})${sourceSuffix(e)}`;
     case "exists":
-      return `EXISTS ${e.key}`;
+      return `EXISTS ${e.key}${sourceSuffix(e)}`;
     case "not":
       return `NOT (${describeExpr(e.expr)})`;
     case "and":
