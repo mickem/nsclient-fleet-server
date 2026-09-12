@@ -121,6 +121,7 @@ fn test_config(db_path: PathBuf) -> fleet_server::config::Config {
         daily_email_budget: 1_000_000,
         smtp: None,
         turnstile_secret: None,
+        turnstile_site_key: None,
         master_key,
         bootstrap_jwt_secret,
     }

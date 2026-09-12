@@ -46,8 +46,9 @@ DATABASE_PATH=/opt/nsclient-fleet/data/fleet.db
 # SMTP_PASSWORD=...
 # SMTP_FROM=NSClient Fleet <noreply@example.com>
 
-# Cloudflare Turnstile on signup (optional)
+# Cloudflare Turnstile on signup (optional, but set both or neither)
 # TURNSTILE_SECRET=...
+# TURNSTILE_SITE_KEY=...
 
 # Switch ACME to staging while testing the deploy (avoids LE rate limits)
 # ACME_STAGING=true

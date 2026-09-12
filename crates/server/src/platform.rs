@@ -207,11 +207,15 @@ pub struct SettingsView {
     pub on_prem: bool,
 }
 
-/// What an anonymous visitor is allowed to know: whether the signup form is worth showing.
+/// What an anonymous visitor is allowed to know: whether the signup form is worth showing,
+/// and which Turnstile widget it has to render to be accepted.
 #[derive(Serialize)]
 pub struct PublicConfigView {
     pub signups_enabled: bool,
     pub on_prem: bool,
+    /// `None` when Turnstile is off, in which case the form submits without a token and
+    /// the server accepts it. Public by design: the site key names the widget.
+    pub turnstile_site_key: Option<String>,
 }
 
 // ---------------------------------------------------------------------------------------
@@ -810,6 +814,7 @@ pub async fn public_config(State(state): State<AppState>) -> Response {
     Json(PublicConfigView {
         signups_enabled: enabled,
         on_prem: state.config.on_prem,
+        turnstile_site_key: state.config.turnstile_site_key.clone(),
     })
     .into_response()
 }

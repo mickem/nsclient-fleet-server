@@ -33,7 +33,14 @@ pub struct Config {
     pub cookie_secure: bool,
     pub daily_email_budget: u32,
     pub smtp: Option<SmtpConfig>,
+    /// Turnstile siteverify secret. Set together with [`Config::turnstile_site_key`] —
+    /// a secret with no site key gives the browser no widget to produce a token with, so
+    /// every signup would fail; a site key with no secret renders a widget whose answer
+    /// nothing checks. Startup refuses either half on its own.
     pub turnstile_secret: Option<String>,
+    /// Turnstile site key, handed to the browser by `/api/public-config`. Public by
+    /// design — it identifies the widget, it is not a credential.
+    pub turnstile_site_key: Option<String>,
     pub master_key: MasterKey,
     pub bootstrap_jwt_secret: Vec<u8>,
     pub acme: Option<AcmeConfig>,
@@ -106,6 +113,22 @@ impl Config {
             }),
             _ => None,
         };
+
+        let turnstile_secret = std::env::var("TURNSTILE_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let turnstile_site_key = std::env::var("TURNSTILE_SITE_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
+        match (&turnstile_secret, &turnstile_site_key) {
+            (Some(_), None) => anyhow::bail!(
+                "TURNSTILE_SECRET is set but TURNSTILE_SITE_KEY is not. The browser needs the                  site key to render the widget that produces the token the secret verifies —                  without it every signup is refused. Set both, or neither."
+            ),
+            (None, Some(_)) => anyhow::bail!(
+                "TURNSTILE_SITE_KEY is set but TURNSTILE_SECRET is not. The signup form would                  render a challenge whose answer nothing verifies, which is worse than no                  challenge because it looks protected. Set both, or neither."
+            ),
+            _ => {}
+        }
 
         let master_key = MasterKey::from_env().map_err(|e| anyhow::anyhow!(
             "MASTER_KEY required (32 bytes, base64-encoded). \
@@ -210,7 +233,8 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5000),
             smtp,
-            turnstile_secret: std::env::var("TURNSTILE_SECRET").ok(),
+            turnstile_secret,
+            turnstile_site_key,
             master_key,
             bootstrap_jwt_secret,
             acme,

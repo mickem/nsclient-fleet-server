@@ -87,15 +87,43 @@ pub async fn signup(
         }
     }
 
-    let token = body.turnstile_token.as_deref().unwrap_or("");
-    if !state.turnstile.verify(token, addr.ip()).await {
-        return (StatusCode::FORBIDDEN, "turnstile failed").into_response();
-    }
-
     let email = body.email.trim().to_lowercase();
     let slug = body.tenant_slug.trim().to_lowercase();
     if email.is_empty() || slug.is_empty() || body.tenant_name.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "missing field").into_response();
+    }
+
+    // Before the Turnstile round trip, the tenant CA generation and the SMTP send, because
+    // all three are expensive and this is the only thing standing between an anonymous
+    // caller and all of them. Signup used to reach the CA keygen and the mail server with
+    // no limiter at all and without touching the daily email budget, so a loop here could
+    // both fill the database with unredeemed tenants and spend the whole day's sends on
+    // addresses of the caller's choosing. The same limiter as send-link, so the two share
+    // one budget rather than each having their own.
+    let decision = state.rate_limits.check(&email, addr.ip());
+    match decision {
+        RateDecision::Allow => {}
+        RateDecision::EmailLimited | RateDecision::IpLimited => {
+            tracing::info!(rate_limit = ?decision, ip = %addr.ip(), "signup rate-limited");
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many attempts — wait a minute and try again",
+            )
+                .into_response();
+        }
+        RateDecision::BudgetExceeded => {
+            tracing::error!(target: "alert.send_budget", "global daily email budget exceeded — refusing signup");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sign-in mail is temporarily unavailable — try again later",
+            )
+                .into_response();
+        }
+    }
+
+    let token = body.turnstile_token.as_deref().unwrap_or("");
+    if !state.turnstile.verify(token, addr.ip()).await {
+        return (StatusCode::FORBIDDEN, "turnstile failed").into_response();
     }
 
     let tenants = TenantRepo::new(&state.db);

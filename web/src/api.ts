@@ -252,7 +252,13 @@ export type PlatformUserView = {
 export type PlatformSettings = { signups_enabled: boolean; on_prem: boolean };
 
 /** Unauthenticated: whether the sign-in page should offer a signup link at all. */
-export type PublicConfig = { signups_enabled: boolean; on_prem: boolean };
+export type PublicConfig = {
+  signups_enabled: boolean;
+  on_prem: boolean;
+  /** Null when Turnstile is off for this deployment. Public by design — the site key
+   *  names the widget, it is not a credential. */
+  turnstile_site_key: string | null;
+};
 
 export type CreateTenantResponse = {
   tenant: PlatformTenantView;

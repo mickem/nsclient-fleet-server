@@ -218,7 +218,8 @@ to trust it.
 | Variable                                                | Default | Notes                                  |
 | ------------------------------------------------------- | ------- | -------------------------------------- |
 | `SMTP_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_FROM` | unset   | All five or none; falls back to stdout |
-| `TURNSTILE_SECRET`                                      | unset   | Cloudflare Turnstile siteverify secret |
+| `TURNSTILE_SECRET`                                      | unset   | Cloudflare Turnstile siteverify secret. Set with `TURNSTILE_SITE_KEY` or startup fails |
+| `TURNSTILE_SITE_KEY`                                    | unset   | Turnstile site key, served to the browser so the signup form can render the widget |
 | `DAILY_EMAIL_BUDGET`                                    | `5000`  | Global cap; sends past it are dropped  |
 | `PLATFORM_ADMIN_EMAILS`                                 | unset   | Comma-separated. Grants the platform console — see below |
 | `HOST_LOST_AFTER_HOURS`                                 | `48`    | Silence after which a host reads **lost** — see below  |

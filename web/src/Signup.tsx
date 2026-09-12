@@ -1,16 +1,21 @@
 import { FormEvent, useState } from "react";
 import { Alert, Button, Link, Stack, TextField, Typography } from "@mui/material";
 import { AuthShell } from "./AuthShell";
+import { Turnstile } from "./Turnstile";
 
 type Props = {
   onDone: () => void;
   onSwitchToLogin: () => void;
+  /** Null when the deployment has Turnstile off, in which case no widget is rendered and
+   *  the server accepts an empty token. */
+  turnstileSiteKey: string | null;
 };
 
-export function Signup({ onSwitchToLogin }: Props) {
+export function Signup({ onSwitchToLogin, turnstileSiteKey }: Props) {
   const [email, setEmail] = useState("");
   const [tenantSlug, setTenantSlug] = useState("");
   const [tenantName, setTenantName] = useState("");
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -26,7 +31,7 @@ export function Signup({ onSwitchToLogin }: Props) {
         email,
         tenant_slug: tenantSlug,
         tenant_name: tenantName,
-        turnstile_token: "",
+        turnstile_token: turnstileToken ?? "",
       }),
     });
     setSubmitting(false);
@@ -76,7 +81,16 @@ export function Signup({ onSwitchToLogin }: Props) {
             required
             fullWidth
           />
-          <Button type="submit" variant="contained" size="large" fullWidth disabled={submitting}>
+          {turnstileSiteKey && (
+            <Turnstile siteKey={turnstileSiteKey} onToken={setTurnstileToken} />
+          )}
+          <Button
+            type="submit"
+            variant="contained"
+            size="large"
+            fullWidth
+            disabled={submitting || (turnstileSiteKey !== null && turnstileToken === null)}
+          >
             {submitting ? "Creating…" : "Start trial"}
           </Button>
           <Typography variant="body2">

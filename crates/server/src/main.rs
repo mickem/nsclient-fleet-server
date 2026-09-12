@@ -94,6 +94,15 @@ async fn main() -> anyhow::Result<()> {
 
     let email = EmailSender::from_config(cfg.smtp.as_ref())?;
     let turnstile = Turnstile::from_secret(cfg.turnstile_secret.clone());
+    // On-prem has no self-service signup at all, so there is nothing to protect. Anywhere
+    // else, an open signup form with no challenge is a standing invitation to script it —
+    // the rate limiter caps the damage but does not stop it, so say so at a level an
+    // operator will actually see rather than hiding it in the Turnstile constructor.
+    if cfg.turnstile_secret.is_none() && !cfg.on_prem {
+        tracing::warn!(
+            "TURNSTILE_SECRET and TURNSTILE_SITE_KEY are unset — self-service signup has no              bot challenge. Set both for any deployment reachable from the internet, or set              ON_PREM=true, or close signups from the platform console."
+        );
+    }
     let rate_limits = AuthRateLimits::new(cfg.daily_email_budget);
     let agent_limits = fleet_server::agent_limits::AgentRateLimits::new();
     let enrollment_limits = fleet_server::agent_limits::EnrollmentLimits::default();
