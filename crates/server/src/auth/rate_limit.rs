@@ -132,6 +132,17 @@ impl AuthRateLimits {
         RateDecision::Allow
     }
 
+    /// Spend only the per-IP budget, for endpoints that send no mail.
+    ///
+    /// The password login has no address to key on and no email to charge to a daily
+    /// budget, but it is still an unauthenticated endpoint that an attacker can hammer —
+    /// so it gets the same per-IP quota as the link endpoints without touching theirs.
+    pub fn check_ip(&self, ip: IpAddr) -> bool {
+        self.maybe_prune();
+        self.inner.per_ip_minute.check_key(&ip).is_ok()
+            && self.inner.per_ip_hour.check_key(&ip).is_ok()
+    }
+
     fn maybe_prune(&self) {
         if self.inner.since_prune.fetch_add(1, Ordering::Relaxed) + 1 >= PRUNE_EVERY {
             self.inner.since_prune.store(0, Ordering::Relaxed);

@@ -427,23 +427,54 @@ fn html_attr_escape(s: &str) -> String {
     out
 }
 
+/// Delay applied to every refused attempt.
+///
+/// Not a substitute for the rate limit above it — it is what makes an attacker who has
+/// several source addresses pay for each guess too. Long enough to matter over thousands of
+/// attempts, short enough that a mistyped password does not read as a broken login page.
+const FAILED_LOGIN_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
 pub async fn on_prem_login(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     jar: CookieJar,
     Json(body): Json<OnPremLoginBody>,
 ) -> Response {
     if !state.config.on_prem {
         return (StatusCode::NOT_FOUND, "password login is on-prem only").into_response();
     }
+
+    // Nothing rate-limited, delayed or logged this route. It is the single credential that
+    // an on-prem install is protected by, and it was the one unauthenticated endpoint an
+    // attacker could hammer for free and in silence.
+    if !state.rate_limits.check_ip(addr.ip()) {
+        tracing::warn!(ip = %addr.ip(), "on-prem login rate-limited");
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many attempts — wait and try again",
+        )
+            .into_response();
+    }
+
     let admin_email = state.config.on_prem_admin_email.as_deref().unwrap_or("");
-    let admin_pw = state.config.on_prem_admin_password.as_deref().unwrap_or("");
-    if admin_email.is_empty() || admin_pw.is_empty() {
+    if admin_email.is_empty() {
         return (StatusCode::SERVICE_UNAVAILABLE, "admin not configured").into_response();
     }
 
     let email_match = body.email.trim().eq_ignore_ascii_case(admin_email);
-    let pw_match = constant_time_eq(body.password.as_bytes(), admin_pw.as_bytes());
+    let pw_match = verify_admin_password(&state.config, &body.password);
+    let Some(pw_match) = pw_match else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "admin not configured").into_response();
+    };
     if !(email_match && pw_match) {
+        // Logged with the peer address: a failed sign-in against the only account an
+        // on-prem install has is the thing an operator most wants to be able to see.
+        tracing::warn!(
+            ip = %addr.ip(),
+            email_match,
+            "on-prem login refused"
+        );
+        tokio::time::sleep(FAILED_LOGIN_DELAY).await;
         return (StatusCode::UNAUTHORIZED, "bad credentials").into_response();
     }
 
@@ -454,7 +485,35 @@ pub async fn on_prem_login(
             return (StatusCode::INTERNAL_SERVER_ERROR, "admin user missing").into_response();
         }
     };
+    tracing::info!(ip = %addr.ip(), user_id = user.id, "on-prem login succeeded");
     issue_session_cookie(&state, jar, user.tenant_id, user.id).await
+}
+
+/// `Some(true)`/`Some(false)` when a credential is configured, `None` when none is.
+///
+/// The hash is checked first because a deployment that has one has said which answer it
+/// means; the two cannot both be set (startup refuses that).
+fn verify_admin_password(cfg: &crate::config::Config, offered: &str) -> Option<bool> {
+    if let Some(phc) = cfg.on_prem_admin_password_hash.as_deref() {
+        use argon2::password_hash::{PasswordHash, PasswordVerifier};
+        let parsed = match PasswordHash::new(phc) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(error = %e, "ON_PREM_ADMIN_PASSWORD_HASH is not a valid PHC string");
+                return None;
+            }
+        };
+        return Some(
+            argon2::Argon2::default()
+                .verify_password(offered.as_bytes(), &parsed)
+                .is_ok(),
+        );
+    }
+    let plain = cfg
+        .on_prem_admin_password
+        .as_deref()
+        .filter(|p| !p.is_empty())?;
+    Some(constant_time_eq(offered.as_bytes(), plain.as_bytes()))
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {

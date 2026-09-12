@@ -16,7 +16,13 @@ pub struct Config {
     pub base_url: String,
     pub on_prem: bool,
     pub on_prem_admin_email: Option<String>,
+    /// Plaintext admin password, from `ON_PREM_ADMIN_PASSWORD`. Kept for the installs that
+    /// already use it; [`Config::on_prem_admin_password_hash`] is the better one.
     pub on_prem_admin_password: Option<String>,
+    /// An argon2 PHC string, from `ON_PREM_ADMIN_PASSWORD_HASH`. Preferred: the env file is
+    /// mode 640 and read by a service account, but it is also what lands in a backup, a
+    /// config-management repository and anything that dumps the process environment.
+    pub on_prem_admin_password_hash: Option<String>,
     /// Addresses that are granted the platform-admin flag at startup (and when they sign up).
     /// This is the bootstrap only: the flag lives in the database and is granted and revoked
     /// from the console after that. Lowercased on load so comparisons match stored addresses.
@@ -122,6 +128,20 @@ impl Config {
             }),
             _ => None,
         };
+
+        let on_prem_admin_password = std::env::var("ON_PREM_ADMIN_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let on_prem_admin_password_hash = std::env::var("ON_PREM_ADMIN_PASSWORD_HASH")
+            .ok()
+            .filter(|s| !s.is_empty());
+        if on_prem_admin_password.is_some() && on_prem_admin_password_hash.is_some() {
+            anyhow::bail!(
+                "ON_PREM_ADMIN_PASSWORD and ON_PREM_ADMIN_PASSWORD_HASH are both set. Pick \
+                 one — having two answers to 'what is the admin password' means one of them \
+                 is stale and nobody can tell which."
+            );
+        }
 
         let turnstile_secret = std::env::var("TURNSTILE_SECRET")
             .ok()
@@ -250,7 +270,8 @@ impl Config {
             base_url,
             on_prem,
             on_prem_admin_email: std::env::var("ON_PREM_ADMIN_EMAIL").ok(),
-            on_prem_admin_password: std::env::var("ON_PREM_ADMIN_PASSWORD").ok(),
+            on_prem_admin_password: on_prem_admin_password.clone(),
+            on_prem_admin_password_hash: on_prem_admin_password_hash.clone(),
             platform_admin_emails: csv_env("PLATFORM_ADMIN_EMAILS"),
             magic_link_ttl_secs: 900,
             session_ttl_secs: 604_800,
