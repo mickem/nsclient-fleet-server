@@ -15,18 +15,18 @@ backups applies here too — only the packaging differs.
 ```bash
 docker run -d --name nsclient-fleet --restart unless-stopped \
   -e MASTER_KEY="$(openssl rand -base64 32)" \
-  -e BASE_URL="https://fleet.example.internal:8443" \
+  -e BASE_URL="https://fleet.example.internal:9443" \
   -e ON_PREM=true \
   -e ON_PREM_ADMIN_EMAIL=admin@example.internal \
   -e ON_PREM_ADMIN_PASSWORD='a strong password' \
   -v fleet-data:/data \
-  -p 8443:8443 \
+  -p 9443:9443 \
   ghcr.io/mickem/nsclient-fleet:latest
 ```
 
 That starts a single-tenant install with a self-signed certificate it generates on first
 start, signs you in by password, and serves the UI and agent mTLS on one port. Open
-`https://fleet.example.internal:8443/` — your browser will warn about the certificate until
+`https://fleet.example.internal:9443/` — your browser will warn about the certificate until
 you do [TLS](#tls) below.
 
 <!-- @formatter:off -->
@@ -53,7 +53,7 @@ you do [TLS](#tls) below.
 | Base | `alpine`, plus `ca-certificates` and `tini` |
 | Binary | The released `*-unknown-linux-musl` build, verified against the release's `SHA256SUMS` at build time |
 | User | `fleet` (uid 10001), non-root |
-| Port | 8443 — above the privileged range precisely so root is not needed |
+| Port | 9443 — above the privileged range so root is not needed, and not 8443, which the NSClient++ web UI already uses |
 | Volume | `/data` |
 
 `amd64` and `arm64` are published under the same tag. Pin `:<version>` in production;
@@ -117,10 +117,10 @@ the same problem and the same answers.
 ```bash
 docker run -d --name nsclient-fleet --restart unless-stopped \
   -e MASTER_KEY="$MASTER_KEY" \
-  -e BASE_URL="https://fleet.example.internal:8443" \
+  -e BASE_URL="https://fleet.example.internal:9443" \
   -e TLS_CERT=/certs/fleet.pem -e TLS_KEY=/certs/fleet.key \
   -v /etc/ssl/fleet:/certs:ro \
-  -v fleet-data:/data -p 8443:8443 \
+  -v fleet-data:/data -p 9443:9443 \
   ghcr.io/mickem/nsclient-fleet:latest
 ```
 
@@ -133,7 +133,7 @@ For a publicly resolvable name with inbound 443 from the internet:
 
 ```bash
   -e ACME_DOMAINS=fleet.example.com -e ACME_CONTACT=ops@example.com \
-  -p 443:8443
+  -p 443:9443
 ```
 
 Issuance is TLS-ALPN-01 on the same port — no `:80` listener. Keep `/data` so the ACME
@@ -151,8 +151,22 @@ The practical consequence for a container deployment: **nothing may terminate TL
 front of it.** An ingress controller doing TLS, a reverse proxy, a service mesh sidecar —
 each breaks agent mTLS. Publish the port directly, or pass TCP through unmodified.
 
-To use the standard port, map it: `-p 443:8443`. The container stays unprivileged either
-way.
+### Choosing the port
+
+The container listens on 9443. It is deliberately not 8443, which the NSClient++ web UI
+already uses: a server sharing a host with an agent would collide with it. To publish on a
+different port, change the mapping **and `BASE_URL` together** — the port in `BASE_URL` is
+what agents are told to dial, so the two must agree:
+
+```bash
+  -e BASE_URL="https://fleet.example.com" -p 443:9443              # standard port
+  -e BASE_URL="https://fleet.example.internal:10443" -p 10443:9443
+```
+
+The container stays unprivileged either way. `LISTEN_HTTPS` changes the port *inside* the
+container, which only matters with `--network host`. When even `BASE_URL` is not the
+address agents can reach — a NAT or port forward in front of the host, say — set `MTLS_URL`
+to the one they can.
 
 ## Compose
 
@@ -164,12 +178,12 @@ services:
     restart: unless-stopped
     environment:
       MASTER_KEY: ${MASTER_KEY:?set MASTER_KEY in .env}
-      BASE_URL: https://fleet.example.internal:8443
+      BASE_URL: https://fleet.example.internal:9443
       ON_PREM: "true"
       ON_PREM_ADMIN_EMAIL: admin@example.internal
       ON_PREM_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
     ports:
-      - "8443:8443"
+      - "9443:9443"
     volumes:
       - fleet-data:/data
 
@@ -197,10 +211,10 @@ unchanged; these are the ones the image sets or interprets differently:
 | `BUNDLE_DIR` | `/data/bundles` | |
 | `ACME_CACHE_DIR` | `/data/acme` | |
 | `MTLS_STATE_DIR` / `TLS_STATE_DIR` | `/data` | Where the two certificates live |
-| `LISTEN_HTTPS` | `0.0.0.0:8443` | Unprivileged by default |
+| `LISTEN_HTTPS` | `0.0.0.0:9443` | Unprivileged by default |
 | `TLS_SELF_SIGNED` | `true` unless `ACME_DOMAINS` or `TLS_CERT` is set | Set `false` for plain HTTP on `LISTEN` |
 | `COOKIE_SECURE` | `true` whenever TLS is on | Set explicitly to override |
-| `BASE_URL` | warns if unset | Defaults to `https://localhost:8443`, which nothing outside the container can reach |
+| `BASE_URL` | warns if unset | Defaults to `https://localhost:9443`, which nothing outside the container can reach |
 | `MASTER_KEY` | **required** | No default, by design |
 
 ### Running one-off commands
@@ -276,7 +290,7 @@ bundle — so a self-signed certificate means each agent needs `--ca` pointing a
 ```bash
 docker cp nsclient-fleet:/data/web-server.crt ./fleet-ca.pem
 # then, on the agent
-nscp enroll --server https://fleet.example.internal:8443 --token <token> --ca fleet-ca.pem
+nscp enroll --server https://fleet.example.internal:9443 --token <token> --ca fleet-ca.pem
 ```
 
 [Central management with NSClient Fleet](https://docs.nsclient.org/setup/fleet/) walks the
@@ -288,9 +302,13 @@ whole thing from the agent's side.
 whole explanation.
 
 **The container starts, but nothing is reachable.** Check the port mapping matches
-`LISTEN_HTTPS` (8443 inside the container, whatever you published outside), and that
+`LISTEN_HTTPS` (9443 inside the container, whatever you published outside), and that
 `BASE_URL` names an address that resolves from outside the container — the log warns when
 it fell back to `localhost`.
+
+**Agents enroll, then fail to connect on a port nobody listens on.** The port in `BASE_URL`
+does not match the one you published: agents are told to dial `BASE_URL`'s port. Fix
+`BASE_URL` (or set `MTLS_URL`) and re-enroll the affected hosts.
 
 **Agents enroll but never poll.** Something is terminating TLS in front of the container,
 or `BASE_URL` changed after they enrolled. See

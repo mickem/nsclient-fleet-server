@@ -100,7 +100,7 @@ and the admin password, so the service can read it and nobody else can.
 sudo tee /etc/nsclient-fleet/env >/dev/null <<'EOF'
 # --- identity -------------------------------------------------------------
 MASTER_KEY=<the base64 string from step 3>
-BASE_URL=https://fleet.example.internal:8443
+BASE_URL=https://fleet.example.internal:9443
 
 # --- TLS ------------------------------------------------------------------
 # Issue and persist a self-signed certificate on first start. Step 5 replaces
@@ -109,7 +109,7 @@ TLS_SELF_SIGNED=true
 COOKIE_SECURE=true
 
 # --- listeners ------------------------------------------------------------
-LISTEN_HTTPS=0.0.0.0:8443
+LISTEN_HTTPS=0.0.0.0:9443
 
 # --- single-tenant --------------------------------------------------------
 # Disables signup and magic links; authenticates one administrator by password.
@@ -127,8 +127,11 @@ sudo chown root:nsclient-fleet /etc/nsclient-fleet/env
 sudo chmod 640 /etc/nsclient-fleet/env
 ```
 
-Port 8443 rather than 443 so the service does not need a privileged port. Use 443 if you
-would rather, and give the unit `AmbientCapabilities=CAP_NET_BIND_SERVICE`.
+Port 9443 rather than 443 so the service does not need a privileged port, and rather than
+8443 because that is the NSClient++ web UI — an agent on the same machine would collide
+with it. Use 443 if you would rather, and give the unit
+`AmbientCapabilities=CAP_NET_BIND_SERVICE`. Whatever you pick, `BASE_URL` and
+`LISTEN_HTTPS` must carry the same port: agents are told to dial the one in `BASE_URL`.
 
 <!-- @formatter:off -->
 > **`BASE_URL` is load-bearing.** It is the address in sign-in links, the address in the
@@ -151,7 +154,7 @@ The first start does a lot, and the log says so:
 ```
 generated and persisted mTLS server cert       path=/opt/nsclient-fleet/data/mtls-server.crt host=fleet.example.internal
 generated a self-signed web certificate …      path=/opt/nsclient-fleet/data/web-server.crt hosts=["fleet.example.internal", "localhost", "127.0.0.1", "::1"]
-HTTPS listening (certificate from disk)        addr=0.0.0.0:8443 self_signed=true
+HTTPS listening (certificate from disk)        addr=0.0.0.0:9443 self_signed=true
 shared-port listener up (operator UI + agent mTLS + ACME)
 ```
 
@@ -167,7 +170,7 @@ short version:
 Check it answers:
 
 ```bash
-curl -k https://localhost:8443/healthz     # → OK
+curl -k https://localhost:9443/healthz     # → OK
 ```
 
 `-k` because nothing trusts the certificate yet. That is the next step.
@@ -252,7 +255,7 @@ with — every regeneration is another round of distribution.
 ### Verify
 
 ```bash
-openssl s_client -connect fleet.example.internal:8443 \
+openssl s_client -connect fleet.example.internal:9443 \
   -servername fleet.example.internal </dev/null 2>/dev/null \
   | openssl x509 -noout -subject -issuer -dates -ext subjectAltName
 ```
@@ -264,11 +267,11 @@ Then load the UI: no warning, and a padlock.
 
 ```bash
 # ufw
-sudo ufw allow 8443/tcp
+sudo ufw allow 9443/tcp
 sudo ufw allow from <your addresses> to any port 22 proto tcp
 
 # firewalld
-sudo firewall-cmd --permanent --add-port=8443/tcp && sudo firewall-cmd --reload
+sudo firewall-cmd --permanent --add-port=9443/tcp && sudo firewall-cmd --reload
 ```
 
 That is the whole list. One application port carries the UI, the API and every agent;
@@ -284,14 +287,14 @@ SMTP relay.
 
 ## Step 8 — Sign in and enroll a host
 
-Open `https://fleet.example.internal:8443/` and sign in with `ON_PREM_ADMIN_EMAIL` and
+Open `https://fleet.example.internal:9443/` and sign in with `ON_PREM_ADMIN_EMAIL` and
 `ON_PREM_ADMIN_PASSWORD`.
 
 Then **Hosts → Add host**. The install command it returns carries a one-time bootstrap
 token, good for an hour:
 
 ```
-nscp enroll --server https://fleet.example.internal:8443 --token <bootstrap-token>
+nscp enroll --server https://fleet.example.internal:9443 --token <bootstrap-token>
 ```
 
 Run that on the machine you are adding. NSClient++ is a separate product;

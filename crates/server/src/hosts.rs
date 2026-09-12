@@ -26,6 +26,11 @@ pub struct CreateHostBody {
 pub struct CreateHostResponse {
     pub host_id: String,
     pub bootstrap_token: String,
+    /// The address the agent enrolls against — `BASE_URL` — separately from the command,
+    /// for tooling that builds its own. The web console does: the bundle encryption key
+    /// it appends never reaches this server, so no command built here could carry it.
+    pub server_url: String,
+    /// `nscp enroll …` without the bundle key, for API users and scripts.
     pub install_command: String,
     pub expires_at: i64,
 }
@@ -111,11 +116,8 @@ pub async fn create(
     };
     let token = encode_bootstrap(&state.config.bootstrap_jwt_secret, &claims);
 
-    let install_command = format!(
-        "nscp enroll --server {} --token {}",
-        state.config.base_url.trim_end_matches('/'),
-        token
-    );
+    let server_url = state.config.base_url.trim_end_matches('/').to_string();
+    let install_command = format!("nscp enroll --server {server_url} --token {token}");
 
     crate::audit::record(
         &state,
@@ -131,6 +133,7 @@ pub async fn create(
     Json(CreateHostResponse {
         host_id: host.id,
         bootstrap_token: token,
+        server_url,
         install_command,
         expires_at,
     })

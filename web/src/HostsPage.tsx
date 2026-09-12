@@ -22,7 +22,6 @@ import {
   Typography,
 } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
-import CloseIcon from "@mui/icons-material/Close";
 import DeleteIcon from "@mui/icons-material/Delete";
 import LabelIcon from "@mui/icons-material/Label";
 import LabelOffIcon from "@mui/icons-material/LabelOff";
@@ -40,6 +39,7 @@ import {
 import { BulkAddTagDialog, BulkDeleteDialog, BulkRemoveTagDialog } from "./BulkHostDialogs";
 import { ConfirmDeleteHostDialog } from "./ConfirmDeleteHostDialog";
 import { HostStatusChip, LocalConfigChip } from "./HostStatusChip";
+import { IssuedHostCard } from "./IssuedHostCard";
 import { RefreshButton } from "./RefreshButton";
 
 type Props = { me: Me };
@@ -213,39 +213,7 @@ export function HostsPage({ me }: Props) {
         </Alert>
       )}
 
-      {issued && (
-        <Card sx={{ mb: 2 }}>
-          <CardContent>
-            <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
-              <Typography variant="h5" gutterBottom>
-                Install command
-              </Typography>
-              <IconButton size="small" onClick={() => setIssued(null)}>
-                <CloseIcon fontSize="small" />
-              </IconButton>
-            </Stack>
-            <Typography variant="body2" color="text.secondary">
-              Run this on the host — the token expires in 1 hour and can be used once.
-            </Typography>
-            <Box
-              component="pre"
-              sx={{
-                overflowX: "auto",
-                p: 1.5,
-                mt: 1,
-                bgcolor: "#0D1117",
-                borderRadius: 1,
-                fontSize: "0.85rem",
-              }}
-            >
-              {issued.install_command}
-            </Box>
-            <Typography variant="caption" color="text.secondary">
-              host_id: <code>{issued.host_id}</code>
-            </Typography>
-          </CardContent>
-        </Card>
-      )}
+      {issued && <IssuedHostCard issued={issued} onClose={() => setIssued(null)} />}
 
       {hosts !== null && hosts.length > 0 && (
         <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap" sx={{ mb: 2 }}>

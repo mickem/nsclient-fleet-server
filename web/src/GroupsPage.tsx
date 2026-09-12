@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useMatch, useNavigate, useParams } from "react-router-dom";
 import {
   Alert,
   Box,
@@ -21,16 +22,29 @@ import {
   Me,
   BundleView,
   GroupView,
+  HostView,
   PreviewMatch,
   Selector,
 } from "./api";
-import { describeSelector, SelectorEditor } from "./SelectorBuilder";
+import {
+  describeSelector,
+  KnownTags,
+  knownTagsFromHosts,
+  SelectorEditor,
+} from "./SelectorBuilder";
 import { RefreshButton } from "./RefreshButton";
 
 export function GroupsPage({ me }: { me: Me }) {
   const [groups, setGroups] = useState<GroupView[] | null>(null);
   const [bundles, setBundles] = useState<BundleView[]>([]);
-  const [creating, setCreating] = useState(false);
+  // The tags the fleet reports right now, so the selector editor can offer them. Derived
+  // from the host list, which already carries every host's tags for the hosts page.
+  const [known, setKnown] = useState<KnownTags>(() => new Map());
+  // Which editor is open lives in the URL — /groups/new, or /groups/:id for the card
+  // being edited — so the "Groups" sidebar entry closes it and a refresh reopens it.
+  const navigate = useNavigate();
+  const creating = useMatch("/groups/new") !== null;
+  const { groupId: editingId } = useParams();
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -42,6 +56,10 @@ export function GroupsPage({ me }: { me: Me }) {
     void Promise.all([
       apiGet<GroupView[]>("/api/groups").then(setGroups, (e) => setError(e.message)),
       apiGet<BundleView[]>("/api/bundles").then(setBundles, () => {}),
+      apiGet<HostView[]>("/api/hosts").then(
+        (hosts) => setKnown(knownTagsFromHosts(hosts)),
+        () => {},
+      ),
     ]).finally(() => setRefreshing(false));
   };
   useEffect(refresh, []);
@@ -53,7 +71,7 @@ export function GroupsPage({ me }: { me: Me }) {
         <Stack direction="row" spacing={1} alignItems="center">
           <RefreshButton refreshing={refreshing} onClick={refresh} />
           {!creating && canWriteConfig(me.role) && (
-            <Button variant="contained" startIcon={<AddIcon />} onClick={() => setCreating(true)}>
+            <Button variant="contained" startIcon={<AddIcon />} onClick={() => navigate("/groups/new")}>
               New group
             </Button>
           )}
@@ -70,12 +88,13 @@ export function GroupsPage({ me }: { me: Me }) {
       )}
       {creating && (
         <GroupEditor
+          known={known}
           initialName=""
           initialSelector={{ clauses: [] }}
-          onCancel={() => setCreating(false)}
+          onCancel={() => navigate("/groups")}
           onSave={async (name, selector) => {
             await apiSend("POST", "/api/groups", { name, selector });
-            setCreating(false);
+            navigate("/groups");
             refresh();
           }}
         />
@@ -92,10 +111,13 @@ export function GroupsPage({ me }: { me: Me }) {
         <Stack spacing={2}>
           {groups.map((g) => (
             <GroupCard
+              known={known}
               key={g.id}
               group={g}
               bundles={bundles}
               canWrite={canWriteConfig(me.role)}
+              editing={editingId === g.id}
+              onEdit={(open) => navigate(open ? `/groups/${g.id}` : "/groups")}
               onChanged={refresh}
             />
           ))}
@@ -106,17 +128,23 @@ export function GroupsPage({ me }: { me: Me }) {
 }
 
 function GroupCard({
+  known,
   group,
   bundles,
   canWrite,
+  editing,
+  onEdit,
   onChanged,
 }: {
+  known: KnownTags;
   group: GroupView;
   bundles: BundleView[];
   canWrite: boolean;
+  /** Whether this card's editor is open — decided by the URL, not held here. */
+  editing: boolean;
+  onEdit: (open: boolean) => void;
   onChanged: () => void;
 }) {
-  const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const remove = async () => {
@@ -136,7 +164,7 @@ function GroupCard({
           <Typography variant="h5">{group.name}</Typography>
           {canWrite && (
             <Stack direction="row" spacing={1}>
-              <Button size="small" onClick={() => setEditing(!editing)}>
+              <Button size="small" onClick={() => onEdit(!editing)}>
                 {editing ? "Close" : "Edit"}
               </Button>
               <Button size="small" color="error" onClick={remove}>
@@ -158,12 +186,13 @@ function GroupCard({
         </Typography>
         {editing && (
           <GroupEditor
+            known={known}
             initialName={group.name}
             initialSelector={group.selector}
-            onCancel={() => setEditing(false)}
+            onCancel={() => onEdit(false)}
             onSave={async (name, selector) => {
               await apiSend("PATCH", `/api/groups/${group.id}`, { name, selector });
-              setEditing(false);
+              onEdit(false);
               onChanged();
             }}
           />
@@ -175,11 +204,13 @@ function GroupCard({
 }
 
 function GroupEditor({
+  known,
   initialName,
   initialSelector,
   onSave,
   onCancel,
 }: {
+  known: KnownTags;
   initialName: string;
   initialSelector: Selector;
   onSave: (name: string, selector: Selector) => Promise<void>;
@@ -220,7 +251,7 @@ function GroupEditor({
         placeholder="sql-servers"
         sx={{ mb: 2 }}
       />
-      <SelectorEditor selector={selector} onChange={setSelector} />
+      <SelectorEditor selector={selector} onChange={setSelector} known={known} />
       {error && (
         <Alert severity="error" sx={{ my: 1 }}>
           {error}

@@ -122,6 +122,10 @@ export type DesiredStateView = {
 export type CreateHostResponse = {
   host_id: string;
   bootstrap_token: string;
+  /** The enrollment address. The console builds its own commands from this and the
+   *  token (see installCommands.ts) so they can carry the browser-held bundle key. */
+  server_url: string;
+  /** `nscp enroll …` without the bundle key — what API users get. */
   install_command: string;
   expires_at: number;
 };
