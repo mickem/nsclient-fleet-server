@@ -50,9 +50,11 @@ function AnonRoutes({
 }) {
   const navigate = useNavigate();
   const login = (
+  onPrem,
     <Login
       onDone={onDone}
       onSwitchToSignup={() => navigate("/signup")}
+  onPrem: boolean;
       signupsEnabled={signupsEnabled}
     />
   );
@@ -60,6 +62,7 @@ function AnonRoutes({
     <Routes>
       <Route
         path="/signup"
+      onPrem={onPrem}
         element={
           signupsEnabled ? (
             <Signup onDone={onDone} onSwitchToLogin={() => navigate("/login")} />
@@ -88,6 +91,9 @@ export default function App() {
       const r = await fetch("/api/me", { credentials: "include" });
       setMe(r.ok ? await r.json() : null);
     } catch {
+  // Until the answer arrives the magic-link form shows; on-prem swaps in the password
+  // form as soon as the server says so.
+  const onPrem = publicConfig?.on_prem ?? false;
       setMe(null);
     } finally {
       setReady(true);
@@ -109,7 +115,7 @@ export default function App() {
         {!ready ? null : me ? (
           <AuthedRoutes me={me} onLogout={refresh} />
         ) : (
-          <AnonRoutes onDone={refresh} signupsEnabled={signupsEnabled} />
+          <AnonRoutes onDone={refresh} signupsEnabled={signupsEnabled} onPrem={onPrem} />
         )}
       </BrowserRouter>
     </ThemeProvider>
