@@ -976,8 +976,8 @@ pub async fn enroll(
             claims.tenant_id,
             &claims.host_id,
             &nonce_hash,
-            body.hostname.as_deref(),
-            body.os.as_deref(),
+            crate::agent_api::clamp_descriptor(body.hostname.as_deref()).as_deref(),
+            crate::agent_api::clamp_descriptor(body.os.as_deref()).as_deref(),
             fleet_storage::EnrolledCert {
                 serial: &issued.serial_hex,
                 fingerprint_sha256: &issued.fingerprint_sha256_hex,

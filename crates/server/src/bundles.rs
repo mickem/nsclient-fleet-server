@@ -142,13 +142,18 @@ pub async fn upload(
         }
     }
 
-    let name = match name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(n) => n.to_string(),
-        None => return (StatusCode::BAD_REQUEST, "missing name").into_response(),
+    // The same grammar compose enforces. Raw upload only checked non-empty, which mattered
+    // for more than tidiness: the encrypted-bundle AAD is `name || 0x00 || version`, so a
+    // name containing a NUL collides with a different (name, version) pair and the binding
+    // stops distinguishing them. NULs and newlines also flowed straight into audit JSON and
+    // the console from here.
+    let name = match name.as_deref().map(str::trim) {
+        Some(n) if valid_bundle_token(n) => n.to_string(),
+        _ => return (StatusCode::BAD_REQUEST, BUNDLE_TOKEN_RULE).into_response(),
     };
-    let version = match version.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(v) => v.to_string(),
-        None => return (StatusCode::BAD_REQUEST, "missing version").into_response(),
+    let version = match version.as_deref().map(str::trim) {
+        Some(v) if valid_bundle_token(v) => v.to_string(),
+        _ => return (StatusCode::BAD_REQUEST, BUNDLE_TOKEN_RULE).into_response(),
     };
     let bytes = match bytes {
         Some(b) if !b.is_empty() => b,
@@ -299,6 +304,10 @@ async fn persist_bundle(
 
     Ok(row.into())
 }
+
+/// Shared refusal text, so upload and compose say the same thing.
+const BUNDLE_TOKEN_RULE: &str =
+    "name and version must be 1-128 characters of letters, digits, '.', '_' or '-'";
 
 fn valid_bundle_token(s: &str) -> bool {
     !s.is_empty()

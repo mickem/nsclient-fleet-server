@@ -238,7 +238,8 @@ async fn fifty_agents_enroll_heartbeat_and_report_state() {
         tags.insert("env".into(), "prod".into());
         tags.insert("agent_index".into(), i.to_string());
         agent
-            .report_state(Some(&format!("hash-{i:02}")), tags)
+            // A state hash is a SHA-256 in hex and the server now insists on that shape.
+            .report_state(Some(&format!("{i:064x}")), tags)
             .await
             .expect("state report");
     });

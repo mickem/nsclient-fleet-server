@@ -8,6 +8,10 @@ use fleet_storage::Db;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+/// A well-formed applied_state_hash. The server requires 64 hex characters — it is a
+/// SHA-256 and nothing else is meaningful — so tests cannot use a readable placeholder.
+const TEST_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
 struct TestServer {
     base_url: String,
     _tempdir: TempDir,
@@ -316,10 +320,7 @@ async fn state_report_records_tags_without_disturbing_the_tenant() {
     let mut tags = BTreeMap::new();
     tags.insert("os".into(), "linux".into());
     tags.insert("sql_server_present".into(), "true".into());
-    agent
-        .report_state(Some("phase4-test-hash"), tags)
-        .await
-        .unwrap();
+    agent.report_state(Some(TEST_HASH), tags).await.unwrap();
 
     let v_after: i64 = sqlx::query_scalar("SELECT config_version FROM tenants WHERE slug = 'beta'")
         .fetch_one(&s.db.read)
@@ -354,7 +355,7 @@ async fn state_report_records_tags_without_disturbing_the_tenant() {
             .fetch_one(&s.db.read)
             .await
             .unwrap();
-    assert_eq!(stored_hash.as_deref(), Some("phase4-test-hash"));
+    assert_eq!(stored_hash.as_deref(), Some(TEST_HASH));
 }
 
 /// The agent reports *whether* the host carries configuration of its own that outranks what
@@ -395,14 +396,14 @@ async fn a_host_reports_whether_local_configuration_outranks_the_fleet() {
 
     // An agent that predates the field: silence changes nothing.
     agent
-        .report_state(Some("h1"), BTreeMap::new())
+        .report_state(Some(TEST_HASH), BTreeMap::new())
         .await
         .unwrap();
     assert_eq!(stored().await, None, "an omitted field is not an answer");
 
     // Reported clean.
     agent
-        .report_state_with_local_config(Some("h1"), BTreeMap::new(), false)
+        .report_state_with_local_config(Some(TEST_HASH), BTreeMap::new(), false)
         .await
         .unwrap();
     assert_eq!(stored().await, Some(0));
@@ -410,7 +411,7 @@ async fn a_host_reports_whether_local_configuration_outranks_the_fleet() {
 
     // Someone edits nsclient.ini on the box.
     agent
-        .report_state_with_local_config(Some("h1"), BTreeMap::new(), true)
+        .report_state_with_local_config(Some(TEST_HASH), BTreeMap::new(), true)
         .await
         .unwrap();
     assert_eq!(stored().await, Some(1));
@@ -418,7 +419,7 @@ async fn a_host_reports_whether_local_configuration_outranks_the_fleet() {
 
     // A report that omits the field must not silently clear what we were told.
     agent
-        .report_state(Some("h1"), BTreeMap::new())
+        .report_state(Some(TEST_HASH), BTreeMap::new())
         .await
         .unwrap();
     assert_eq!(
@@ -429,7 +430,7 @@ async fn a_host_reports_whether_local_configuration_outranks_the_fleet() {
 
     // And it comes back down when the local configuration is removed.
     agent
-        .report_state_with_local_config(Some("h1"), BTreeMap::new(), false)
+        .report_state_with_local_config(Some(TEST_HASH), BTreeMap::new(), false)
         .await
         .unwrap();
     assert_eq!(stored().await, Some(0));

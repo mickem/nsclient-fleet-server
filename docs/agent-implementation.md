@@ -212,7 +212,8 @@ All fields are optional server-side (`crates/server/src/agent_api.rs`,
 
 - `applied_state_hash` set → server records it and updates `last_seen_at`.
   Omit it (null) when nothing was applied; the server still touches
-  `last_seen_at`.
+  `last_seen_at`. It must be exactly 64 hex characters — it is the SHA-256 the
+  server sent you and nothing else is meaningful; anything else is a `400`.
 - `reported_tags` → **the host's complete set of self-reported tags**, stored
   with `source = "agent"` and kept distinct from tags an operator set. Send the
   full map every time: it *replaces* what was stored, so a key you stop
@@ -235,7 +236,8 @@ All fields are optional server-side (`crates/server/src/agent_api.rs`,
   themselves in that group, and the console says so at the point they write it.
   Anything gating access to scripts or secrets should stay on operator tags.
 - `errors` → logged server-side; use it for bundle verification or apply
-  failures.
+  failures. At most 32 entries of 512 characters reach the log; send a summary,
+  not a log file.
 - `local_config_present` → whether the host has configuration of its own that
   takes precedence over what you were sent. Send the fact on every report, both
   ways round, and **never** send the configuration itself — it typically holds

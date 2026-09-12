@@ -161,6 +161,36 @@ pub struct StateReport {
     pub local_config_present: Option<bool>,
 }
 
+/// Longest hostname or OS string we will store. Both are the host's own description of
+/// itself and both are rendered in the console.
+pub const MAX_HOST_DESCRIPTOR_LEN: usize = 256;
+
+/// Most error strings one report may carry, and how long each may be. An agent reporting
+/// its bundle failures needs a handful of lines, not a log file.
+const MAX_ERRORS: usize = 32;
+const MAX_ERROR_LEN: usize = 512;
+
+/// A state hash is a SHA-256 in hex, and nothing else is meaningful.
+///
+/// It was stored verbatim up to the body limit and echoed back into the console, so a host
+/// could put two megabytes of anything into a field an operator reads.
+fn valid_state_hash(h: &str) -> bool {
+    h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Trim what a host says about itself to something storable, or None if it says nothing.
+///
+/// Truncates rather than refusing: a hostname is descriptive, not load-bearing, and
+/// refusing an enrollment over a long one would be a worse outcome than storing 256
+/// characters of it.
+pub fn clamp_descriptor(v: Option<&str>) -> Option<String> {
+    let v = v?.trim();
+    if v.is_empty() {
+        return None;
+    }
+    Some(v.chars().take(MAX_HOST_DESCRIPTOR_LEN).collect())
+}
+
 /// Bound what a host may store about itself.
 ///
 /// The limits are the selector's own: a key or value longer than a selector can compare is
@@ -192,6 +222,14 @@ pub async fn state_report(
     let tags_repo = HostTagsRepo::new(&state.db);
 
     if let Some(hash) = &body.applied_state_hash {
+        if !valid_state_hash(hash) {
+            tracing::info!(host_id = %ctx.host_id, "rejected a malformed applied_state_hash");
+            return (
+                StatusCode::BAD_REQUEST,
+                "applied_state_hash must be 64 hex characters",
+            )
+                .into_response();
+        }
         if let Err(e) = hosts_repo
             .update_current_state_hash(ctx.tenant_id, &ctx.host_id, hash)
             .await
@@ -264,7 +302,21 @@ pub async fn state_report(
     }
 
     if !body.errors.is_empty() {
-        tracing::warn!(host_id = %ctx.host_id, errors = ?body.errors, "host reported errors");
+        // Capped on both axes before it reaches a log line. These are not stored, but they
+        // are written to the journal verbatim, and "the host decides how much it writes to
+        // your disk" is not a property worth having.
+        let shown: Vec<String> = body
+            .errors
+            .iter()
+            .take(MAX_ERRORS)
+            .map(|e| e.chars().take(MAX_ERROR_LEN).collect())
+            .collect();
+        tracing::warn!(
+            host_id = %ctx.host_id,
+            reported = body.errors.len(),
+            errors = ?shown,
+            "host reported errors"
+        );
     }
 
     Json(serde_json::json!({})).into_response()
