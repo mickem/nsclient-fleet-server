@@ -136,6 +136,14 @@ short prefix (`nsk_a1B2c3D4…`) so keys are still identifiable in the list. Key
 their owner: nobody else can list or revoke them, admins included. Revoking a key, changing
 the owner's role, or deleting the owner all take effect on the key's next request.
 
+Two things a key deliberately cannot do, whatever its owner's role. It cannot create another
+key — otherwise revoking a leaked one revokes nothing, because its holder makes a
+replacement first. And it cannot reach the platform console, which is the one cross-tenant
+privilege in the system and has nothing a script needs. Both are a signed-in session only.
+
+Keys can be given an expiry, and the console offers one by default: a key with no end is a
+credential with no end.
+
 ## Dev environment variables
 
 `MASTER_KEY` is required for any startup that touches encryption (tenant CAs, host overrides). For dev:

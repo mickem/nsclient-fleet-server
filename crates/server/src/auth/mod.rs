@@ -40,8 +40,22 @@ pub fn session_cookie_name(cookie_secure: bool) -> &'static str {
 /// than a cross-site request an attacker can forge. See `auth::handlers::exchange`.
 pub const EXCHANGE_COOKIE: &str = "fleet_exchange";
 
+/// Which credential produced an [`AuthedUser`].
+///
+/// The two are not interchangeable even when they resolve to the same person. A session
+/// cookie comes from a browser, from someone who signed in just now; an API key is a
+/// long-lived secret sitting in a script, a CI variable or a shell history. Routes that
+/// should only ever be driven by a person say so by checking this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Credential {
+    Session,
+    ApiKey,
+}
+
 #[derive(Clone, Debug)]
 pub struct AuthedUser {
+    /// How this request authenticated.
+    pub via: Credential,
     pub user_id: i64,
     pub tenant_id: i64,
     /// Resolved by `session_layer` on every request, so a role change (or a deletion) takes

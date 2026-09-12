@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use fleet_core::aead::MasterKey;
 use fleet_core::user::Role;
-use fleet_storage::{Db, SessionRepo, TenantRepo, UserRepo};
+use fleet_storage::{ApiKeyRepo, Db, SessionRepo, TenantRepo, UserRepo};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -366,6 +366,69 @@ async fn revoking_and_deleting_kill_the_key() {
         .await
         .unwrap();
     assert_eq!(left, 0);
+}
+
+/// Revoking a leaked key has to actually revoke it. If the key can mint another, whoever
+/// holds it makes a replacement first and the replacement survives the revocation — so the
+/// only remaining lever is deleting the owner.
+#[tokio::test]
+async fn a_key_cannot_mint_another_key() {
+    let s = start().await;
+    let (_, alice) = signed_in(&s, "alice@example.com", Role::Admin).await;
+    let token = mint_key(&s, &alice, "ci").await;
+
+    let r = bare()
+        .post(format!("{}/api/keys", s.base_url))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "name": "replacement" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+
+    // ...and it really is the credential kind that is refused, not the role: the same user
+    // through a cookie still can.
+    let r = alice
+        .post(format!("{}/api/keys", s.base_url))
+        .json(&serde_json::json!({ "name": "second" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+}
+
+/// A key never expired, so a leaked one stayed a working credential until somebody noticed.
+#[tokio::test]
+async fn an_expired_key_authenticates_nothing() {
+    let s = start().await;
+    let (user_id, _alice) = signed_in(&s, "alice@example.com", Role::Admin).await;
+
+    let live = "nsk_still_good";
+    let dead = "nsk_ran_out";
+    let keys = ApiKeyRepo::new(&s.db);
+    keys.create(
+        s.tenant_id,
+        user_id,
+        "live",
+        &hash_token(live),
+        "nsk_live",
+        Some(fleet_core::time::now_unix() + 3600),
+    )
+    .await
+    .unwrap();
+    keys.create(
+        s.tenant_id,
+        user_id,
+        "dead",
+        &hash_token(dead),
+        "nsk_dead",
+        Some(fleet_core::time::now_unix() - 1),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(get_hosts_with(&s, &format!("Bearer {live}")).await, 200);
+    assert_eq!(get_hosts_with(&s, &format!("Bearer {dead}")).await, 401);
 }
 
 #[tokio::test]

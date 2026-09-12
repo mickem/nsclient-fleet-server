@@ -2034,6 +2034,7 @@ impl<'a> ApiKeyRepo<'a> {
 
     /// Store a key. `token_hash` must already be hashed by the caller — the plaintext never
     /// reaches this layer.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
         tenant_id: i64,
@@ -2041,12 +2042,14 @@ impl<'a> ApiKeyRepo<'a> {
         name: &str,
         token_hash: &str,
         token_prefix: &str,
+        expires_at: Option<i64>,
     ) -> Result<ApiKey> {
         let id = ulid::Ulid::new().to_string();
         let now = now_unix();
         sqlx::query(
-            "INSERT INTO api_keys (id, tenant_id, user_id, name, token_hash, token_prefix, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO api_keys
+             (id, tenant_id, user_id, name, token_hash, token_prefix, created_at, expires_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(tenant_id)
@@ -2055,6 +2058,7 @@ impl<'a> ApiKeyRepo<'a> {
         .bind(token_hash)
         .bind(token_prefix)
         .bind(now)
+        .bind(expires_at)
         .execute(&self.db.write)
         .await?;
 
@@ -2066,12 +2070,14 @@ impl<'a> ApiKeyRepo<'a> {
             token_prefix: token_prefix.to_owned(),
             created_at: now,
             last_used_at: None,
+            expires_at,
         })
     }
 
     pub async fn list_for_user(&self, tenant_id: i64, user_id: i64) -> Result<Vec<ApiKey>> {
         let rows = sqlx::query(
-            "SELECT id, tenant_id, user_id, name, token_prefix, created_at, last_used_at
+            "SELECT id, tenant_id, user_id, name, token_prefix, created_at, last_used_at,
+                    expires_at
              FROM api_keys WHERE tenant_id = ? AND user_id = ? ORDER BY created_at DESC",
         )
         .bind(tenant_id)
@@ -2087,10 +2093,12 @@ impl<'a> ApiKeyRepo<'a> {
     /// Looked up by hash — a leaked database yields no usable tokens.
     pub async fn find_by_hash(&self, token_hash: &str) -> Result<Option<ApiKey>> {
         let row = sqlx::query(
-            "SELECT id, tenant_id, user_id, name, token_prefix, created_at, last_used_at
-             FROM api_keys WHERE token_hash = ?",
+            "SELECT id, tenant_id, user_id, name, token_prefix, created_at, last_used_at,
+                    expires_at
+             FROM api_keys WHERE token_hash = ? AND (expires_at IS NULL OR expires_at > ?)",
         )
         .bind(token_hash)
+        .bind(now_unix())
         .fetch_optional(&self.db.read)
         .await?;
         Ok(row.map(map_api_key))
@@ -2127,6 +2135,7 @@ fn map_api_key(r: sqlx::sqlite::SqliteRow) -> ApiKey {
         token_prefix: r.get("token_prefix"),
         created_at: r.get("created_at"),
         last_used_at: r.get("last_used_at"),
+        expires_at: r.get("expires_at"),
     }
 }
 

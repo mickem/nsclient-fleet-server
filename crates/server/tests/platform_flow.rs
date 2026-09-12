@@ -492,6 +492,7 @@ async fn blocking_cuts_off_the_cookie_and_the_api_key_together() {
             "ci",
             &hash_token(key_token),
             "nsk_platf",
+            None,
         )
         .await
         .unwrap();

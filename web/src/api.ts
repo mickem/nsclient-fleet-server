@@ -45,6 +45,8 @@ export type ApiKeyView = {
   token_prefix: string;
   created_at: number;
   last_used_at: number | null;
+  /** Null for a key that never expires. */
+  expires_at: number | null;
 };
 
 /** Only ever returned by `POST /api/keys`; the token is unrecoverable afterwards. */

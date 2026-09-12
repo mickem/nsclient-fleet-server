@@ -91,6 +91,17 @@ where
         if !who.is_platform_admin {
             return Err(forbidden("platform administration"));
         }
+        // Cookie only. The platform flag is the one cross-tenant privilege in the system,
+        // and a bearer token carrying it is a single string that reads every tenant — one
+        // that lives in a CI variable or a shell history rather than in a browser. There is
+        // nothing here a script needs to do.
+        if who.via != crate::auth::Credential::Session {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "the platform console requires a signed-in session, not an API key",
+            )
+                .into_response());
+        }
         Ok(PlatformAdmin(who))
     }
 }

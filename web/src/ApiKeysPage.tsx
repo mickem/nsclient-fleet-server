@@ -13,6 +13,7 @@ import {
   TableContainer,
   TableHead,
   TableRow,
+  MenuItem,
   TextField,
   Typography,
 } from "@mui/material";
@@ -37,6 +38,9 @@ export function ApiKeysPage({ me }: { me: Me }) {
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [name, setName] = useState("");
+  // Defaults to an expiry rather than to "never": a key with no end is a credential with
+  // no end, and the person creating one should have to choose that.
+  const [expiresInDays, setExpiresInDays] = useState<number | "never">(90);
   const [busy, setBusy] = useState(false);
   const [issued, setIssued] = useState<CreatedApiKey | null>(null);
 
@@ -56,7 +60,12 @@ export function ApiKeysPage({ me }: { me: Me }) {
     setBusy(true);
     setError(null);
     try {
-      setIssued(await apiSend<CreatedApiKey>("POST", "/api/keys", { name: name.trim() }));
+      setIssued(
+        await apiSend<CreatedApiKey>("POST", "/api/keys", {
+          name: name.trim(),
+          expires_in_days: expiresInDays === "never" ? null : expiresInDays,
+        }),
+      );
       setName("");
       refresh();
     } catch (e) {
@@ -111,6 +120,27 @@ export function ApiKeysPage({ me }: { me: Me }) {
               placeholder="ci-provisioning"
               sx={{ minWidth: "18rem" }}
             />
+            <TextField
+              size="small"
+              select
+              label="Expires"
+              value={String(expiresInDays)}
+              onChange={(e) =>
+                setExpiresInDays(e.target.value === "never" ? "never" : Number(e.target.value))
+              }
+              sx={{ minWidth: "10rem" }}
+            >
+              {[
+                { v: "30", label: "in 30 days" },
+                { v: "90", label: "in 90 days" },
+                { v: "365", label: "in a year" },
+                { v: "never", label: "never" },
+              ].map((o) => (
+                <MenuItem key={o.v} value={o.v}>
+                  {o.label}
+                </MenuItem>
+              ))}
+            </TextField>
             <Button
               variant="contained"
               startIcon={<AddIcon />}
@@ -121,7 +151,9 @@ export function ApiKeysPage({ me }: { me: Me }) {
             </Button>
           </Stack>
           <Typography variant="caption" color="text.secondary">
-            The token is shown once, here, and never again — only its hash is stored.
+            The token is shown once, here, and never again — only its hash is stored. A key
+            acts as you do, so it can neither create another key nor reach the platform
+            console.
           </Typography>
         </CardContent>
       </Card>
@@ -142,6 +174,7 @@ export function ApiKeysPage({ me }: { me: Me }) {
                 <TableCell>Name</TableCell>
                 <TableCell>Key</TableCell>
                 <TableCell>Created</TableCell>
+                <TableCell>Expires</TableCell>
                 <TableCell>Last used</TableCell>
                 <TableCell />
               </TableRow>
@@ -156,6 +189,7 @@ export function ApiKeysPage({ me }: { me: Me }) {
                     </Typography>
                   </TableCell>
                   <TableCell>{fmtTime(k.created_at)}</TableCell>
+                  <TableCell>{k.expires_at ? fmtTime(k.expires_at) : "never"}</TableCell>
                   <TableCell>{k.last_used_at ? fmtAgo(k.last_used_at) : "never"}</TableCell>
                   <TableCell align="right">
                     <Button

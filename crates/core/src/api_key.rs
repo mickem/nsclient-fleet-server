@@ -17,6 +17,13 @@ pub struct ApiKey {
     pub token_prefix: String,
     pub created_at: i64,
     pub last_used_at: Option<i64>,
+    /// When the key stops working, or `None` for one that never does.
+    ///
+    /// Optional rather than mandatory: a key provisioning installers from CI has no natural
+    /// renewal moment, and forcing one would mean the deployment that forgets is the one
+    /// that breaks. But a key that never expires is a credential with no end, so the UI
+    /// offers an expiry by default and this column is what makes that possible.
+    pub expires_at: Option<i64>,
 }
 
 /// Every token starts with this, so one found in a log or a script is identifiable at a

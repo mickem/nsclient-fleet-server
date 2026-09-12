@@ -8,7 +8,7 @@ use axum::{
 use axum_extra::extract::CookieJar;
 use fleet_storage::{ApiKeyRepo, SessionRepo, UserRepo};
 
-use super::{session_cookie_name, tokens::hash_token, AuthedUser};
+use super::{session_cookie_name, tokens::hash_token, AuthedUser, Credential};
 use crate::AppState;
 
 /// Reads the session cookie and, if valid, attaches `AuthedUser` to the request extensions.
@@ -55,6 +55,7 @@ async fn from_session(state: &AppState, cookie_value: &str) -> Option<AuthedUser
         return None;
     }
     Some(AuthedUser {
+        via: Credential::Session,
         user_id: session.user_id,
         tenant_id: session.tenant_id,
         role: user.role,
@@ -70,6 +71,8 @@ async fn from_session(state: &AppState, cookie_value: &str) -> Option<AuthedUser
 /// every key is resolved through its owner on every request.
 async fn from_api_key(state: &AppState, token: &str) -> Option<AuthedUser> {
     let keys = ApiKeyRepo::new(&state.db);
+    // `find_by_hash` refuses a key past its expiry, so an expired key stops working without
+    // anyone having to sweep the table first.
     let key = keys.find_by_hash(&hash_token(token)).await.ok()??;
     let user = UserRepo::new(&state.db)
         .get(key.tenant_id, key.user_id)
@@ -86,6 +89,7 @@ async fn from_api_key(state: &AppState, token: &str) -> Option<AuthedUser> {
     }
 
     Some(AuthedUser {
+        via: Credential::ApiKey,
         user_id: key.user_id,
         tenant_id: key.tenant_id,
         role: user.role,
