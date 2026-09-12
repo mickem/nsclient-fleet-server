@@ -15,4 +15,6 @@ chacha20poly1305.workspace = true
 aes-gcm.workspace = true
 rand.workspace = true
 sha2.workspace = true
+hkdf = "0.12"
+hmac = "0.12"
 tracing.workspace = true

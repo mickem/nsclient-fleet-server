@@ -13,7 +13,10 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chacha20poly1305::aead::{Aead, KeyInit, OsRng, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use hkdf::Hkdf;
+use hmac::{Mac, SimpleHmac};
 use rand::RngCore;
+use sha2::Sha256;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AeadError {
@@ -133,6 +136,33 @@ impl MasterKey {
     /// `fleet_server::tenant_setup::rebind_legacy_ciphertexts`.
     pub fn decrypt_unbound(&self, blob: &[u8]) -> Result<Vec<u8>, AeadError> {
         self.open(blob, b"")
+    }
+
+    /// An independent 32-byte key for `info`, by HKDF-SHA256 over the master key.
+    ///
+    /// The point is independence: using the master key's raw bytes directly as a MAC or
+    /// JWT key means any weakness or leak on that path is a leak of the key that decrypts
+    /// the database. A subkey derived here reveals nothing about the master key, and two
+    /// subkeys reveal nothing about each other, so each use can be reasoned about alone.
+    pub fn derive_subkey(&self, info: &str) -> [u8; 32] {
+        let hk = Hkdf::<Sha256>::new(Some(b"nsclient-fleet/hkdf/v1"), self.0.as_slice());
+        let mut out = [0u8; 32];
+        hk.expand(info.as_bytes(), &mut out)
+            .expect("32 bytes is a valid HKDF-SHA256 output length");
+        out
+    }
+
+    /// HMAC-SHA256 under the subkey for `info`.
+    ///
+    /// For values that must change when their input changes but must not let anyone who
+    /// sees the output work backwards to the input. A plain hash of a low-entropy secret
+    /// — a password in a host override, say — is an offline guessing oracle for anyone who
+    /// can read the hash, and the hash is served to every role.
+    pub fn mac(&self, info: &str, data: &[u8]) -> [u8; 32] {
+        let mut m = <SimpleHmac<Sha256> as Mac>::new_from_slice(&self.derive_subkey(info))
+            .expect("HMAC accepts a 32-byte key");
+        m.update(data);
+        m.finalize().into_bytes().into()
     }
 
     fn open(&self, blob: &[u8], aad: &[u8]) -> Result<Vec<u8>, AeadError> {
@@ -273,6 +303,36 @@ mod tests {
             key.decrypt(CA_A, &legacy),
             Err(AeadError::Decrypt)
         ));
+    }
+
+    #[test]
+    fn subkeys_are_distinct_stable_and_not_the_master_key() {
+        let key = MasterKey::from_b64(&MasterKey::generate_b64()).unwrap();
+        let a = key.derive_subkey("one");
+        let b = key.derive_subkey("two");
+        assert_ne!(a, b, "different info must give different subkeys");
+        assert_eq!(a, key.derive_subkey("one"), "derivation must be stable");
+        assert_ne!(
+            a.as_slice(),
+            key.0.as_slice(),
+            "a subkey must not be the master key itself"
+        );
+    }
+
+    #[test]
+    fn mac_hides_its_input_and_tracks_changes() {
+        let key = MasterKey::from_b64(&MasterKey::generate_b64()).unwrap();
+        let a = key.mac("state-hash", b"password=hunter2");
+        assert_eq!(a, key.mac("state-hash", b"password=hunter2"));
+        assert_ne!(a, key.mac("state-hash", b"password=hunter3"));
+        // A different purpose over the same bytes is a different value, so one use's
+        // output can never be replayed as another's.
+        assert_ne!(a, key.mac("something-else", b"password=hunter2"));
+
+        // And it is not a plain digest of the input: without the key you cannot compute it,
+        // which is what stops a reader guessing a low-entropy override offline.
+        let plain: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(b"password=hunter2").into();
+        assert_ne!(a, plain);
     }
 
     #[test]
