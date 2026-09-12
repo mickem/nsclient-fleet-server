@@ -1,7 +1,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use std::net::SocketAddr;
+
 use axum::{
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -844,8 +846,12 @@ pub struct EnrollResponse {
     pub mtls_server_cert_pem: String,
 }
 
-pub async fn enroll(State(state): State<AppState>, Json(body): Json<EnrollBody>) -> Response {
-    use fleet_storage::{HostCertRepo, TenantSecretsRepo};
+pub async fn enroll(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<EnrollBody>,
+) -> Response {
+    use fleet_storage::TenantSecretsRepo;
 
     let claims = match fleet_enrollment::decode_bootstrap(
         &state.config.bootstrap_jwt_secret,
@@ -873,10 +879,50 @@ pub async fn enroll(State(state): State<AppState>, Json(body): Json<EnrollBody>)
         return resp;
     }
 
+    // And a coarse per-source limit alongside it. The per-tenant one bounds the damage to
+    // one tenant, which is the right shape for a leaked token — but it is keyed on a value
+    // the caller supplies, so a caller holding tokens for several tenants has several
+    // budgets. This one they cannot pick.
+    if let Err(retry) = state.enrollment_limits.check_source(addr.ip()) {
+        let mut resp = (
+            StatusCode::TOO_MANY_REQUESTS,
+            "enrollment rate limit exceeded",
+        )
+            .into_response();
+        if let Ok(v) = axum::http::HeaderValue::from_str(&retry.to_string()) {
+            resp.headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, v);
+        }
+        return resp;
+    }
+
     let nonce_hash = hash_token(&claims.nonce);
     let hosts_repo = HostRepo::new(&state.db);
     let secrets_repo = TenantSecretsRepo::new(&state.db);
     let tenants_repo = TenantRepo::new(&state.db);
+
+    // Cheap read before the CA-key decrypt and the ECDSA signature below. A replayed but
+    // unexpired token used to pay for both before the nonce burn refused it. Not the
+    // authority — the burn is, and it re-checks all of this in the statement that clears
+    // it — so nothing here can let an enrollment through that the burn would not.
+    match hosts_repo
+        .bootstrap_pending(claims.tenant_id, &claims.host_id, &nonce_hash)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!(host_id = %claims.host_id, "enroll: nonce already used or expired");
+            return (
+                StatusCode::UNAUTHORIZED,
+                "bootstrap nonce already used or expired",
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "bootstrap_pending failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+        }
+    }
 
     let tenant = match tenants_repo.get(claims.tenant_id).await {
         Ok(Some(t)) => t,
@@ -922,44 +968,39 @@ pub async fn enroll(State(state): State<AppState>, Json(body): Json<EnrollBody>)
         }
     };
 
+    // Burn and record together. They used to be two statements, so a failure to record the
+    // certificate after the burn left the host marked enrolled with no certificate and its
+    // one-time token spent — unrecoverable except by deleting and recreating the host.
     let became_enrolled = match hosts_repo
-        .mark_enrolled_if_pending(
+        .enroll(
             claims.tenant_id,
             &claims.host_id,
             &nonce_hash,
             body.hostname.as_deref(),
             body.os.as_deref(),
+            fleet_storage::EnrolledCert {
+                serial: &issued.serial_hex,
+                fingerprint_sha256: &issued.fingerprint_sha256_hex,
+                issued_at: issued.not_before_unix,
+                expires_at: issued.not_after_unix,
+            },
         )
         .await
     {
         Ok(b) => b,
         Err(e) => {
-            tracing::error!(error = %e, "mark_enrolled_if_pending failed");
+            tracing::error!(error = %e, "enroll failed");
             return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
         }
     };
     if !became_enrolled {
+        // Lost the race with a simultaneous enrollment, or the state changed under us since
+        // the pre-check. The signed certificate is discarded rather than recorded.
         return (
             StatusCode::UNAUTHORIZED,
             "bootstrap nonce already used or expired",
         )
             .into_response();
-    }
-
-    let cert_repo = HostCertRepo::new(&state.db);
-    if let Err(e) = cert_repo
-        .record(
-            claims.tenant_id,
-            &claims.host_id,
-            &issued.serial_hex,
-            &issued.fingerprint_sha256_hex,
-            issued.not_before_unix,
-            issued.not_after_unix,
-        )
-        .await
-    {
-        tracing::error!(error = %e, "host_certs.record failed");
-        return (StatusCode::INTERNAL_SERVER_ERROR, "record failed").into_response();
     }
 
     // Load this tenant's CA into the mTLS trust store *before* answering. The response

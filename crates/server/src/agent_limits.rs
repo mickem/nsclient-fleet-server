@@ -171,10 +171,18 @@ impl AgentRateLimits {
 type TenantKeyedLimiter =
     Governor<i64, governor::state::keyed::DefaultKeyedStateStore<i64>, DefaultClock>;
 
+type IpKeyedLimiter = Governor<
+    std::net::IpAddr,
+    governor::state::keyed::DefaultKeyedStateStore<std::net::IpAddr>,
+    DefaultClock,
+>;
+
 #[derive(Clone)]
 pub struct EnrollmentLimits {
     inner: Arc<TenantKeyedLimiter>,
+    by_source: Arc<IpKeyedLimiter>,
     per_minute: u32,
+    since_prune: Arc<AtomicUsize>,
 }
 
 impl EnrollmentLimits {
@@ -182,7 +190,9 @@ impl EnrollmentLimits {
         let qpm = NonZeroU32::new(per_minute.max(1)).unwrap();
         Self {
             inner: Arc::new(Governor::keyed(Quota::per_minute(qpm))),
+            by_source: Arc::new(Governor::keyed(Quota::per_minute(qpm))),
             per_minute,
+            since_prune: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -190,8 +200,30 @@ impl EnrollmentLimits {
     pub fn check(&self, tenant_id: i64) -> Result<(), u32> {
         match self.inner.check_key(&tenant_id) {
             Ok(_) => Ok(()),
-            Err(_) => Err((60.0 / self.per_minute as f64).ceil() as u32),
+            Err(_) => Err(self.retry_after()),
         }
+    }
+
+    /// The same allowance, keyed on the peer address instead of the tenant.
+    ///
+    /// The per-tenant budget is the right shape for a leaked token — it bounds the damage
+    /// to the tenant whose token leaked. But it is keyed on a value the caller supplies, so
+    /// a caller holding tokens for several tenants gets several budgets. This one they
+    /// cannot pick.
+    pub fn check_source(&self, ip: std::net::IpAddr) -> Result<(), u32> {
+        if self.since_prune.fetch_add(1, Ordering::Relaxed) + 1 >= PRUNE_EVERY {
+            self.since_prune.store(0, Ordering::Relaxed);
+            self.by_source.retain_recent();
+            self.inner.retain_recent();
+        }
+        match self.by_source.check_key(&ip) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(self.retry_after()),
+        }
+    }
+
+    fn retry_after(&self) -> u32 {
+        (60.0 / self.per_minute as f64).ceil() as u32
     }
 }
 

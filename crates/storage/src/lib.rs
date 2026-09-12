@@ -6,7 +6,8 @@ pub use migrate::run_migrations;
 pub use pool::{open, Db};
 pub use repos::{
     ApiKeyRepo, AuditRepo, AuditRow, BundleAssignmentsRepo, BundleRow, BundlesRepo, CaSummary,
-    CertStanding, GroupRow, GroupsRepo, HostCertRepo, HostOverridesRepo, HostRepo, HostTagsRepo,
-    MagicLinkRepo, PlatformSettingsRepo, SessionRepo, StoredHostOverride, StoredTenantSecrets,
-    TenantBundleKeysRepo, TenantRepo, TenantSecretsRepo, TenantSummary, UserRepo,
+    CertStanding, EnrolledCert, GroupRow, GroupsRepo, HostCertRepo, HostOverridesRepo, HostRepo,
+    HostTagsRepo, MagicLinkRepo, PlatformSettingsRepo, SessionRepo, StoredHostOverride,
+    StoredTenantSecrets, TenantBundleKeysRepo, TenantRepo, TenantSecretsRepo, TenantSummary,
+    UserRepo,
 };

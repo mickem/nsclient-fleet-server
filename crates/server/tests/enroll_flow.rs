@@ -257,6 +257,50 @@ async fn enroll_with_bad_bootstrap_token_rejected() {
     assert!(result.is_err());
 }
 
+/// A replayed token used to cost a CA-key decrypt and an ECDSA signature before the nonce
+/// burn refused it. It is refused on a read now, and — the part that matters more — the
+/// burn and the certificate record are one transaction, so a host can never end up marked
+/// enrolled with its one-time token spent and no certificate to show for it.
+#[tokio::test]
+async fn a_replayed_token_leaves_no_trace_of_a_half_enrollment() {
+    let s = start().await;
+    signup_and_login(&s).await;
+
+    let create: serde_json::Value = s
+        .cookie_jar
+        .post(format!("{}/api/hosts", s.base_url))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let host_id = create["host_id"].as_str().unwrap().to_string();
+    let token = create["bootstrap_token"].as_str().unwrap().to_string();
+
+    let mut first = None;
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if let Ok(a) = fleet_agent_sim::enroll(&s.base_url, &token, Some("once"), None).await {
+            first = Some(a);
+            break;
+        }
+    }
+    assert!(first.is_some(), "first enrollment should succeed");
+    assert_eq!(live_cert_count(&s, &host_id).await, 1);
+
+    // The replay is refused, and leaves exactly one certificate behind — not two, and not
+    // an orphaned row from a burn whose record failed.
+    assert!(
+        fleet_agent_sim::enroll(&s.base_url, &token, Some("twice"), None)
+            .await
+            .is_err(),
+        "a spent token must not enroll again"
+    );
+    assert_eq!(live_cert_count(&s, &host_id).await, 1);
+}
+
 #[tokio::test]
 async fn enroll_replay_rejected() {
     let s = start().await;
@@ -648,7 +692,7 @@ async fn a_freshly_enrolled_host_can_connect_immediately() {
 
 /// "Add host" writes a row before anyone runs the install command, so the operator views
 /// have to distinguish three states — not two. The one that matters is `never_enrolled`:
-/// the token has expired, `mark_enrolled_if_pending` will refuse it forever, and the row is
+/// the token has expired, `HostRepo::enroll` will refuse it forever, and the row is
 /// only good for deleting.
 #[tokio::test]
 async fn host_status_separates_never_enrolled_from_awaiting() {

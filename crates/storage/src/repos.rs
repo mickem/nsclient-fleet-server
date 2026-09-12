@@ -346,16 +346,57 @@ impl<'a> HostRepo<'a> {
 
     /// Atomic state transition: pending → enrolled. Returns true iff a matching pending
     /// host was found and updated. Burns the nonce in the same statement.
-    pub async fn mark_enrolled_if_pending(
+    /// Is this host still waiting for exactly this bootstrap nonce?
+    ///
+    /// A read, so it can run *before* the CA-key decrypt and the ECDSA signature that
+    /// enrollment otherwise pays for unconditionally. It is not the authority — the atomic
+    /// burn in [`Self::enroll`] is, and it re-checks every one of these conditions in the
+    /// same statement that clears them. This only stops a replayed-but-unexpired token
+    /// costing a signature before being refused.
+    pub async fn bootstrap_pending(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        nonce_hash: &str,
+    ) -> Result<bool> {
+        let row = sqlx::query(
+            "SELECT 1 AS x FROM hosts
+             WHERE tenant_id = ? AND id = ? AND bootstrap_nonce_hash = ?
+               AND enrolled_at IS NULL AND bootstrap_expires_at > ?",
+        )
+        .bind(tenant_id)
+        .bind(host_id)
+        .bind(nonce_hash)
+        .bind(now_unix())
+        .fetch_optional(&self.db.read)
+        .await?;
+        Ok(row.is_some())
+    }
+
+    /// Burn the one-time bootstrap nonce and record the issued certificate together.
+    ///
+    /// One transaction because the two used to be separate statements: if recording the
+    /// certificate failed after the burn, the host was marked enrolled with no certificate
+    /// and could never enrol again — the token was spent — so the only way back was to
+    /// delete and recreate it. Either both land or neither does.
+    ///
+    /// Returns false when the burn matched nothing: an already-used nonce, an expired one,
+    /// a host that is already enrolled, or a wrong nonce. The condition lives in the UPDATE
+    /// so two simultaneous enrollments cannot both succeed.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn enroll(
         &self,
         tenant_id: i64,
         host_id: &str,
         nonce_hash: &str,
         hostname: Option<&str>,
         os: Option<&str>,
+        cert: EnrolledCert<'_>,
     ) -> Result<bool> {
         let now = now_unix();
-        let res = sqlx::query(
+        let mut tx = self.db.write.begin().await?;
+
+        let burned = sqlx::query(
             "UPDATE hosts
              SET enrolled_at = ?,
                  hostname = COALESCE(?, hostname),
@@ -375,9 +416,31 @@ impl<'a> HostRepo<'a> {
         .bind(host_id)
         .bind(nonce_hash)
         .bind(now)
-        .execute(&self.db.write)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+        if burned != 1 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
+        sqlx::query(
+            "INSERT INTO host_certs
+             (tenant_id, host_id, serial, fingerprint_sha256, issued_at, expires_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(tenant_id)
+        .bind(host_id)
+        .bind(cert.serial)
+        .bind(cert.fingerprint_sha256)
+        .bind(cert.issued_at)
+        .bind(cert.expires_at)
+        .execute(&mut *tx)
         .await?;
-        Ok(res.rows_affected() == 1)
+
+        tx.commit().await?;
+        Ok(true)
     }
 
     /// Delete a host and everything hanging off it (tags, overrides, certs, metrics) in
@@ -748,6 +811,16 @@ impl<'a> HostTagsRepo<'a> {
         }
         Ok(out)
     }
+}
+
+/// The certificate fields [`HostRepo::enroll`] records, grouped so the call reads as
+/// "enrol this host with this certificate" rather than as nine positional arguments.
+#[derive(Debug, Clone, Copy)]
+pub struct EnrolledCert<'a> {
+    pub serial: &'a str,
+    pub fingerprint_sha256: &'a str,
+    pub issued_at: i64,
+    pub expires_at: i64,
 }
 
 #[derive(Debug, Clone)]

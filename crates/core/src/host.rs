@@ -39,7 +39,7 @@ pub struct Host {
 ///
 /// The distinction *within* the un-enrolled states matters too: "Add host" writes a row
 /// immediately, whether or not anyone runs the install command, and once the bootstrap token
-/// expires that row can never enroll — `mark_enrolled_if_pending` requires
+/// expires that row can never enroll — `HostRepo::enroll` requires
 /// `bootstrap_expires_at > now`, and no token can be re-issued for an existing row. One
 /// "pending" state would hide the difference between a host mid-install and a dead row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn an_expired_token_never_enrolled() {
-        // Exactly at the deadline is already too late: `mark_enrolled_if_pending` requires
+        // Exactly at the deadline is already too late: `HostRepo::enroll` requires
         // `bootstrap_expires_at > now`, so the status must flip at the same instant.
         assert_eq!(
             status(&host(None, Some(NOW)), None),
