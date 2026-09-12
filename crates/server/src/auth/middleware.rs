@@ -40,7 +40,10 @@ pub async fn session_layer(
 
 async fn from_session(state: &AppState, cookie_value: &str) -> Option<AuthedUser> {
     let session = SessionRepo::new(&state.db)
-        .touch(&hash_token(cookie_value))
+        .touch(
+            &hash_token(cookie_value),
+            state.config.session_idle_ttl_secs,
+        )
         .await
         .ok()??;
     let user = UserRepo::new(&state.db)

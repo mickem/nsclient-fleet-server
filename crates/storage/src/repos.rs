@@ -2171,18 +2171,26 @@ impl<'a> SessionRepo<'a> {
         })
     }
 
-    /// Fetch a session by token hash, refreshing `last_used_at`. Returns None if missing or expired.
-    pub async fn touch(&self, id_hash: &str) -> Result<Option<Session>> {
+    /// Fetch a session by token hash, refreshing `last_used_at`.
+    ///
+    /// Returns None if missing, past its absolute lifetime, or idle for longer than
+    /// `idle_ttl_seconds`. The idle bound is the one that matters for a console left open
+    /// on an unattended machine: an absolute lifetime alone means a session taken on day
+    /// one is still good on day six regardless of whether anyone has touched it. Both
+    /// conditions are in the statement that refreshes the timestamp, so there is no window
+    /// between checking and extending.
+    pub async fn touch(&self, id_hash: &str, idle_ttl_seconds: i64) -> Result<Option<Session>> {
         let now = now_unix();
         let row = sqlx::query(
             "UPDATE sessions
              SET last_used_at = ?
-             WHERE id = ? AND expires_at > ?
+             WHERE id = ? AND expires_at > ? AND last_used_at > ?
              RETURNING id, tenant_id, user_id, expires_at, last_used_at, created_at",
         )
         .bind(now)
         .bind(id_hash)
         .bind(now)
+        .bind(now - idle_ttl_seconds)
         .fetch_optional(&self.db.write)
         .await?;
         Ok(row.map(|r| Session {
@@ -2203,10 +2211,30 @@ impl<'a> SessionRepo<'a> {
         Ok(())
     }
 
-    pub async fn delete_expired(&self) -> Result<u64> {
+    /// Sign a user out of every session, including the one making the request.
+    ///
+    /// Backs "sign out everywhere", which is what someone reaches for when they think a
+    /// session has been taken — and until now the only way to get it was for an admin to
+    /// block or delete the account.
+    pub async fn delete_for_user(&self, tenant_id: i64, user_id: i64) -> Result<u64> {
+        let res = sqlx::query("DELETE FROM sessions WHERE tenant_id = ? AND user_id = ?")
+            .bind(tenant_id)
+            .bind(user_id)
+            .execute(&self.db.write)
+            .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Drop rows past their absolute lifetime, or idle past `idle_ttl_seconds`.
+    ///
+    /// Neither is required for correctness — `touch` refuses both — but a row that can
+    /// never authenticate anything again is a stored credential hash with no purpose, and
+    /// this table only ever grew.
+    pub async fn delete_expired(&self, idle_ttl_seconds: i64) -> Result<u64> {
         let now = now_unix();
-        let res = sqlx::query("DELETE FROM sessions WHERE expires_at < ?")
+        let res = sqlx::query("DELETE FROM sessions WHERE expires_at < ? OR last_used_at < ?")
             .bind(now)
+            .bind(now - idle_ttl_seconds)
             .execute(&self.db.write)
             .await?;
         Ok(res.rows_affected())
@@ -2341,10 +2369,21 @@ mod tests {
             .unwrap();
         assert!(s.expires_at > now_unix());
 
-        let touched = sessions.touch("session_hash").await.unwrap().unwrap();
+        let touched = sessions.touch("session_hash", 3600).await.unwrap().unwrap();
         assert_eq!(touched.user_id, u.id);
 
+        // Idle for longer than the allowance is as good as gone, even though the absolute
+        // lifetime has not run out.
+        assert!(
+            sessions.touch("session_hash", 0).await.unwrap().is_none(),
+            "an idle session must not authenticate"
+        );
+
         sessions.delete("session_hash").await.unwrap();
-        assert!(sessions.touch("session_hash").await.unwrap().is_none());
+        assert!(sessions
+            .touch("session_hash", 3600)
+            .await
+            .unwrap()
+            .is_none());
     }
 }

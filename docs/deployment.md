@@ -240,6 +240,7 @@ to trust it.
 | `TURNSTILE_SECRET`                                      | unset   | Cloudflare Turnstile siteverify secret. Set with `TURNSTILE_SITE_KEY` or startup fails |
 | `TURNSTILE_SITE_KEY`                                    | unset   | Turnstile site key, served to the browser so the signup form can render the widget |
 | `DAILY_EMAIL_BUDGET`                                    | `5000`  | Global cap; sends past it are dropped  |
+| `SESSION_IDLE_HOURS`                                    | `72`    | Session ends after this much inactivity, independent of the 7-day absolute lifetime |
 | `PLATFORM_ADMIN_EMAILS`                                 | unset   | Comma-separated. Grants the platform console — see below |
 | `HOST_LOST_AFTER_HOURS`                                 | `48`    | Silence after which a host reads **lost** — see below  |
 

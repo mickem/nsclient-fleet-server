@@ -134,6 +134,12 @@ async fn main() -> anyhow::Result<()> {
         desired_state_cache: Default::default(),
     };
 
+    // Both cleanups existed and neither was ever called, so these two tables only grew.
+    tokio::spawn(fleet_server::housekeeping::run(
+        db.clone(),
+        cfg.session_idle_ttl_secs,
+    ));
+
     backfill_all(&state, &db).await?;
     fleet_server::tenant_setup::rebind_legacy_ciphertexts(&state, &db).await?;
     trust_store.rebuild().await?;

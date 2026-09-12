@@ -28,7 +28,12 @@ pub struct Config {
     /// from the console after that. Lowercased on load so comparisons match stored addresses.
     pub platform_admin_emails: Vec<String>,
     pub magic_link_ttl_secs: i64,
+    /// Absolute session lifetime: how long a session lives no matter how much it is used.
     pub session_ttl_secs: i64,
+    /// Idle session lifetime, from `SESSION_IDLE_HOURS`. An absolute lifetime alone means a
+    /// session taken on day one is still good on day six whether or not anyone touched it;
+    /// this is the bound that matters for a console left open on an unattended machine.
+    pub session_idle_ttl_secs: i64,
     pub bootstrap_ttl_secs: i64,
     /// Silence after which an enrolled host reads `lost` rather than `offline`, from
     /// `HOST_LOST_AFTER_HOURS`. Purely a reporting threshold — nothing is disabled, revoked
@@ -321,6 +326,15 @@ impl Config {
             platform_admin_emails: csv_env("PLATFORM_ADMIN_EMAILS"),
             magic_link_ttl_secs: 900,
             session_ttl_secs: 604_800,
+            session_idle_ttl_secs: std::env::var("SESSION_IDLE_HOURS")
+                .ok()
+                .and_then(|v| v.parse::<i64>().ok())
+                .filter(|h| *h > 0)
+                .map(|h| h * 3_600)
+                // Three days: long enough that an operator who checks the fleet a couple of
+                // times a week is not re-authenticating by email on every visit, short
+                // enough that an abandoned session is not a week-long standing credential.
+                .unwrap_or(3 * 86_400),
             bootstrap_ttl_secs: 3600,
             host_lost_after_secs: host_lost_after_secs(),
             client_cert_lifetime_days: 90,

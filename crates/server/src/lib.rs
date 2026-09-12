@@ -10,6 +10,7 @@ pub mod conn;
 pub mod csrf;
 pub mod desired_state;
 pub mod hosts;
+pub mod housekeeping;
 pub mod https;
 pub mod mtls;
 pub mod mux;
@@ -205,6 +206,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/auth/login", post(auth::handlers::on_prem_login))
         .route("/api/auth/logout", post(auth::handlers::logout))
+        .route(
+            "/api/auth/logout-all",
+            post(auth::handlers::logout_everywhere),
+        )
         .route("/api/hosts", get(hosts::list).post(hosts::create))
         .route("/api/hosts/bulk-delete", post(hosts::bulk_delete))
         .route("/api/hosts/bulk-tags", post(hosts::bulk_tags))

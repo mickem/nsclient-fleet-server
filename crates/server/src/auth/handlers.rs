@@ -638,6 +638,59 @@ pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> Response {
     (headers, StatusCode::NO_CONTENT).into_response()
 }
 
+/// Sign out of every session this user has, including the one making the request.
+///
+/// What someone reaches for when they think a session has been taken. Until now the only
+/// way to get it was for an admin to block or delete the account, which is a much bigger
+/// hammer than "I left myself logged in somewhere".
+pub async fn logout_everywhere(
+    State(state): State<AppState>,
+    who: AuthedUser,
+    jar: CookieJar,
+) -> Response {
+    let removed = match SessionRepo::new(&state.db)
+        .delete_for_user(who.tenant_id, who.user_id)
+        .await
+    {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::error!(error = %e, "sign-out-everywhere failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "sign-out failed").into_response();
+        }
+    };
+    tracing::info!(
+        user_id = who.user_id,
+        removed,
+        "signed out of every session"
+    );
+
+    crate::audit::record(
+        &state,
+        who.tenant_id,
+        Some(who.user_id),
+        "user.sessions_revoked",
+        "user",
+        &who.user_id.to_string(),
+        Some(&serde_json::json!({ "sessions": removed })),
+    )
+    .await;
+
+    // Clear this browser's cookie too, so the page it came from does not keep presenting a
+    // token that no longer resolves.
+    let mut clear = Cookie::new(session_cookie_name(state.config.cookie_secure), "");
+    clear.set_path("/");
+    clear.set_max_age(time::Duration::ZERO);
+    let jar = jar.remove(clear);
+
+    let mut headers = HeaderMap::new();
+    for c in jar.iter() {
+        if let Ok(value) = HeaderValue::from_str(&c.to_string()) {
+            headers.append(header::SET_COOKIE, value);
+        }
+    }
+    (headers, StatusCode::NO_CONTENT).into_response()
+}
+
 pub async fn me(State(state): State<AppState>, who: AuthedUser) -> Response {
     let users = UserRepo::new(&state.db);
     let tenants = TenantRepo::new(&state.db);
