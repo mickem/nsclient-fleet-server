@@ -501,14 +501,15 @@ fn stored_cert_usable(cert_pem: &str, host: &str) -> std::result::Result<(), Str
         ));
     }
 
-    let not_after = cert.validity().not_after.timestamp();
-    if not_after < fleet_core::time::now_unix() + 30 * 86_400 {
-        return Err("expires within 30 days".into());
-    }
-    Ok(())
+    cert_valid_for_at_least(cert_pem, 30 * 86_400)
 }
 
-fn write_key_restricted(path: &std::path::Path, key_pem: &str) -> Result<()> {
+/// Write a private key, readable only by its owner where the platform can say so.
+///
+/// `#[cfg(unix)]` on the permission half, not on the whole function: on Windows the key
+/// inherits the directory's ACL, which is why the deployment guide tells operators to put
+/// the data directory somewhere only the service account can read.
+pub(crate) fn write_key_restricted(path: &std::path::Path, key_pem: &str) -> Result<()> {
     std::fs::write(path, key_pem).with_context(|| format!("write {}", path.display()))?;
     #[cfg(unix)]
     {
@@ -523,10 +524,27 @@ fn write_key_restricted(path: &std::path::Path, key_pem: &str) -> Result<()> {
 /// `load_or_generate_server`, which persists the result — agents pin this cert, so an
 /// ephemeral one strands the fleet on every restart. Direct generation is for tests.
 pub fn generate_self_signed_server(host: &str) -> Result<(String, String)> {
-    let mut params = rcgen::CertificateParams::new(vec![host.to_string()])?;
+    generate_self_signed(std::slice::from_ref(&host.to_string()))
+}
+
+/// Generate a self-signed server certificate covering every name in `hosts`.
+///
+/// `hosts` entries that parse as IP addresses become IP SANs and the rest become DNS SANs —
+/// rcgen decides that per entry, which is what lets one call cover `fleet.internal`,
+/// `localhost` and `127.0.0.1` together. The first entry is also the Common Name, so put the
+/// name operators actually type first.
+///
+/// Ten years of validity: nothing trusts this by its issuer, so a short life buys no
+/// revocation story and only guarantees an outage on a box nobody has logged into for a
+/// year. The agent certificate has the same reasoning and the same lifetime.
+pub fn generate_self_signed(hosts: &[String]) -> Result<(String, String)> {
+    let Some(primary) = hosts.first() else {
+        anyhow::bail!("a self-signed certificate needs at least one host name");
+    };
+    let mut params = rcgen::CertificateParams::new(hosts.to_vec())?;
     params
         .distinguished_name
-        .push(rcgen::DnType::CommonName, host);
+        .push(rcgen::DnType::CommonName, primary.clone());
     params.is_ca = rcgen::IsCa::ExplicitNoCa;
     let now = time::OffsetDateTime::now_utc();
     params.not_before = now - time::Duration::hours(1);
@@ -535,6 +553,27 @@ pub fn generate_self_signed_server(host: &str) -> Result<(String, String)> {
     let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
     let cert = params.self_signed(&kp)?;
     Ok((cert.pem(), kp.serialize_pem()))
+}
+
+/// `Ok(())` when `cert_pem` parses and has at least `min_remaining_secs` of validity left.
+///
+/// Shared with the web-certificate path, which has the same "is this still worth reusing?"
+/// question but none of the SAN pinning constraints — so the expiry half lives here and each
+/// caller decides what else makes a stored certificate unusable.
+pub(crate) fn cert_valid_for_at_least(
+    cert_pem: &str,
+    min_remaining_secs: i64,
+) -> std::result::Result<(), String> {
+    let der = parse_first_cert_pem(cert_pem).map_err(|e| format!("unparseable pem: {e}"))?;
+    let (_, cert) = x509_parser::certificate::X509Certificate::from_der(&der)
+        .map_err(|e| format!("unparseable der: {e}"))?;
+    if cert.validity().not_after.timestamp() < fleet_core::time::now_unix() + min_remaining_secs {
+        return Err(format!(
+            "expires within {} days",
+            min_remaining_secs / 86_400
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -613,6 +652,47 @@ mod tests {
                 "serial encoding must round-trip exactly"
             );
         }
+    }
+
+    /// One certificate has to cover the name an operator types, loopback, and often a bare
+    /// IP — that is the whole point of TLS_HOSTS, and rcgen has to be picking the SAN type
+    /// per entry for it to work.
+    #[test]
+    fn a_generated_web_cert_covers_every_host_it_was_given() {
+        let hosts: Vec<String> = ["fleet.internal", "localhost", "127.0.0.1"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (cert_pem, key_pem) = generate_self_signed(&hosts).unwrap();
+        assert!(key_pem.contains("PRIVATE KEY"));
+        for host in &hosts {
+            assert_eq!(
+                stored_cert_usable(&cert_pem, host),
+                Ok(()),
+                "SAN should cover {host}"
+            );
+        }
+        assert!(
+            stored_cert_usable(&cert_pem, "elsewhere.internal").is_err(),
+            "a name that was never asked for must not match"
+        );
+    }
+
+    #[test]
+    fn generating_without_a_host_is_an_error() {
+        assert!(generate_self_signed(&[]).is_err());
+    }
+
+    /// The shared expiry check backs both "may I reuse the agent cert?" and "may I reuse the
+    /// web cert?", so it has to answer for a freshly minted certificate and for one whose
+    /// remaining life is shorter than the window asked about.
+    #[test]
+    fn expiry_window_is_measured_against_remaining_life() {
+        let (cert_pem, _) = generate_self_signed_server("localhost").unwrap();
+        assert_eq!(cert_valid_for_at_least(&cert_pem, 30 * 86_400), Ok(()));
+        // Generated certs live ten years; ask for eleven and it is too short.
+        assert!(cert_valid_for_at_least(&cert_pem, 11 * 365 * 86_400).is_err());
+        assert!(cert_valid_for_at_least("not a pem", 1).is_err());
     }
 
     #[test]

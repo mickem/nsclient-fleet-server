@@ -17,6 +17,9 @@ just web-build    # produce web/dist
 just dev-server   # run the Rust server on http://localhost:3000
 ```
 
+Just want it running? [docs/docker.md](docs/docker.md) is one `docker run`, and
+[docs/linux-install.md](docs/linux-install.md) is the step-by-step for a Linux host.
+
 For frontend HMR during dev, run `just dev-web` (Vite on :5173, proxies `/api` and `/healthz` to :3000) in a second terminal alongside `just dev-server`.
 
 ## Verify
@@ -43,6 +46,8 @@ Repo root is the Cargo workspace. Crates under `crates/`, frontend under `web/`.
 
 | Document | What it covers |
 | -------- | -------------- |
+| [docs/linux-install.md](docs/linux-install.md) | Step by step on a Linux host: install, configure, self-signed TLS the browser trusts, first host |
+| [docs/docker.md](docs/docker.md) | The same server as a container — a one-line `docker run`, volumes, TLS, upgrades |
 | [docs/deployment.md](docs/deployment.md) | Running it in production: ports, certificates, every environment variable, backups, troubleshooting |
 | [docs/agent-implementation.md](docs/agent-implementation.md) | Writing an agent: enrollment, the bootstrap-token → CSR → mTLS flow |
 | [docs/agent-integration.md](docs/agent-integration.md) | The post-enrollment contract: config sync, state reporting, certificate renewal |

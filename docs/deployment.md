@@ -160,6 +160,10 @@ key; the bundles encrypted under it are gone and must be re-uploaded. Nothing ab
 
 ### TLS / ACME
 
+The web listener has exactly one certificate source: Let's Encrypt, or a certificate on
+disk. Setting both is refused at startup rather than resolved by precedence — a deployment
+should not have to guess which certificate it ended up serving.
+
 | Variable         | Default      | Notes                                                     |
 | ---------------- | ------------ | --------------------------------------------------------- |
 | `ACME_DOMAINS`   | unset        | Comma-separated. **Setting this enables production mode**  |
@@ -167,6 +171,40 @@ key; the bundles encrypted under it are gone and must be re-uploaded. Nothing ab
 | `ACME_CACHE_DIR` | `data/acme`  | Persist it, or restarts re-issue and hit rate limits       |
 | `ACME_STAGING`   | `false`      | Use the staging directory while testing a deploy           |
 | `COOKIE_SECURE`  | `false`      | **Set `true` in production**                               |
+
+### TLS from disk (no ACME)
+
+For an install Let's Encrypt cannot reach — on-prem, air-gapped, an internal name, a lab.
+Without one of these and without ACME the web listener is plain HTTP on `LISTEN`, which is
+also when agents need their own `LISTEN_MTLS` port.
+
+| Variable          | Default       | Notes                                                    |
+| ----------------- | ------------- | -------------------------------------------------------- |
+| `TLS_CERT`        | unset         | PEM certificate (leaf first, then any intermediates)     |
+| `TLS_KEY`         | unset         | Its private key — PKCS#8, PKCS#1 or SEC1                 |
+| `TLS_SELF_SIGNED` | `false`       | Generate and persist a certificate instead. Mutually exclusive with `TLS_CERT` |
+| `TLS_STATE_DIR`   | `data`        | Where `web-server.{crt,key}` live when self-signed       |
+| `TLS_HOSTS`       | derived       | Comma-separated SANs for the generated certificate. Defaults to `BASE_URL`'s host plus `localhost`, `127.0.0.1`, `::1` |
+
+`TLS_CERT`/`TLS_KEY` are read once, at startup: renewing them is a restart. They are never
+written to — a missing file is a startup error, not an invitation to generate something
+over a path you named, because a typo there would otherwise look like a working server
+presenting a certificate nobody trusts.
+
+`TLS_SELF_SIGNED=true` owns its own paths and may create and re-create them. The result is
+persisted, so it is stable across restarts and a browser exception granted for it keeps
+working; it is regenerated only within 30 days of expiry, which is logged.
+
+**This is not the certificate agents pin.** The web certificate and `mtls-server.crt` stay
+separate ([§4](#4-certificates--two-of-them-two-trust-models)): replacing the web
+certificate the day you get a real CA is routine and costs nothing, while the agent
+certificate must not move for years. Sharing one file would give the first the lifecycle of
+the second.
+
+With TLS from disk the shared-port mux works exactly as it does under ACME — the UI and
+agent mTLS on one port, separated by ALPN — so `LISTEN_MTLS` defaults to empty here too.
+See [linux-install.md](linux-install.md) for the step-by-step, including getting a browser
+to trust it.
 
 ### Storage
 
@@ -488,13 +526,30 @@ Signup and magic links are disabled; the tenant is fixed and hardcoded to the `o
 which skips tier rate limiting entirely — the constraint there is the hardware it runs on,
 not a hosted-service cost model.
 
-Most on-prem sites have no public DNS, so ACME is off. That means plain HTTP on `LISTEN`
-behind the customer's own TLS terminator, and agents on the dedicated `LISTEN_MTLS` port
-(default `9443`) — the mux only exists on the ACME path, because it needs a TLS listener we
-own. Agent trust is unaffected: they pin the same self-signed certificate they always did.
+Most on-prem sites have no public DNS, so ACME is off. Serve the UI from a certificate on
+disk instead — `TLS_CERT`/`TLS_KEY` for the customer's own CA, or `TLS_SELF_SIGNED=true`
+to have one generated and persisted on first start:
 
-If the customer's terminator can pass TCP through on 443, `MTLS_URL` lets you point agents
-at whatever address is actually reachable.
+```
+TLS_SELF_SIGNED=true
+COOKIE_SECURE=true
+LISTEN_HTTPS=0.0.0.0:8443
+```
+
+That gives on-prem the same single port as a hosted install — the mux needs a TLS listener
+we own, and this is one. Agents arrive on it by ALPN and need no dedicated port.
+
+Plain HTTP on `LISTEN` behind the customer's own TLS terminator is still supported and is
+what you get with no ACME and no `TLS_*`. Agents then need the dedicated `LISTEN_MTLS` port
+(default `9443`), because there is no TLS listener of ours to mux onto. Agent trust is
+unaffected either way: they pin the same self-signed mTLS certificate they always did.
+
+Whatever terminates in front must pass agent traffic through as TCP — see §2. If the
+customer's terminator can do that on 443, `MTLS_URL` lets you point agents at whatever
+address is actually reachable.
+
+[linux-install.md](linux-install.md) walks the whole thing end to end, and
+[docker.md](docker.md) is the same deployment as a container.
 
 ### Running it on Windows
 

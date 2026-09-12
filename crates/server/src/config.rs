@@ -37,6 +37,33 @@ pub struct Config {
     pub master_key: MasterKey,
     pub bootstrap_jwt_secret: Vec<u8>,
     pub acme: Option<AcmeConfig>,
+    /// TLS from certificate files rather than Let's Encrypt. Mutually exclusive with
+    /// [`Config::acme`] — see [`StaticTlsConfig`].
+    pub tls: Option<StaticTlsConfig>,
+}
+
+/// Serve the operator UI over TLS using a certificate on disk instead of ACME.
+///
+/// ACME needs a publicly resolvable name and outbound reachability, which an on-prem or
+/// air-gapped install does not have — so without this the only remaining option was plain
+/// HTTP, and the choice was "a public certificate or none". The mux is unchanged: the same
+/// port still carries the UI and agent mTLS, because nothing about branch selection depends
+/// on where the web certificate came from.
+#[derive(Clone, Debug)]
+pub struct StaticTlsConfig {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+    /// Names the certificate must cover when this config generates it. Empty when the
+    /// operator supplied the files, which are then used exactly as they are.
+    pub self_signed_hosts: Vec<String>,
+}
+
+impl StaticTlsConfig {
+    /// True when the pair is ours to create and re-create, false when an operator handed us
+    /// files we must not overwrite.
+    pub fn is_self_signed(&self) -> bool {
+        !self.self_signed_hosts.is_empty()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -134,11 +161,24 @@ impl Config {
         let listen_https = std::env::var("LISTEN_HTTPS").unwrap_or_else(|_| "0.0.0.0:443".into());
         let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:3000".into());
 
-        // With ACME on, agents share the HTTPS port (routed by ALPN — see `crate::mux`), so
-        // there is nothing to bind separately and the firewall only needs 443. Setting
-        // LISTEN_MTLS explicitly opts back into a dedicated port: useful on-prem, behind a
-        // load balancer that can't pass ALPN through, or while migrating a live fleet.
-        let listen_mtls = match (std::env::var("LISTEN_MTLS").ok(), acme.is_some()) {
+        let tls = static_tls_from_env(&base_url)?;
+        if tls.is_some() && acme.is_some() {
+            anyhow::bail!(
+                "ACME_DOMAINS and TLS_CERT/TLS_SELF_SIGNED are both set, but the web listener \
+                 can only have one certificate source. Use ACME_DOMAINS for a publicly \
+                 resolvable name, or the TLS_* variables for an install that Let's Encrypt \
+                 cannot reach — not both."
+            );
+        }
+
+        // With a TLS terminator of our own, agents share the HTTPS port (routed by ALPN —
+        // see `crate::mux`), so there is nothing to bind separately and the firewall only
+        // needs one port. Setting LISTEN_MTLS explicitly opts back into a dedicated port:
+        // useful behind a load balancer that can't pass ALPN through, or while migrating a
+        // live fleet. Without TLS there is no listener to mux onto, so agents need their own
+        // port and get 9443.
+        let terminates_tls = acme.is_some() || tls.is_some();
+        let listen_mtls = match (std::env::var("LISTEN_MTLS").ok(), terminates_tls) {
             (Some(addr), _) => addr,
             (None, true) => String::new(),
             (None, false) => "0.0.0.0:9443".into(),
@@ -174,8 +214,94 @@ impl Config {
             master_key,
             bootstrap_jwt_secret,
             acme,
+            tls,
         })
     }
+}
+
+/// Read `TLS_CERT` / `TLS_KEY` / `TLS_SELF_SIGNED` into a [`StaticTlsConfig`].
+///
+/// The two ways in are kept apart on purpose. Supplying `TLS_CERT`+`TLS_KEY` means "use
+/// these files"; they are never written to, and a missing one is a startup error rather
+/// than an invitation to generate something over the top of a path the operator named —
+/// a typo there would otherwise look like a working server presenting a certificate
+/// nobody trusts. `TLS_SELF_SIGNED=true` is the opposite request, so it owns its own
+/// paths under `TLS_STATE_DIR` and may create and re-create them.
+fn static_tls_from_env(base_url: &str) -> anyhow::Result<Option<StaticTlsConfig>> {
+    let cert = std::env::var("TLS_CERT").ok().filter(|s| !s.is_empty());
+    let key = std::env::var("TLS_KEY").ok().filter(|s| !s.is_empty());
+    let self_signed = bool_env("TLS_SELF_SIGNED", false);
+
+    match (cert, key, self_signed) {
+        (Some(_), Some(_), true) | (Some(_), None, true) | (None, Some(_), true) => {
+            anyhow::bail!(
+                "TLS_SELF_SIGNED cannot be combined with TLS_CERT/TLS_KEY: either we generate \
+                 the certificate or you supply it. Drop TLS_SELF_SIGNED to use your files."
+            )
+        }
+        (Some(cert), Some(key), false) => Ok(Some(StaticTlsConfig {
+            cert_path: cert.into(),
+            key_path: key.into(),
+            self_signed_hosts: Vec::new(),
+        })),
+        (Some(_), None, false) | (None, Some(_), false) => anyhow::bail!(
+            "TLS_CERT and TLS_KEY must be set together — one without the other leaves the web \
+             listener with no usable certificate."
+        ),
+        (None, None, true) => {
+            let dir: PathBuf = std::env::var("TLS_STATE_DIR")
+                .unwrap_or_else(|_| "data".into())
+                .into();
+            Ok(Some(StaticTlsConfig {
+                cert_path: dir.join("web-server.crt"),
+                key_path: dir.join("web-server.key"),
+                self_signed_hosts: self_signed_hosts(base_url),
+            }))
+        }
+        (None, None, false) => Ok(None),
+    }
+}
+
+/// Names a generated web certificate covers.
+///
+/// `TLS_HOSTS` when set, otherwise the host from `BASE_URL` plus loopback. Loopback is
+/// included by default because the first thing anyone does with a fresh install is open it
+/// from the machine it runs on — and a certificate that only names `fleet.internal` turns
+/// that into a second warning to click through, on top of the untrusted-issuer one it
+/// already has.
+fn self_signed_hosts(base_url: &str) -> Vec<String> {
+    let configured: Vec<String> = std::env::var("TLS_HOSTS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !configured.is_empty() {
+        return configured;
+    }
+
+    let host = host_of(base_url);
+    let mut hosts = vec![host.clone()];
+    for extra in ["localhost", "127.0.0.1", "::1"] {
+        if extra != host {
+            hosts.push(extra.to_string());
+        }
+    }
+    hosts
+}
+
+/// The hostname part of a URL, without scheme, port or path.
+pub fn host_of(url: &str) -> String {
+    let rest = url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    let host = rest.split('/').next().unwrap_or(rest);
+    // An IPv6 literal is bracketed in a URL (`https://[::1]:443`); strip the brackets and
+    // keep the address, rather than splitting it to pieces on its own colons.
+    if let Some(inner) = host.strip_prefix('[') {
+        return inner.split(']').next().unwrap_or(inner).to_string();
+    }
+    host.split(':').next().unwrap_or(host).to_string()
 }
 
 /// Build the URL agents dial for `/agent/v1/*`.
@@ -185,15 +311,7 @@ impl Config {
 /// varies: the dedicated mTLS port when one is bound, otherwise the shared HTTPS port.
 /// `:443` is left implicit so the URL matches what an operator would type.
 fn derive_agent_mtls_url(base_url: &str, listen_https: &str, listen_mtls: &str) -> String {
-    let host = base_url
-        .trim_start_matches("http://")
-        .trim_start_matches("https://")
-        .split('/')
-        .next()
-        .unwrap_or("localhost")
-        .split(':')
-        .next()
-        .unwrap_or("localhost");
+    let host = host_of(base_url);
 
     let port_of = |addr: &str, fallback: u16| -> u16 {
         addr.rsplit(':')
@@ -276,8 +394,27 @@ fn bool_env(key: &str, default: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_agent_mtls_url, parse_lost_after_hours};
+    use super::{derive_agent_mtls_url, host_of, parse_lost_after_hours};
     use fleet_core::host::DEFAULT_LOST_AFTER_SECS;
+
+    #[test]
+    fn host_of_drops_scheme_port_and_path() {
+        assert_eq!(host_of("https://app.example.com"), "app.example.com");
+        assert_eq!(host_of("http://localhost:3000"), "localhost");
+        assert_eq!(
+            host_of("https://app.example.com:8443/x/y"),
+            "app.example.com"
+        );
+        assert_eq!(host_of("https://10.0.0.7:443"), "10.0.0.7");
+    }
+
+    /// An IPv6 literal is bracketed in a URL, and splitting it on ':' the way a host:port
+    /// pair is split would truncate it to "[" — a SAN that matches nothing.
+    #[test]
+    fn host_of_keeps_an_ipv6_literal_whole() {
+        assert_eq!(host_of("https://[::1]:8443"), "::1");
+        assert_eq!(host_of("https://[2001:db8::1]"), "2001:db8::1");
+    }
 
     #[test]
     fn lost_after_hours_defaults_to_two_days() {

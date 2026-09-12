@@ -49,6 +49,7 @@ async fn start() -> TestServer {
         listen_mtls: format!("127.0.0.1:{}", mtls_addr.port()),
         agent_mtls_url: format!("https://127.0.0.1:{}", mtls_addr.port()),
         acme: None,
+        tls: None,
         database_path: PathBuf::from(&db_path),
         base_url: base_url.clone(),
         on_prem: false,

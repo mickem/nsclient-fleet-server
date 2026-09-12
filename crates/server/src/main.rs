@@ -8,20 +8,7 @@ use fleet_server::{
 };
 
 use fleet_server::auth::{email::EmailSender, rate_limit::AuthRateLimits, turnstile::Turnstile};
-
-/// Hostname out of a base URL, dropping scheme, port and path.
-fn host_of(base_url: &str) -> String {
-    base_url
-        .trim_start_matches("http://")
-        .trim_start_matches("https://")
-        .split('/')
-        .next()
-        .unwrap_or("localhost")
-        .split(':')
-        .next()
-        .unwrap_or("localhost")
-        .to_string()
-}
+use fleet_server::config::host_of;
 
 /// The version this binary reports.
 ///
@@ -170,6 +157,22 @@ async fn main() -> anyhow::Result<()> {
         let serve = fleet_server::https::serve_acme(
             &https_addr,
             acme_cfg,
+            app,
+            agent_app,
+            trust_store_for_mux,
+            agent_sni,
+        );
+        match mtls_handle {
+            Some(h) => tokio::select! { r = serve => r?, _ = h => {} },
+            None => serve.await?,
+        }
+    } else if let Some(tls_cfg) = cfg.tls.clone() {
+        // Same mux as the ACME branch, same single port — only the certificate's origin
+        // differs. This is the path for a deployment Let's Encrypt cannot reach.
+        let https_addr = cfg.listen_https.clone();
+        let serve = fleet_server::https::serve_static(
+            &https_addr,
+            tls_cfg,
             app,
             agent_app,
             trust_store_for_mux,

@@ -93,6 +93,7 @@ async fn start() -> TestServer {
         listen_mtls: String::new(),
         agent_mtls_url: format!("https://127.0.0.1:{mux_port}"),
         acme: None,
+        tls: None,
         database_path: PathBuf::from(&db_path),
         base_url: base_url.clone(),
         on_prem: false,
@@ -143,7 +144,9 @@ async fn start() -> TestServer {
     };
 
     let mux_tls = Arc::new(fleet_server::mux::MuxTls {
-        acme_challenge: web_server_config(&web_cert_pem, &web_key_pem),
+        // Not the same certificate a real ACME deployment would serve here, but the
+        // branch only has to be distinguishable from the web one for the routing test.
+        acme_challenge: Some(web_server_config(&web_cert_pem, &web_key_pem)),
         web: web_server_config(&web_cert_pem, &web_key_pem),
         agent_sni: None,
     });
