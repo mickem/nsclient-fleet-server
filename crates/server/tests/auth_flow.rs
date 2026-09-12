@@ -350,6 +350,53 @@ async fn signup_creates_tenant_user_and_magic_link() {
 /// platform console with a comment saying it was not applied here. The slug becomes a CA
 /// subject, and the mTLS issuer map used to match on a whitespace-stripped printed DN — so
 /// `ac me` collided with an existing `acme` and could take that tenant's fleet offline.
+/// Signup used to answer "email already registered" to an anonymous caller, while
+/// `send-link` next door is carefully uniform about exactly that. With a free slug, anyone
+/// could test any address.
+#[tokio::test]
+async fn signup_does_not_reveal_whether_an_address_has_an_account() {
+    let s = start().await;
+    let c = reqwest::Client::new();
+
+    let t = TenantRepo::new(&s.db)
+        .create("acme", "Acme", "free", None)
+        .await
+        .unwrap();
+    UserRepo::new(&s.db)
+        .create(t.id, "alice@example.com", fleet_core::user::Role::Owner)
+        .await
+        .unwrap();
+
+    let signup = |email: &'static str, slug: &'static str| {
+        let c = c.clone();
+        let base = s.base_url.clone();
+        async move {
+            c.post(format!("{base}/api/auth/signup"))
+                .json(&serde_json::json!({
+                    "email": email, "tenant_slug": slug, "tenant_name": "X",
+                }))
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+
+    assert_eq!(signup("alice@example.com", "one").await, 204);
+    assert_eq!(signup("nobody@example.com", "two").await, 204);
+
+    // ...and the registered address did not get a second tenant out of it.
+    let tenants: Vec<String> = sqlx::query_scalar("SELECT slug FROM tenants ORDER BY slug")
+        .fetch_all(&s.db.read)
+        .await
+        .unwrap();
+    assert_eq!(tenants, ["acme", "two"]);
+
+    // A taken slug is still reported — it is the field the person has to change, and a
+    // workspace name is not a secret.
+    assert_eq!(signup("someone@example.com", "acme").await, 409);
+}
+
 #[tokio::test]
 async fn signup_refuses_a_slug_the_console_would_refuse() {
     let s = start().await;

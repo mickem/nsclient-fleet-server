@@ -135,11 +135,45 @@ pub async fn signup(
     let tenants = TenantRepo::new(&state.db);
     let users = UserRepo::new(&state.db);
 
+    // A taken slug still says so. It is the field the person filling in the form has to
+    // change, and a workspace name is not a secret — a certificate subject carries it.
     if tenants.get_by_slug(&slug).await.unwrap_or(None).is_some() {
         return (StatusCode::CONFLICT, "slug taken").into_response();
     }
-    if users.find_by_email(&email).await.unwrap_or(None).is_some() {
-        return (StatusCode::CONFLICT, "email already registered").into_response();
+
+    // A registered address does not. `send-link` is carefully uniform about exactly this,
+    // and signup answering "email already registered" to an anonymous caller handed back
+    // what that endpoint refuses to say — with a free slug, anyone could test any address.
+    //
+    // Mailing that user a sign-in link rather than doing nothing keeps the answer useful to
+    // the person it is actually about: someone who forgot they already have an account gets
+    // in, and learns nothing new if they do not.
+    //
+    // The two paths still differ in how long they take — this one skips a CA keygen — so
+    // this closes a status-code oracle rather than every oracle. Equalising the timing would
+    // mean doing the work and throwing it away, which is worse than the thing it fixes.
+    if let Ok(Some(existing)) = users.find_by_email(&email).await {
+        tracing::info!(
+            user_id = existing.id,
+            "signup for an address that already has an account"
+        );
+        if !existing.is_blocked() {
+            let state = state.clone();
+            tokio::spawn(async move {
+                if let Err(e) = issue_and_send_link(
+                    &state,
+                    &existing.email,
+                    existing.tenant_id,
+                    existing.id,
+                    addr,
+                )
+                .await
+                {
+                    tracing::error!(error = %e, "sign-in link for an existing account failed");
+                }
+            });
+        }
+        return StatusCode::NO_CONTENT.into_response();
     }
 
     let trial = now_unix() + TRIAL_DAYS * 86_400;

@@ -44,8 +44,11 @@ export function Signup({ onSwitchToLogin, turnstileSiteKey }: Props) {
 
   if (submitted) {
     return (
-      <AuthShell title="Trial started">
-        <Typography>Check your email for the sign-in link.</Typography>
+      <AuthShell title="Check your email">
+        <Typography>
+          If that address can be used, a sign-in link is on its way. It works whether this
+          started a new trial or you already had an account.
+        </Typography>
       </AuthShell>
     );
   }
