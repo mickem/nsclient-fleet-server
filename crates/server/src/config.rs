@@ -205,16 +205,15 @@ impl Config {
                     .decode(s)
                     .map_err(|e| anyhow::anyhow!("BOOTSTRAP_JWT_SECRET base64: {e}"))?
             }
-            // Reuse master key bytes for JWT signing if no separate secret is configured.
-            // Same key, same trust boundary; we still get integrity + expiry checking.
-            Err(_) => MasterKey::from_env()
-                .map_err(|e| anyhow::anyhow!("MASTER_KEY: {e}"))
-                .and_then(|_| {
-                    use base64::{engine::general_purpose::STANDARD, Engine as _};
-                    STANDARD
-                        .decode(std::env::var("MASTER_KEY").unwrap())
-                        .map_err(|e| anyhow::anyhow!("master key base64: {e}"))
-                })?,
+            // Derived from MASTER_KEY rather than being MASTER_KEY. The raw bytes used to
+            // serve as both the HMAC-SHA256 key for enrollment tokens and the
+            // ChaCha20-Poly1305 key for every stored secret; no known attack crosses those
+            // primitives, but a weakness or a leak on the token path would then have been a
+            // leak of the key that decrypts the database. An HKDF subkey reveals nothing
+            // about the key it came from.
+            Err(_) => master_key
+                .derive_subkey(fleet_enrollment::BOOTSTRAP_JWT_INFO)
+                .to_vec(),
         };
 
         let acme = match (

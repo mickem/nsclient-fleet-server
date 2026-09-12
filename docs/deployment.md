@@ -273,7 +273,7 @@ platform console, so it can be closed without a redeploy. See [§14](#14-the-pla
 | `ON_PREM_ADMIN_EMAIL`    | —       | Required when `ON_PREM=true`                 |
 | `ON_PREM_ADMIN_PASSWORD` | —       | Plaintext. One of this or the hash below is required when `ON_PREM=true` |
 | `ON_PREM_ADMIN_PASSWORD_HASH` | — | An argon2 PHC string. Preferred — the env file also lands in backups and config repos. Setting both is a startup error |
-| `BOOTSTRAP_JWT_SECRET`   | `MASTER_KEY` | Override only to separate the two keys  |
+| `BOOTSTRAP_JWT_SECRET`   | derived from `MASTER_KEY` | Base64. Set only to use an unrelated key; the default is an HKDF subkey, not `MASTER_KEY` itself |
 
 ---
 

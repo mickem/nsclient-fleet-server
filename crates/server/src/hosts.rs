@@ -113,6 +113,8 @@ pub async fn create(
         nonce,
         iat: now,
         exp: now + state.config.bootstrap_ttl_secs as usize,
+        // Stamped by `encode_bootstrap`; the value here is ignored.
+        aud: String::new(),
     };
     let token = encode_bootstrap(&state.config.bootstrap_jwt_secret, &claims);
 
@@ -456,6 +458,8 @@ pub async fn revoke_host_certs(
         nonce,
         iat: now,
         exp: now + state.config.bootstrap_ttl_secs as usize,
+        // Stamped by `encode_bootstrap`; the value here is ignored.
+        aud: String::new(),
     };
     let token = encode_bootstrap(&state.config.bootstrap_jwt_secret, &claims);
     let install_command = format!(

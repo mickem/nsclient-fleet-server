@@ -171,7 +171,7 @@ All other env vars have working dev defaults. Useful overrides:
 | `ACME_CONTACT`                                          |                         | Email registered with the ACME account                                                                                                                    |
 | `ACME_CACHE_DIR`                                        | `data/acme`             | Persistent cache so restarts don't re-issue certs                                                                                                         |
 | `ACME_STAGING`                                          | `false`                 | Use Let's Encrypt staging directory (for testing)                                                                                                         |
-| `BOOTSTRAP_JWT_SECRET`                                  | (= `MASTER_KEY`)        | Override only if you want separate keys                                                                                                                   |
+| `BOOTSTRAP_JWT_SECRET`                                  | derived from `MASTER_KEY` | Base64. Set only to use an unrelated key — the default is an HKDF subkey, not `MASTER_KEY` itself                                                        |
 
 ## Production deployment
 
