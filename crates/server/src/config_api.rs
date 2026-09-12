@@ -337,7 +337,13 @@ pub async fn put_override(
         Ok(s) => s,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid patch").into_response(),
     };
-    let encrypted = state.config.master_key.encrypt(patch_str.as_bytes());
+    let encrypted = state.config.master_key.encrypt(
+        fleet_core::aead::Purpose::HostOverride {
+            tenant_id: who.tenant_id,
+            host_id: &host_id,
+        },
+        patch_str.as_bytes(),
+    );
     let priority = body.priority.unwrap_or(1000);
 
     let repo = HostOverridesRepo::new(&state.db);

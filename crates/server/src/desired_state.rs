@@ -249,7 +249,10 @@ pub async fn compute_uncached(
             let plaintext = state
                 .config
                 .master_key
-                .decrypt(&o.patch_encrypted)
+                .decrypt(
+                    fleet_core::aead::Purpose::HostOverride { tenant_id, host_id },
+                    &o.patch_encrypted,
+                )
                 .map_err(|e| anyhow!("override decrypt: {e}"))?;
             let s = std::str::from_utf8(&plaintext).map_err(|_| anyhow!("override utf8"))?;
             let v: Value = serde_json::from_str(s).map_err(|e| anyhow!("override json: {e}"))?;

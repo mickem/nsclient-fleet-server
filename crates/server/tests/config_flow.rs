@@ -559,6 +559,70 @@ async fn host_override_is_encrypted_at_rest() {
     assert_eq!(d.status(), 204);
 }
 
+/// At-rest encryption exists to blunt database access, so a ciphertext has to be tied to
+/// the row it was written to. Otherwise someone with write access — and no key — can move
+/// one host's encrypted override onto another host and have the server decrypt and serve it.
+#[tokio::test]
+async fn an_override_ciphertext_moved_to_another_host_is_refused() {
+    let s = start().await;
+    signup_login(&s, "zeta", "zoe@example.com").await;
+    let (_a1, host_a) = enroll_a_host(&s).await;
+    let (_a2, host_b) = enroll_a_host(&s).await;
+
+    let r = s
+        .cookie_jar
+        .put(format!("{}/api/hosts/{}/override", s.base_url, host_a))
+        .json(&serde_json::json!({"patch": {"db": {"password": "a-secret"}}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+
+    let blob: Vec<u8> =
+        sqlx::query_scalar("SELECT patch_encrypted FROM host_overrides WHERE host_id = ?")
+            .bind(&host_a)
+            .fetch_one(&s.db.read)
+            .await
+            .unwrap();
+
+    // Stand in for someone with write access to the database, and nothing else.
+    sqlx::query(
+        "INSERT INTO host_overrides
+         (tenant_id, host_id, patch_encrypted, priority, updated_at, updated_by_user)
+         SELECT tenant_id, ?, ?, 1000, 0, NULL FROM hosts WHERE id = ?",
+    )
+    .bind(&host_b)
+    .bind(&blob)
+    .bind(&host_b)
+    .execute(&s.db.write)
+    .await
+    .unwrap();
+
+    // Host A is unaffected.
+    let a = s
+        .cookie_jar
+        .get(format!("{}/api/hosts/{}/desired", s.base_url, host_a))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(a.status(), 200);
+
+    // Host B's desired state cannot be computed rather than being computed from someone
+    // else's secret. Failing closed is the point: serving it would be the bug.
+    let b = s
+        .cookie_jar
+        .get(format!("{}/api/hosts/{}/desired", s.base_url, host_b))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        b.status(),
+        500,
+        "a transplanted override must not decrypt: {:?}",
+        b.text().await
+    );
+}
+
 #[tokio::test]
 async fn group_with_no_matching_hosts_yields_empty_state() {
     let s = start().await;

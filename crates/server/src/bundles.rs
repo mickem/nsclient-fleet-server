@@ -938,10 +938,10 @@ async fn sign_with_tenant_key(state: &AppState, tenant_id: i64, payload: &[u8]) 
         .get_by_tenant(tenant_id)
         .await?
         .ok_or_else(|| anyhow!("tenant secrets missing for {tenant_id}"))?;
-    let key_bytes = state
-        .config
-        .master_key
-        .decrypt(&secrets.bundle_signing_key_encrypted)?;
+    let key_bytes = state.config.master_key.decrypt(
+        fleet_core::aead::Purpose::TenantBundleSigningKey { tenant_id },
+        &secrets.bundle_signing_key_encrypted,
+    )?;
     let key_pem = std::str::from_utf8(&key_bytes).context("bundle key utf8")?;
     let signing_key =
         SigningKey::from_pkcs8_pem(key_pem).map_err(|e| anyhow!("ed25519 key parse: {e}"))?;

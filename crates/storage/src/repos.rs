@@ -1199,6 +1199,43 @@ impl<'a> HostOverridesRepo<'a> {
         Ok(res.rows_affected() > 0)
     }
 
+    /// Every override in the database, as `(tenant_id, host_id, ciphertext)`. For the
+    /// startup rewrite only — request paths read one host's override, scoped to its tenant.
+    pub async fn list_all(&self) -> Result<Vec<(i64, String, Vec<u8>)>> {
+        let rows = sqlx::query("SELECT tenant_id, host_id, patch_encrypted FROM host_overrides")
+            .fetch_all(&self.db.read)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                (
+                    r.get::<i64, _>("tenant_id"),
+                    r.get::<String, _>("host_id"),
+                    r.get::<Vec<u8>, _>("patch_encrypted"),
+                )
+            })
+            .collect())
+    }
+
+    /// Replace just the ciphertext, leaving priority and authorship alone. Startup rewrite
+    /// only — a real edit goes through [`Self::upsert`].
+    pub async fn replace_ciphertext(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        patch_encrypted: &[u8],
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE host_overrides SET patch_encrypted = ? WHERE tenant_id = ? AND host_id = ?",
+        )
+        .bind(patch_encrypted)
+        .bind(tenant_id)
+        .bind(host_id)
+        .execute(&self.db.write)
+        .await?;
+        Ok(())
+    }
+
     pub async fn get(&self, tenant_id: i64, host_id: &str) -> Result<Option<StoredHostOverride>> {
         let row = sqlx::query(
             "SELECT host_id, patch_encrypted, priority FROM host_overrides
@@ -1303,6 +1340,27 @@ impl<'a> TenantSecretsRepo<'a> {
             bundle_signing_pub_pem: r.get("bundle_signing_pub_pem"),
             bundle_signing_key_encrypted: r.get("bundle_signing_key_encrypted"),
         }))
+    }
+
+    /// Replace both encrypted columns for one tenant. Only the startup rewrite that binds
+    /// legacy ciphertexts to their purpose has any reason to call this.
+    pub async fn replace_encrypted_keys(
+        &self,
+        tenant_id: i64,
+        ca_key_encrypted: &[u8],
+        bundle_signing_key_encrypted: &[u8],
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE tenant_secrets
+             SET ca_key_encrypted = ?, bundle_signing_key_encrypted = ?
+             WHERE tenant_id = ?",
+        )
+        .bind(ca_key_encrypted)
+        .bind(bundle_signing_key_encrypted)
+        .bind(tenant_id)
+        .execute(&self.db.write)
+        .await?;
+        Ok(())
     }
 
     pub async fn list_all_cas(&self) -> Result<Vec<CaSummary>> {

@@ -863,7 +863,12 @@ pub async fn enroll(State(state): State<AppState>, Json(body): Json<EnrollBody>)
         }
     };
 
-    let ca_key_pem = match state.config.master_key.decrypt(&secrets.ca_key_encrypted) {
+    let ca_key_pem = match state.config.master_key.decrypt(
+        fleet_core::aead::Purpose::TenantCaKey {
+            tenant_id: claims.tenant_id,
+        },
+        &secrets.ca_key_encrypted,
+    ) {
         Ok(b) => match String::from_utf8(b) {
             Ok(s) => s,
             Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "ca key corrupt").into_response(),
