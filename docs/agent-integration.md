@@ -77,9 +77,14 @@ GET {mtls_url}/agent/v1/bundles/{id}
 Then, in order, before touching the filesystem:
 
 1. **Integrity** — SHA-256 of the downloaded bytes must equal `sha256`.
-2. **Authenticity** — `signature` is a base64 Ed25519 signature over the **32-byte
-   SHA-256 digest** (not the raw bytes), verified with the `bundle_signing_pub_pem`
-   received at enrollment/renewal.
+2. **Authenticity** — `signature` is a base64 Ed25519 signature over the bundle's
+   **descriptor**: a version prefix followed by the response's `tenant_id` and this
+   bundle's `id`, `name`, `version`, `format` and `sha256`, NUL-separated. Verified
+   with the `bundle_signing_pub_pem` received at enrollment/renewal. Signing the
+   digest alone would only say "this tenant's server saw these bytes once"; the
+   descriptor says which bundle they are, so an old signed blob cannot be
+   re-advertised under a new name. Exact bytes:
+   [agent-implementation.md §4](agent-implementation.md#4-bundle-download-and-verification).
 
 A `403` means the bundle is not in this host's effective set (the server recomputes
 membership on every download) — treat it as "desired state changed under me": abandon

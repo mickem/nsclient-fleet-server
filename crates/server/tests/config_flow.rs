@@ -275,9 +275,15 @@ async fn end_to_end_tag_group_bundle_assign_and_fetch() {
 
     // ...and the download endpoint agrees, rather than relying on the poll alone to keep
     // the host away from the bytes.
-    let forbidden = agent
-        .fetch_bundle(&bundle_id, &expected_sha, &signature)
-        .await;
+    let claimed = fleet_core::bundlesig::BundleDescriptor {
+        tenant_id: ds2.tenant_id,
+        bundle_id: &bundle_id,
+        name: "sql-monitoring",
+        version: "1.2.0",
+        format: "plain",
+        sha256_hex: &expected_sha,
+    };
+    let forbidden = agent.fetch_bundle_verified(claimed, &signature).await;
     assert!(
         forbidden.is_err(),
         "download must refuse a bundle the host is not actually assigned"
@@ -300,7 +306,7 @@ async fn end_to_end_tag_group_bundle_assign_and_fetch() {
 
     // 7. Agent downloads the bundle and verifies sha256 + signature
     let downloaded = agent
-        .fetch_bundle(&bundle_id, &expected_sha, &signature)
+        .fetch_bundle_verified(ds3.descriptor(&ds3.bundles[0]).unwrap(), &signature)
         .await
         .unwrap();
     assert_eq!(downloaded, bundle_bytes);
@@ -745,6 +751,91 @@ async fn bad_selector_rejected() {
 /// bundle used to carry `../../` entries straight through compose into output we sign.
 /// Bundles are immutable and there was no way to delete one, so uploading was a one-way
 /// ratchet on disk with nothing to reclaim it.
+/// A signature over the digest alone said only "this tenant's server saw these bytes once",
+/// so an old signed blob re-advertised under a different name, version or id still verified.
+/// The signature now covers the bundle's identity, so a changed claim is a failed check.
+#[tokio::test]
+async fn a_bundle_signature_does_not_transfer_to_another_identity() {
+    let s = start().await;
+    signup_login(&s, "sig", "sig@example.com").await;
+
+    let form = reqwest::multipart::Form::new()
+        .text("name", "checks")
+        .text("version", "1.0.0")
+        .part(
+            "bundle",
+            reqwest::multipart::Part::bytes(b"the same bytes".to_vec()).file_name("b.zip"),
+        );
+    let created: serde_json::Value = s
+        .cookie_jar
+        .post(format!("{}/api/bundles", s.base_url))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let id = created["id"].as_str().unwrap().to_string();
+    let sha = created["sha256"].as_str().unwrap().to_string();
+    let signature = created["signature"].as_str().unwrap().to_string();
+
+    let pub_pem: String =
+        sqlx::query_scalar("SELECT bundle_signing_pub_pem FROM tenant_secrets WHERE tenant_id = 1")
+            .fetch_one(&s.db.read)
+            .await
+            .unwrap();
+
+    let verify = |d: fleet_core::bundlesig::BundleDescriptor<'_>| -> bool {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use ed25519_dalek::pkcs8::DecodePublicKey;
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+        let vk = VerifyingKey::from_public_key_pem(&pub_pem).unwrap();
+        let sig = Signature::from_slice(&STANDARD.decode(&signature).unwrap()).unwrap();
+        vk.verify(&d.to_signing_bytes(), &sig).is_ok()
+    };
+
+    let real = fleet_core::bundlesig::BundleDescriptor {
+        tenant_id: 1,
+        bundle_id: &id,
+        name: "checks",
+        version: "1.0.0",
+        format: "plain",
+        sha256_hex: &sha,
+    };
+    assert!(
+        verify(real),
+        "the signature must verify for what was signed"
+    );
+
+    // Same bytes, same signature, a different claim about what they are.
+    for forged in [
+        fleet_core::bundlesig::BundleDescriptor {
+            name: "secrets",
+            ..real
+        },
+        fleet_core::bundlesig::BundleDescriptor {
+            version: "9.9.9",
+            ..real
+        },
+        fleet_core::bundlesig::BundleDescriptor {
+            bundle_id: "01JSOMETHINGELSE",
+            ..real
+        },
+        fleet_core::bundlesig::BundleDescriptor {
+            format: "enc-v1",
+            ..real
+        },
+        fleet_core::bundlesig::BundleDescriptor {
+            tenant_id: 2,
+            ..real
+        },
+    ] {
+        assert!(!verify(forged), "{forged:?} must not verify");
+    }
+}
+
 #[tokio::test]
 async fn deleting_a_bundle_takes_its_assignments_and_bytes_with_it() {
     let s = start().await;

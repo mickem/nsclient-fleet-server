@@ -47,6 +47,11 @@ pub struct BundleRef {
 
 #[derive(Serialize)]
 pub struct DesiredStateResponse {
+    /// The tenant these bundles belong to. Part of the descriptor a bundle's signature
+    /// covers, and the agent cannot derive it from its certificate (which carries the
+    /// slug), so it is sent rather than guessed at. Cross-checked by the signature itself:
+    /// the verifying key is per tenant, so a wrong value here just fails verification.
+    pub tenant_id: i64,
     pub state_hash: String,
     pub next_poll_in_seconds: u32,
     pub merged_config_json: serde_json::Value,
@@ -131,6 +136,7 @@ pub async fn desired_state(
         .collect();
 
     Json(DesiredStateResponse {
+        tenant_id: ctx.tenant_id,
         state_hash: ds.state_hash,
         next_poll_in_seconds: next_poll,
         merged_config_json: ds.merged_config,

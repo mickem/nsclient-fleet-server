@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use fleet_core::aead::Purpose;
 use fleet_core::tenant::Tenant;
 use fleet_enrollment::generate_tenant_ca;
@@ -142,6 +142,80 @@ pub async fn rebind_legacy_ciphertexts(state: &AppState, db: &Db) -> Result<()> 
         );
     }
     Ok(())
+}
+
+/// Re-sign bundles whose signature predates the descriptor.
+///
+/// v1 signed the bare digest, which says nothing about which bundle those bytes are. The
+/// fields the v2 descriptor needs are all on the row, so no stored bytes are read — a row
+/// whose signature already verifies is skipped, and one that does not is re-signed. After
+/// the first start on a given database this walk costs one signature verification per
+/// bundle and no writes.
+pub async fn resign_bundles(state: &AppState, db: &Db) -> Result<()> {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+    let bundles = fleet_storage::BundlesRepo::new(db);
+    let secrets = TenantSecretsRepo::new(db);
+    let mut resigned = 0usize;
+
+    for row in bundles.list_all().await? {
+        let descriptor = fleet_core::bundlesig::BundleDescriptor {
+            tenant_id: row.tenant_id,
+            bundle_id: &row.id,
+            name: &row.name,
+            version: &row.version,
+            format: &row.format,
+            sha256_hex: &row.sha256,
+        };
+
+        // Verify with the tenant's public key rather than re-signing unconditionally: the
+        // signing key is only needed for rows that actually need rewriting.
+        let already_valid = match secrets.get_by_tenant(row.tenant_id).await? {
+            Some(sec) => {
+                use ed25519_dalek::pkcs8::DecodePublicKey;
+                match (
+                    VerifyingKey::from_public_key_pem(&sec.bundle_signing_pub_pem),
+                    base64_decode(&row.signature),
+                ) {
+                    (Ok(vk), Some(sig)) => Signature::from_slice(&sig)
+                        .map(|sig| vk.verify(&descriptor.to_signing_bytes(), &sig).is_ok())
+                        .unwrap_or(false),
+                    _ => false,
+                }
+            }
+            None => {
+                tracing::error!(
+                    tenant_id = row.tenant_id,
+                    "bundle belongs to a tenant with no secrets — cannot re-sign"
+                );
+                continue;
+            }
+        };
+        if already_valid {
+            continue;
+        }
+
+        let signature = crate::bundles::sign_with_tenant_key(state, row.tenant_id, &descriptor)
+            .await
+            .with_context(|| format!("re-sign bundle {}", row.id))?;
+        bundles
+            .replace_signature(row.tenant_id, &row.id, &signature)
+            .await?;
+        resigned += 1;
+    }
+
+    if resigned > 0 {
+        tracing::info!(
+            resigned,
+            "re-signed bundles whose signature covered only their digest"
+        );
+    }
+    Ok(())
+}
+
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    STANDARD.decode(s).ok()
 }
 
 /// Backfill secrets for any tenants that pre-date Phase 3 (i.e., were created before the

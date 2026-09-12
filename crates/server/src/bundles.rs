@@ -267,7 +267,20 @@ async fn persist_bundle(
     }
 
     let sha = sha256_hex(&bytes);
-    let signature_b64 = match sign_with_tenant_key(state, who.tenant_id, &bytes).await {
+
+    // The id is chosen here rather than by the insert, because the signature covers it —
+    // see `fleet_core::bundlesig` for why a signature over the digest alone was worth so
+    // little.
+    let bundle_id = fleet_core::bundlesig::new_bundle_id();
+    let descriptor = fleet_core::bundlesig::BundleDescriptor {
+        tenant_id: who.tenant_id,
+        bundle_id: &bundle_id,
+        name,
+        version,
+        format,
+        sha256_hex: &sha,
+    };
+    let signature_b64 = match sign_with_tenant_key(state, who.tenant_id, &descriptor).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "bundle sign failed");
@@ -278,6 +291,7 @@ async fn persist_bundle(
     let bundles = BundlesRepo::new(&state.db);
     let row = match bundles
         .create(
+            &bundle_id,
             who.tenant_id,
             name,
             version,
@@ -1080,7 +1094,16 @@ pub async fn set_bundle_key(
     .into_response()
 }
 
-async fn sign_with_tenant_key(state: &AppState, tenant_id: i64, payload: &[u8]) -> Result<String> {
+/// Sign a bundle's descriptor with the tenant's Ed25519 key.
+///
+/// The descriptor, not the bytes: a signature over the digest alone binds nothing about
+/// *which* bundle those bytes are, so an old signed blob could be re-advertised under a new
+/// name, version or id and still verify. See [`fleet_core::bundlesig`].
+pub(crate) async fn sign_with_tenant_key(
+    state: &AppState,
+    tenant_id: i64,
+    descriptor: &fleet_core::bundlesig::BundleDescriptor<'_>,
+) -> Result<String> {
     let secrets = TenantSecretsRepo::new(&state.db)
         .get_by_tenant(tenant_id)
         .await?
@@ -1092,9 +1115,9 @@ async fn sign_with_tenant_key(state: &AppState, tenant_id: i64, payload: &[u8]) 
     let key_pem = std::str::from_utf8(&key_bytes).context("bundle key utf8")?;
     let signing_key =
         SigningKey::from_pkcs8_pem(key_pem).map_err(|e| anyhow!("ed25519 key parse: {e}"))?;
-    // Sign sha256(payload). The agent verifies sig over the same digest.
-    let digest = Sha256::digest(payload);
-    let signature = signing_key.sign(&digest);
+    // Ed25519 hashes internally, so the descriptor is signed directly rather than digested
+    // first — one fewer step for an agent implementation to get wrong.
+    let signature = signing_key.sign(&descriptor.to_signing_bytes());
     Ok(STANDARD.encode(signature.to_bytes()))
 }
 

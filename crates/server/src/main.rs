@@ -142,6 +142,7 @@ async fn main() -> anyhow::Result<()> {
 
     backfill_all(&state, &db).await?;
     fleet_server::tenant_setup::rebind_legacy_ciphertexts(&state, &db).await?;
+    fleet_server::tenant_setup::resign_bundles(&state, &db).await?;
     trust_store.rebuild().await?;
 
     // A dedicated agent port is bound only when LISTEN_MTLS is set (always, when ACME is

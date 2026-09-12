@@ -363,7 +363,7 @@ async fn encrypted_bundle_end_to_end() {
 
     // 7. Download: sha + signature verify against the ciphertext, exactly as for plain.
     let downloaded = agent
-        .fetch_bundle(&bundle_id, &expected_sha, &signature)
+        .fetch_bundle_verified(ds.descriptor(&ds.bundles[0]).unwrap(), &signature)
         .await
         .unwrap();
     assert_eq!(downloaded, blob);

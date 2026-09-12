@@ -430,9 +430,8 @@ async fn fifty_agents_converge_on_assigned_bundle() {
         assert_eq!(ds.bundles.len(), 1, "bundle must be in desired state");
         let b = &ds.bundles[0];
         let bytes = agent
-            .fetch_bundle(
-                b["id"].as_str().unwrap(),
-                b["sha256"].as_str().unwrap(),
+            .fetch_bundle_verified(
+                ds.descriptor(b).expect("descriptor"),
                 b["signature"].as_str().unwrap(),
             )
             .await

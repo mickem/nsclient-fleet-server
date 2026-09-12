@@ -961,8 +961,16 @@ impl<'a> BundlesRepo<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Insert a bundle under an id the caller has already chosen.
+    ///
+    /// The id used to be generated here, which meant the signature could not cover it — it
+    /// did not exist until after the row did. A signature that says nothing about which
+    /// bundle it is for is most of the reason v1 signatures were worth so little; see
+    /// [`fleet_core::bundlesig`].
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
+        id: &str,
         tenant_id: i64,
         name: &str,
         version: &str,
@@ -972,8 +980,7 @@ impl<'a> BundlesRepo<'a> {
         format: &str,
         key_fingerprint: Option<&str>,
     ) -> Result<BundleRow> {
-        use ulid::Ulid;
-        let id = Ulid::new().to_string();
+        let id = id.to_string();
         let now = now_unix();
         sqlx::query(
             "INSERT INTO bundles (id, tenant_id, name, version, sha256, size_bytes, signature, uploaded_at, format, key_fingerprint)
@@ -1046,6 +1053,29 @@ impl<'a> BundlesRepo<'a> {
             .await?;
         tx.commit().await?;
         Ok(res.rows_affected() > 0)
+    }
+
+    /// Every bundle in the database, across tenants. For the startup re-sign only.
+    pub async fn list_all(&self) -> Result<Vec<BundleRow>> {
+        let rows = sqlx::query(
+            "SELECT id, tenant_id, name, version, sha256, size_bytes, signature, uploaded_at,
+                    format, key_fingerprint
+             FROM bundles",
+        )
+        .fetch_all(&self.db.read)
+        .await?;
+        Ok(rows.into_iter().map(map_bundle).collect())
+    }
+
+    /// Replace a bundle's signature. Startup re-sign only — bundles are otherwise immutable.
+    pub async fn replace_signature(&self, tenant_id: i64, id: &str, signature: &str) -> Result<()> {
+        sqlx::query("UPDATE bundles SET signature = ? WHERE tenant_id = ? AND id = ?")
+            .bind(signature)
+            .bind(tenant_id)
+            .bind(id)
+            .execute(&self.db.write)
+            .await?;
+        Ok(())
     }
 
     pub async fn list(&self, tenant_id: i64) -> Result<Vec<BundleRow>> {

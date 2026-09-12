@@ -128,6 +128,7 @@ Responses:
 
 ```json
 {
+  "tenant_id": 7,
   "state_hash": "…",
   "next_poll_in_seconds": 60,
   "merged_config_json": {},
@@ -137,7 +138,7 @@ Responses:
       "name": "…",
       "version": "…",
       "sha256": "<hex digest of the bundle bytes>",
-      "signature": "<base64 Ed25519 signature>",
+      "signature": "<base64 Ed25519 signature over this bundle's descriptor>",
       "url": "/agent/v1/bundles/<id>",
       "priority": 10,
       "format": "plain"
@@ -153,6 +154,11 @@ Responses:
 
 Notes:
 
+- `tenant_id` identifies the tenant these bundles belong to. You need it to
+  verify a bundle signature (§4); it is sent rather than derived because your
+  certificate carries the tenant *slug*, not this id. There is nothing to trust
+  here — a wrong value simply fails signature verification, since the verifying
+  key is per tenant.
 - `merged_config_json` is currently always `{}` — real configuration lives
   inside bundle contents; the agent is responsible for unpacking and applying
   them (see `crates/server/src/desired_state.rs`).
@@ -172,9 +178,27 @@ For each entry in `bundles` (process in ascending `priority` order):
    Clauses default to operator-set tags precisely so that the effective set is
    not something the host chooses — see §5.
 2. **Verify integrity**: SHA-256 of the raw bytes must equal `sha256` (hex).
-3. **Verify authenticity**: `signature` is a base64 Ed25519 signature **over
-   the 32-byte SHA-256 digest** (not over the raw bytes), verified with
-   `bundle_signing_pub_pem` obtained at enrollment.
+3. **Verify authenticity**: `signature` is a base64 Ed25519 signature over the
+   bundle's **descriptor** — not over the bytes, and not over their digest
+   alone — verified with `bundle_signing_pub_pem` obtained at enrollment.
+
+   The descriptor is the identity the server advertised for this bundle,
+   serialised as a version prefix followed by six NUL-separated fields:
+
+   ```
+   nsclient-fleet/bundle-sig/v2 \0 tenant_id \0 id \0 name \0 version \0 format \0 sha256
+   ```
+
+   `tenant_id` is the top-level field of the same desired-state response;
+   everything else comes from this bundle's entry, verbatim, including the
+   `sha256` you just checked the bytes against. Sign nothing yourself and
+   reconstruct nothing — read the fields out of the response, because what you
+   are verifying is the server's own claim about *what this bundle is*.
+
+   A signature over the digest alone would say only "this tenant's server saw
+   these bytes once", which lets an old signed blob be re-advertised under a
+   different name, version or id. Reference implementation:
+   `fleet_core::bundlesig`.
 4. **Decrypt if sealed**: bytes starting with the `NSEB1` magic are a
    client-side-encrypted envelope (`format: "enc-v1"`); decrypt with the
    locally-configured bundle key, using the advertised `name`/`version` as
