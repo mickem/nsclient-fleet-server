@@ -71,12 +71,30 @@ Roles are enforced server-side (`crates/core/src/user.rs` defines them; every ha
 `can_*` method); the UI only hides controls a role cannot use. A role change applies on the
 user's next request, without them signing in again.
 
+Two things every role can see, deliberately, and worth knowing before you invite someone as
+`view_only`:
+
+- **The audit log**, tenant-wide, including the email addresses of who did what and who was
+  invited. Its purpose is that everyone in a tenant can see what happened to their fleet; the
+  cost is that the member list is not private within a tenant.
+- **A host's `state_hash`**, which is derived from its configuration. It is an HMAC under a
+  key only the server holds, so it is not a way to read that configuration back — see
+  `crates/server/src/desired_state.rs`.
+
+Encrypted bundles are the exception that goes the other way: their contents are unreadable to
+*every* role, and to the server. The key lives in the browser, in `sessionStorage`, so an
+operator who unlocks it on a shared machine should close the tab. That placement is what
+makes the Content-Security-Policy on this origin load-bearing rather than decorative —
+`crates/server/src/security_headers.rs`.
+
 The owner cannot be re-roled or removed, and nobody can change their own role or delete their
 own account — together that keeps a tenant from locking itself out. Deleting a user signs them
 out immediately and leaves their audit entries in place, without attribution.
 
 Invitations are unavailable when `ON_PREM=true`: that mode disables magic links and
-authenticates a single administrator from `ON_PREM_ADMIN_EMAIL` / `ON_PREM_ADMIN_PASSWORD`.
+authenticates a single administrator from `ON_PREM_ADMIN_EMAIL` plus either
+`ON_PREM_ADMIN_PASSWORD_HASH` (an argon2 PHC string, preferred) or
+`ON_PREM_ADMIN_PASSWORD`.
 
 ## Platform console
 
