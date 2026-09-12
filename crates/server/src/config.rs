@@ -110,23 +110,56 @@ impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         let on_prem = bool_env("ON_PREM", false);
 
-        let smtp = match (
-            std::env::var("SMTP_HOST").ok(),
-            std::env::var("SMTP_USER").ok(),
-            std::env::var("SMTP_PASSWORD").ok(),
-            std::env::var("SMTP_FROM").ok(),
-        ) {
-            (Some(host), Some(user), Some(password), Some(from)) => Some(SmtpConfig {
-                host,
+        // All four, or none. A partial configuration used to fall back to the journal
+        // silently: every sign-in link for every tenant logged in full at info level while
+        // the API still answered 204, so anyone who could read the journal — a log shipper,
+        // the deploy script that tails it — held valid sign-in links. One typo'd variable
+        // name did that, and nothing said so.
+        let smtp_parts = [
+            (
+                "SMTP_HOST",
+                std::env::var("SMTP_HOST").ok().filter(|v| !v.is_empty()),
+            ),
+            (
+                "SMTP_USER",
+                std::env::var("SMTP_USER").ok().filter(|v| !v.is_empty()),
+            ),
+            (
+                "SMTP_PASSWORD",
+                std::env::var("SMTP_PASSWORD")
+                    .ok()
+                    .filter(|v| !v.is_empty()),
+            ),
+            (
+                "SMTP_FROM",
+                std::env::var("SMTP_FROM").ok().filter(|v| !v.is_empty()),
+            ),
+        ];
+        let missing: Vec<&str> = smtp_parts
+            .iter()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| *k)
+            .collect();
+        let smtp = match missing.len() {
+            0 => Some(SmtpConfig {
+                host: smtp_parts[0].1.clone().expect("checked above"),
                 port: std::env::var("SMTP_PORT")
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(587),
-                user,
-                password,
-                from,
+                user: smtp_parts[1].1.clone().expect("checked above"),
+                password: smtp_parts[2].1.clone().expect("checked above"),
+                from: smtp_parts[3].1.clone().expect("checked above"),
             }),
-            _ => None,
+            4 => None,
+            _ => anyhow::bail!(
+                "SMTP is half-configured: {} {} not set. Set all four of SMTP_HOST, \
+                 SMTP_USER, SMTP_PASSWORD and SMTP_FROM, or none of them — a partial \
+                 configuration would log every sign-in link to the journal instead of \
+                 mailing it, while still reporting success.",
+                missing.join(", "),
+                if missing.len() == 1 { "is" } else { "are" },
+            ),
         };
 
         let on_prem_admin_password = std::env::var("ON_PREM_ADMIN_PASSWORD")
@@ -258,6 +291,20 @@ impl Config {
             }
             Err(_) => terminates_tls,
         };
+
+        // A server terminating TLS is a server people sign in to over the internet, and
+        // "every sign-in link is in the journal" is not something to discover from a log.
+        // On-prem has no magic links at all, so it is exempt; MAGIC_LINKS_TO_LOG is the
+        // explicit way to say "yes, I am testing".
+        if smtp.is_none() && terminates_tls && !on_prem && !bool_env("MAGIC_LINKS_TO_LOG", false) {
+            anyhow::bail!(
+                "no SMTP configuration, but this server terminates TLS. Every sign-in link \
+                 would be written to the journal in full while the API reported success, and \
+                 anyone who can read the journal would hold them. Configure SMTP_HOST, \
+                 SMTP_USER, SMTP_PASSWORD and SMTP_FROM — or set MAGIC_LINKS_TO_LOG=true if \
+                 that really is what you want."
+            );
+        }
 
         Ok(Self {
             listen: std::env::var("LISTEN").unwrap_or_else(|_| "0.0.0.0:3000".into()),

@@ -234,7 +234,9 @@ to trust it.
 
 | Variable                                                | Default | Notes                                  |
 | ------------------------------------------------------- | ------- | -------------------------------------- |
-| `SMTP_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_FROM` | unset   | All five or none; falls back to stdout |
+| `SMTP_HOST` / `_USER` / `_PASSWORD` / `_FROM`           | unset   | All four or none — a partial set is a startup error |
+| `SMTP_PORT`                                             | `587`   | 465 uses implicit TLS, anything else STARTTLS |
+| `MAGIC_LINKS_TO_LOG`                                    | `false` | Allows starting with no SMTP while terminating TLS. Every sign-in link then goes to the log in full |
 | `TURNSTILE_SECRET`                                      | unset   | Cloudflare Turnstile siteverify secret. Set with `TURNSTILE_SITE_KEY` or startup fails |
 | `TURNSTILE_SITE_KEY`                                    | unset   | Turnstile site key, served to the browser so the signup form can render the widget |
 | `DAILY_EMAIL_BUDGET`                                    | `5000`  | Global cap; sends past it are dropped  |

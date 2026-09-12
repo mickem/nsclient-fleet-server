@@ -23,7 +23,13 @@ impl EmailSender {
     pub fn from_config(smtp: Option<&SmtpConfig>) -> Result<Self> {
         match smtp {
             None => {
-                tracing::warn!("SMTP not configured — magic links will be logged to stdout");
+                // Startup refuses this combination anywhere that terminates TLS, so
+                // reaching here means a development server or an explicit opt-in. Say what
+                // it costs anyway: a sign-in link in a log is a credential in a log.
+                tracing::warn!(
+                    "SMTP not configured — every sign-in link will be written to the log in \
+                     full, and anyone who can read the log can use it"
+                );
                 Ok(Self::Stdout)
             }
             Some(cfg) => {
