@@ -382,7 +382,7 @@ impl<'a> HostRepo<'a> {
 
     /// Delete a host and everything hanging off it (tags, overrides, certs, metrics) in
     /// one transaction. Removing the cert rows is what cuts the agent off: the mTLS
-    /// heartbeat's `is_active(serial)` lookup no longer matches, so a live agent gets 403
+    /// heartbeat's `standing(serial)` lookup no longer matches, so a live agent gets 403
     /// on its next call. Returns true iff the host row existed.
     pub async fn delete(&self, tenant_id: i64, host_id: &str) -> Result<bool> {
         let mut tx = self.db.write.begin().await?;
@@ -412,6 +412,59 @@ impl<'a> HostRepo<'a> {
             .execute(&self.db.write)
             .await?;
         Ok(())
+    }
+
+    /// Cut a host off and hand it a way back, in one transaction.
+    ///
+    /// Revoking alone would strand the host: its certificates stop working and enrollment
+    /// refuses a host that is already enrolled, so the only remaining move would be to
+    /// delete it and lose its tags, groups and overrides. Resetting it to pending in the
+    /// same transaction keeps the host's identity and everything hanging off it, and
+    /// makes this the operation an operator actually wants when a key is believed stolen.
+    ///
+    /// Returns the number of certificates revoked, or `None` if no such host.
+    pub async fn revoke_certs_and_reset_to_pending(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        nonce_hash: &str,
+        bootstrap_expires_at: i64,
+    ) -> Result<Option<u64>> {
+        let now = now_unix();
+        let mut tx = self.db.write.begin().await?;
+
+        let revoked = sqlx::query(
+            "UPDATE host_certs SET revoked_at = ?
+             WHERE tenant_id = ? AND host_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(tenant_id)
+        .bind(host_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+        let reset = sqlx::query(
+            "UPDATE hosts
+             SET enrolled_at = NULL,
+                 bootstrap_nonce_hash = ?,
+                 bootstrap_expires_at = ?
+             WHERE tenant_id = ? AND id = ?",
+        )
+        .bind(nonce_hash)
+        .bind(bootstrap_expires_at)
+        .bind(tenant_id)
+        .bind(host_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+        if reset == 0 {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        tx.commit().await?;
+        Ok(Some(revoked))
     }
 
     /// Refresh `last_seen_at`, but only once it is older than `stale_after_secs`.
@@ -1368,15 +1421,114 @@ impl<'a> HostCertRepo<'a> {
         Ok(())
     }
 
-    pub async fn is_active(&self, serial: &str) -> Result<bool> {
-        let row = sqlx::query(
-            "SELECT 1 AS x FROM host_certs WHERE serial = ? AND revoked_at IS NULL LIMIT 1",
+    /// What a presented client certificate is worth right now.
+    ///
+    /// Keyed on tenant and host as well as serial, and on the stored expiry, so the answer
+    /// is "this certificate, issued to this host in this tenant, is live" rather than
+    /// "some row somewhere has this serial and is not flagged". The tenant and host come
+    /// from the verified chain, so a mismatch should be impossible — which is the reason
+    /// to check it here rather than the reason not to.
+    pub async fn standing(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        serial: &str,
+    ) -> Result<CertStanding> {
+        // A host holds a handful of live certs at most, so one read for all of them beats
+        // two aggregate subqueries over the same rows.
+        //
+        // Ordering is by rowid, not `issued_at`. `issued_at` comes from the certificate's
+        // notBefore and has one-second granularity, so a renewal in the same second as the
+        // certificate it replaces would tie and neither would ever be retired. Within one
+        // host's rows rowid is insertion order exactly, and it cannot tie.
+        let rows = sqlx::query(
+            "SELECT rowid AS rid, serial FROM host_certs
+             WHERE tenant_id = ? AND host_id = ? AND revoked_at IS NULL AND expires_at > ?",
         )
-        .bind(serial)
-        .fetch_optional(&self.db.read)
+        .bind(tenant_id)
+        .bind(host_id)
+        .bind(now_unix())
+        .fetch_all(&self.db.read)
         .await?;
-        Ok(row.is_some())
+
+        let mine = rows
+            .iter()
+            .find(|r| r.get::<String, _>("serial") == serial)
+            .map(|r| r.get::<i64, _>("rid"));
+        let Some(rid) = mine else {
+            return Ok(CertStanding {
+                active: false,
+                superseded: 0,
+            });
+        };
+        let superseded = rows.iter().filter(|r| r.get::<i64, _>("rid") < rid).count();
+        Ok(CertStanding {
+            active: true,
+            superseded,
+        })
     }
+
+    /// Revoke every live certificate this host holds that was issued before `serial`.
+    ///
+    /// Called when the host presents `serial`, which is the point at which we know it
+    /// actually received that certificate — a renewal whose response never arrived
+    /// therefore costs the host nothing, and no grace window has to be guessed at.
+    ///
+    /// Strictly *older*, never "every other", because the caller is authenticated by the
+    /// certificate it presents: if a thief replayed a stolen older key, "every other"
+    /// would have it revoke the legitimate new one. Older means earlier rowid — see
+    /// [`Self::standing`] for why not `issued_at`.
+    pub async fn retire_superseded(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        serial: &str,
+    ) -> Result<u64> {
+        let now = now_unix();
+        let res = sqlx::query(
+            "UPDATE host_certs SET revoked_at = ?
+             WHERE tenant_id = ? AND host_id = ? AND revoked_at IS NULL AND expires_at > ?
+               AND rowid < (SELECT rowid FROM host_certs
+                            WHERE tenant_id = ? AND host_id = ? AND serial = ?)",
+        )
+        .bind(now)
+        .bind(tenant_id)
+        .bind(host_id)
+        .bind(now)
+        .bind(tenant_id)
+        .bind(host_id)
+        .bind(serial)
+        .execute(&self.db.write)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Revoke every live certificate a host holds. The operator-facing lever, for a host
+    /// whose key is believed stolen; pair it with resetting the host to pending so it has
+    /// a way back. See [`HostRepo::revoke_certs_and_reset_to_pending`].
+    pub async fn revoke_all_for_host(&self, tenant_id: i64, host_id: &str) -> Result<u64> {
+        let now = now_unix();
+        let res = sqlx::query(
+            "UPDATE host_certs SET revoked_at = ?
+             WHERE tenant_id = ? AND host_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(tenant_id)
+        .bind(host_id)
+        .execute(&self.db.write)
+        .await?;
+        Ok(res.rows_affected())
+    }
+}
+
+/// The answer to "may this certificate act, and did it leave others behind?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CertStanding {
+    /// This serial is a live, unexpired, unrevoked certificate for this host.
+    pub active: bool,
+    /// Live certificates recorded for the same host before this one — what a renewal
+    /// leaves behind. Non-zero means [`HostCertRepo::retire_superseded`] has work to do.
+    pub superseded: usize,
 }
 
 pub struct UserRepo<'a> {

@@ -266,6 +266,17 @@ export type PublicConfig = {
   turnstile_site_key: string | null;
 };
 
+/** Result of revoking a host's certificates. The bootstrap token is part of the answer,
+ *  not a separate step: revoking without one would strand the host, since enrollment
+ *  refuses a host that is already enrolled. */
+export type RevokeHostResponse = {
+  host_id: string;
+  revoked_certs: number;
+  bootstrap_token: string;
+  install_command: string;
+  expires_at: number;
+};
+
 export type CreateTenantResponse = {
   tenant: PlatformTenantView;
   /** False when no owner was requested, or when the account was created but its sign-in

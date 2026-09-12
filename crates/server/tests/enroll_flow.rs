@@ -287,6 +287,169 @@ async fn enroll_replay_rejected() {
     assert!(second.is_err(), "replay must fail");
 }
 
+/// Create a host, enroll an agent for it, and prove the agent is live. Returns the
+/// host id, the agent, and nothing else worth carrying — the retry loops absorb
+/// trust-store rebuild lag, which is unrelated to what the callers are testing.
+async fn enrolled_agent(s: &TestServer, name: &str) -> (String, fleet_agent_sim::EnrolledAgent) {
+    let r = s
+        .cookie_jar
+        .post(format!("{}/api/hosts", s.base_url))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let create: serde_json::Value = r.json().await.unwrap();
+    let host_id = create["host_id"].as_str().unwrap().to_string();
+    let token = create["bootstrap_token"].as_str().unwrap().to_string();
+
+    let mut agent = None;
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if let Ok(a) = fleet_agent_sim::enroll(&s.base_url, &token, Some(name), None).await {
+            agent = Some(a);
+            break;
+        }
+    }
+    let agent = agent.expect("enroll failed");
+
+    let mut alive = false;
+    for _ in 0..8 {
+        if agent.heartbeat().await.is_ok() {
+            alive = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(alive, "agent must be able to heartbeat after enrollment");
+    (host_id, agent)
+}
+
+async fn live_cert_count(s: &TestServer, host_id: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM host_certs WHERE host_id = ? AND revoked_at IS NULL")
+        .bind(host_id)
+        .fetch_one(&s._db.read)
+        .await
+        .unwrap()
+}
+
+/// A renewal used to leave the previous certificate active until its own expiry, so a host
+/// on schedule held several valid identities at once and a key stolen from it stayed usable
+/// for the rest of its 90 days. The old one is now retired — but only once the agent has
+/// *used* the new one, which is the proof that the renewal response actually arrived.
+#[tokio::test]
+async fn renewing_retires_the_certificate_it_replaces() {
+    let s = start().await;
+    signup_and_login(&s).await;
+    let (host_id, agent) = enrolled_agent(&s, "renewer").await;
+    let mut agent = agent;
+
+    assert_eq!(live_cert_count(&s, &host_id).await, 1);
+
+    agent.renew().await.expect("renew");
+
+    // Both are live at this instant: the server cannot know the agent received the new
+    // certificate until the agent shows it can use it.
+    assert_eq!(
+        live_cert_count(&s, &host_id).await,
+        2,
+        "the old cert must survive until the new one is demonstrably in hand"
+    );
+
+    // One request on the new certificate, and the old one goes.
+    agent.heartbeat().await.expect("heartbeat on renewed cert");
+    assert_eq!(
+        live_cert_count(&s, &host_id).await,
+        1,
+        "using the renewed cert must retire the one it replaced"
+    );
+}
+
+/// The operator lever. Revoking used to have no way to happen at all — `revoked_at` was a
+/// column nothing wrote, and the only way to stop a certificate being accepted was to
+/// delete the host and lose everything attached to it.
+#[tokio::test]
+async fn an_operator_can_revoke_a_hosts_certs_and_re_enroll_it() {
+    let s = start().await;
+    signup_and_login(&s).await;
+    let (host_id, agent) = enrolled_agent(&s, "compromised").await;
+
+    // Give the host something worth keeping, so "revoke" is visibly not "delete".
+    let r = s
+        .cookie_jar
+        .put(format!("{}/api/hosts/{}/tags/env", s.base_url, host_id))
+        .json(&serde_json::json!({"value": "prod"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+
+    let r = s
+        .cookie_jar
+        .post(format!("{}/api/hosts/{}/revoke-certs", s.base_url, host_id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "revoke: {:?}", r.text().await);
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(body["revoked_certs"], 1);
+    let new_token = body["bootstrap_token"].as_str().unwrap().to_string();
+
+    assert_eq!(live_cert_count(&s, &host_id).await, 0);
+
+    // The stolen key is dead on every agent route, renew included — otherwise revocation
+    // would just be an invitation to mint a fresh cert.
+    let mut agent = agent;
+    assert!(agent.heartbeat().await.is_err());
+    assert!(agent.fetch_desired_state(None).await.is_err());
+    assert!(
+        agent.renew().await.is_err(),
+        "a revoked cert must not renew itself back into a valid one"
+    );
+
+    // The host row and its tag survived: this is a re-enrollment, not a rebuild.
+    let detail: serde_json::Value = s
+        .cookie_jar
+        .get(format!("{}/api/hosts/{}", s.base_url, host_id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        detail["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["key"] == "env" && t["value"] == "prod"),
+        "revoking must not discard the host's configuration: {detail}"
+    );
+
+    // And the new token brings the same host back.
+    let mut fresh = None;
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if let Ok(a) =
+            fleet_agent_sim::enroll(&s.base_url, &new_token, Some("compromised"), None).await
+        {
+            fresh = Some(a);
+            break;
+        }
+    }
+    let fresh = fresh.expect("re-enrollment with the new bootstrap token failed");
+    let mut alive = false;
+    for _ in 0..8 {
+        if fresh.heartbeat().await.is_ok() {
+            alive = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(alive, "the re-enrolled host must be able to heartbeat");
+    assert_eq!(live_cert_count(&s, &host_id).await, 1);
+}
+
 #[tokio::test]
 async fn deleted_host_is_cut_off_and_gone() {
     let s = start().await;

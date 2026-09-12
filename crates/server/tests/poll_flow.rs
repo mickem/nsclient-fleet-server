@@ -435,28 +435,35 @@ async fn a_host_reports_whether_local_configuration_outranks_the_fleet() {
 }
 
 #[tokio::test]
-async fn renew_issues_new_cert_and_old_session_keeps_working() {
+async fn renew_issues_a_new_cert_and_retires_the_old_one_once_it_is_in_use() {
     let s = start().await;
     signup_login(&s, "gamma", "carol@example.com").await;
     let mut agent = enroll_a_host(&s).await;
     let original_cert = agent.cert_pem.clone();
+
+    let live = || async {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM host_certs WHERE revoked_at IS NULL")
+            .fetch_one(&s.db.read)
+            .await
+            .unwrap()
+    };
 
     agent.renew().await.unwrap();
     assert_ne!(
         agent.cert_pem, original_cert,
         "cert must change after renew"
     );
+    // Both live for now: the server has no way to know the agent received the response
+    // until the agent uses what it was sent, and revoking a certificate the agent never
+    // got would strand the host.
+    assert_eq!(live().await, 2);
 
-    // Heartbeat with the new identity must succeed
+    // Heartbeat with the new identity must succeed...
     let _ = agent.heartbeat().await.unwrap();
 
-    // Server should now have two cert rows for this host (old + new), both active
-    let cert_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM host_certs WHERE revoked_at IS NULL")
-            .fetch_one(&s.db.read)
-            .await
-            .unwrap();
-    assert_eq!(cert_count, 2);
+    // ...and that is the proof that retires the old one. Leaving it live until its own
+    // expiry is what kept a key stolen from the host usable for the rest of its 90 days.
+    assert_eq!(live().await, 1);
 }
 
 #[tokio::test]

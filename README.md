@@ -120,6 +120,17 @@ curl -sS -X POST https://app.example.com/api/hosts \
 The response also carries `host_id`, `bootstrap_token` and `expires_at`; the token is
 single-use and expires in an hour, same as one issued from the UI.
 
+```bash
+# A host's private key is believed stolen: cut it off and re-enroll it
+curl -sS -X POST https://app.example.com/api/hosts/$HOST_ID/revoke-certs   -H "Authorization: Bearer $NSCLIENT_FLEET_API_KEY" | jq -r .install_command
+```
+
+Revoking retires every certificate the host holds and returns it to pending with a fresh
+bootstrap token, so its tags, group membership, overrides and history survive — unlike
+deleting it, which used to be the only way to stop a certificate being accepted. Renewal
+retires the certificate it replaces on its own, but only once the agent has used the new
+one, so a lost renewal response costs the host nothing.
+
 The key itself is shown once at creation — only its SHA-256 reaches the database, alongside a
 short prefix (`nsk_a1B2c3D4…`) so keys are still identifiable in the list. Keys are private to
 their owner: nobody else can list or revoke them, admins included. Revoking a key, changing

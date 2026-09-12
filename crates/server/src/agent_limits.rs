@@ -172,19 +172,46 @@ pub async fn tier_layer(State(state): State<AppState>, req: Request<Body>, next:
     // reflected in the rustls trust store — the leaf still completes the handshake and yields
     // a valid `PeerHostContext`. The serial check is what actually cuts a deleted or revoked
     // host off: its `host_certs` rows are gone (deletion) or flagged (`revoked_at`), so
-    // `is_active` returns false and we refuse before any handler runs, including `renew`.
-    match fleet_storage::HostCertRepo::new(&state.db)
-        .is_active(&ctx.serial_hex)
+    // `standing` reports it inactive and we refuse before any handler runs, including
+    // `renew`.
+    let certs = fleet_storage::HostCertRepo::new(&state.db);
+    let standing = match certs
+        .standing(ctx.tenant_id, &ctx.host_id, &ctx.serial_hex)
         .await
     {
-        Ok(true) => {}
-        Ok(false) => {
-            tracing::info!(host_id = %ctx.host_id, serial = %ctx.serial_hex, "agent cert revoked or unknown");
-            return (StatusCode::FORBIDDEN, "cert revoked or unknown").into_response();
-        }
+        Ok(s) => s,
         Err(e) => {
-            tracing::error!(error = %e, "is_active check failed");
+            tracing::error!(error = %e, "cert standing check failed");
             return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+        }
+    };
+    if !standing.active {
+        tracing::info!(host_id = %ctx.host_id, serial = %ctx.serial_hex, "agent cert revoked or unknown");
+        return (StatusCode::FORBIDDEN, "cert revoked or unknown").into_response();
+    }
+
+    // Renewal issues a new certificate but cannot safely retire the old one at that
+    // moment: if the response never reaches the agent, the agent still holds only the old
+    // key and revoking it would strand the host. Using the new certificate is the proof
+    // that it arrived, so the previous ones are retired here, on the first request that
+    // presents a newer serial. Without this a host on schedule accumulates valid
+    // identities and a key stolen from it stays usable for the rest of its 90 days.
+    //
+    // Once per renewal, not once per request: `superseded` is zero on the overwhelmingly
+    // common path and no write happens. A failure is logged and the request proceeds — the
+    // next one retries, and refusing service over bookkeeping would be the wrong trade.
+    if standing.superseded > 0 {
+        match certs
+            .retire_superseded(ctx.tenant_id, &ctx.host_id, &ctx.serial_hex)
+            .await
+        {
+            Ok(n) => tracing::info!(
+                host_id = %ctx.host_id,
+                serial = %ctx.serial_hex,
+                revoked = n,
+                "retired certificates superseded by a completed renewal"
+            ),
+            Err(e) => tracing::error!(error = %e, "retiring superseded certs failed"),
         }
     }
 

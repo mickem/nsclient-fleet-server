@@ -186,6 +186,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/hosts/:id/desired", get(hosts::desired))
         .route(
+            "/api/hosts/:id/revoke-certs",
+            post(hosts::revoke_host_certs),
+        )
+        .route(
             "/api/hosts/:id/tags/:key",
             axum::routing::put(config_api::put_tag),
         )
