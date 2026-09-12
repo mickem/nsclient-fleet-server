@@ -29,13 +29,14 @@ use axum::extract::ConnectInfo;
 use axum::Router;
 use hyper::body::Incoming;
 use hyper_util::rt::TokioIo;
-use hyper_util::server::conn::auto::Builder as HttpBuilder;
 use rustls::server::Acceptor;
 use rustls::ServerConfig;
 use tokio::net::TcpListener;
+use tokio::time::{timeout_at, Instant};
 use tokio_rustls::LazyConfigAcceptor;
 use tower::Service;
 
+use crate::conn::{http_builder, ConnLimit, HANDSHAKE_TIMEOUT};
 use crate::mtls::{self, MtlsContext, AGENT_ALPN};
 
 const ACME_ALPN: &[u8] = b"acme-tls/1";
@@ -106,7 +107,11 @@ pub async fn serve_on(
     web_router: Router,
     agent_router: Router,
 ) -> Result<()> {
+    let limit = ConnLimit::new("shared-port");
     loop {
+        // Before `accept`, not after: at capacity we leave the connection in the kernel
+        // backlog rather than accepting it only to drop it.
+        let permit = limit.acquire().await;
         let (stream, peer_addr) = match listener.accept().await {
             Ok(p) => p,
             Err(e) => {
@@ -123,6 +128,7 @@ pub async fn serve_on(
             if let Err(e) = r {
                 tracing::debug!(error = %e, ip = %peer_addr.ip(), "muxed conn ended");
             }
+            drop(permit);
         });
     }
 }
@@ -135,11 +141,24 @@ async fn handle_conn(
     web_router: Router,
     agent_router: Router,
 ) -> Result<()> {
-    let start = match LazyConfigAcceptor::new(Acceptor::default(), stream).await {
-        Ok(s) => s,
-        Err(e) => {
+    // One deadline for reading the ClientHello *and* finishing the handshake, so a peer
+    // cannot buy a fresh allowance by dribbling out just enough to reach the next await.
+    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+
+    let start = match timeout_at(
+        deadline,
+        LazyConfigAcceptor::new(Acceptor::default(), stream),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
             // Port scanners and plain-HTTP-to-443 mistakes both land here.
             tracing::debug!(ip = %peer_addr.ip(), error = %e, "no usable ClientHello");
+            return Ok(());
+        }
+        Err(_) => {
+            tracing::debug!(ip = %peer_addr.ip(), "timed out waiting for a ClientHello");
             return Ok(());
         }
     };
@@ -165,29 +184,45 @@ async fn handle_conn(
             };
             // Completing the handshake *is* the challenge response. Let's Encrypt reads the
             // certificate we present and hangs up; there is no application data.
-            match start.into_stream(challenge).await {
-                Ok(_) => tracing::info!(ip = %peer_addr.ip(), "served TLS-ALPN-01 challenge"),
-                Err(e) => {
+            match timeout_at(deadline, start.into_stream(challenge)).await {
+                Ok(Ok(_)) => tracing::info!(ip = %peer_addr.ip(), "served TLS-ALPN-01 challenge"),
+                Ok(Err(e)) => {
                     tracing::warn!(ip = %peer_addr.ip(), error = %e, "TLS-ALPN-01 handshake failed")
+                }
+                Err(_) => {
+                    tracing::warn!(ip = %peer_addr.ip(), "TLS-ALPN-01 handshake timed out")
                 }
             }
             Ok(())
         }
         Branch::Agent => {
-            let stream = match start.into_stream(mtls_state.tls_config.clone()).await {
-                Ok(s) => s,
-                Err(e) => {
+            let stream = match timeout_at(
+                deadline,
+                start.into_stream(mtls_state.tls_config.clone()),
+            )
+            .await
+            {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => {
                     mtls::log_handshake_failure(&e, peer_addr.ip());
+                    return Ok(());
+                }
+                Err(_) => {
+                    tracing::info!(ip = %peer_addr.ip(), "mTLS handshake timed out");
                     return Ok(());
                 }
             };
             mtls::serve_tls_conn(stream, peer_addr, mtls_state, agent_router).await
         }
         Branch::Web => {
-            let stream = match start.into_stream(tls.web.clone()).await {
-                Ok(s) => s,
-                Err(e) => {
+            let stream = match timeout_at(deadline, start.into_stream(tls.web.clone())).await {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => {
                     tracing::debug!(ip = %peer_addr.ip(), error = %e, "web handshake failed");
+                    return Ok(());
+                }
+                Err(_) => {
+                    tracing::debug!(ip = %peer_addr.ip(), "web handshake timed out");
                     return Ok(());
                 }
             };
@@ -213,7 +248,7 @@ async fn serve_web(
         async move { svc.call(req).await }
     });
 
-    HttpBuilder::new(hyper_util::rt::TokioExecutor::new())
+    http_builder()
         .serve_connection(io, svc_fn)
         .await
         .map_err(|e| anyhow!("http: {e}"))?;

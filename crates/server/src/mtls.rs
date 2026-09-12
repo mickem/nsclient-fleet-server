@@ -6,16 +6,17 @@ use anyhow::{anyhow, Context, Result};
 use axum::Router;
 use hyper::body::Incoming;
 use hyper_util::rt::TokioIo;
-use hyper_util::server::conn::auto::Builder as HttpBuilder;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
 use std::sync::RwLock;
 use tokio::net::TcpListener;
+use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 use tower::Service;
 use x509_parser::prelude::FromDer;
 
+use crate::conn::{http_builder, ConnLimit, HANDSHAKE_TIMEOUT};
 use fleet_storage::{Db, TenantSecretsRepo};
 
 #[derive(Clone, Debug)]
@@ -227,7 +228,11 @@ pub async fn serve(addr: &str, ctx: MtlsContext, router: Router) -> Result<()> {
 /// another mTLS server the symptom is a TLS trust failure (`UnknownCA`, from a trust store
 /// belonging to someone else) rather than anything resembling a port collision.
 pub async fn serve_on(listener: TcpListener, ctx: MtlsContext, router: Router) -> Result<()> {
+    let limit = ConnLimit::new("agent-mtls");
     loop {
+        // Taken before `accept` — see `crate::conn::ConnLimit` for why the backpressure
+        // belongs in the kernel backlog rather than in an accept-then-drop.
+        let permit = limit.acquire().await;
         let (stream, peer_addr) = match listener.accept().await {
             Ok(p) => p,
             Err(e) => {
@@ -241,6 +246,7 @@ pub async fn serve_on(listener: TcpListener, ctx: MtlsContext, router: Router) -
             if let Err(e) = handle_conn(stream, peer_addr, snapshot, router).await {
                 tracing::debug!(error = %e, ip = %peer_addr.ip(), "mTLS conn ended");
             }
+            drop(permit);
         });
     }
 }
@@ -291,10 +297,14 @@ async fn handle_conn(
     router: Router,
 ) -> Result<()> {
     let acceptor = TlsAcceptor::from(state.tls_config.clone());
-    let tls = match acceptor.accept(stream).await {
-        Ok(t) => t,
-        Err(e) => {
+    let tls = match timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => {
             log_handshake_failure(&e, peer_addr.ip());
+            return Ok(());
+        }
+        Err(_) => {
+            tracing::info!(ip = %peer_addr.ip(), "mTLS handshake timed out");
             return Ok(());
         }
     };
@@ -353,7 +363,7 @@ pub(crate) async fn serve_tls_conn(
         }
     });
 
-    HttpBuilder::new(hyper_util::rt::TokioExecutor::new())
+    http_builder()
         .serve_connection(io, svc_fn)
         .await
         .map_err(|e| anyhow!("http: {e}"))?;

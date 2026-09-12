@@ -6,6 +6,7 @@ pub mod auth;
 pub mod bundles;
 pub mod config;
 pub mod config_api;
+pub mod conn;
 pub mod desired_state;
 pub mod hosts;
 pub mod https;
