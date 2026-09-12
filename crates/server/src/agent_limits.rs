@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::{
     body::Body,
@@ -32,8 +33,21 @@ pub struct AgentRateLimits {
 struct AgentRateLimitsInner {
     // Tier name → limiter. We size each limiter for that tier's per-host RPM.
     by_tier: std::sync::RwLock<HashMap<&'static str, Arc<HostKeyedLimiter>>>,
+    /// Last desired-state poll per host. Bounded by the number of hosts that have ever
+    /// polled this process, which is not the same as the number that still exist: a
+    /// deleted host's entry used to stay forever. Swept by [`AgentRateLimits::prune`].
     last_poll: Mutex<HashMap<String, Instant>>,
+    /// Checks since the last sweep, so pruning costs nothing on the common path.
+    since_prune: AtomicUsize,
 }
+
+/// Checks between sweeps of the per-host maps.
+const PRUNE_EVERY: usize = 512;
+
+/// How long a host's last-poll entry outlives its last poll. Well past any tier's poll
+/// interval, so a live agent's entry is never dropped out from under it and handed a free
+/// poll; short enough that a deleted or decommissioned host stops costing anything.
+const LAST_POLL_TTL: Duration = Duration::from_secs(3_600);
 
 impl AgentRateLimits {
     pub fn new() -> Self {
@@ -41,6 +55,7 @@ impl AgentRateLimits {
             inner: Arc::new(AgentRateLimitsInner {
                 by_tier: std::sync::RwLock::new(HashMap::new()),
                 last_poll: Mutex::new(HashMap::new()),
+                since_prune: AtomicUsize::new(0),
             }),
         }
     }
@@ -59,12 +74,48 @@ impl AgentRateLimits {
         limiter
     }
 
+    /// Drop per-host state for hosts that have gone quiet, and keys whose quota has fully
+    /// replenished. Both maps are keyed on hosts, so they are bounded by the fleet — but a
+    /// deleted host's entries used to outlive it for the life of the process.
+    pub fn prune(&self) {
+        for limiter in self.inner.by_tier.read().expect("rl lock").values() {
+            limiter.retain_recent();
+        }
+        let cutoff = Instant::now() - LAST_POLL_TTL;
+        self.inner
+            .last_poll
+            .lock()
+            .expect("poll map lock")
+            .retain(|_, seen| *seen > cutoff);
+    }
+
+    fn maybe_prune(&self) {
+        if self.inner.since_prune.fetch_add(1, Ordering::Relaxed) + 1 >= PRUNE_EVERY {
+            self.inner.since_prune.store(0, Ordering::Relaxed);
+            self.prune();
+        }
+    }
+
+    /// Entries currently held across the per-host maps.
+    pub fn tracked_keys(&self) -> usize {
+        let limiters: usize = self
+            .inner
+            .by_tier
+            .read()
+            .expect("rl lock")
+            .values()
+            .map(|l| l.len())
+            .sum();
+        limiters + self.inner.last_poll.lock().expect("poll map lock").len()
+    }
+
     pub fn check_request(
         &self,
         tier: &fleet_core::tier::TierLimits,
         tenant_id: i64,
         host_id: &str,
     ) -> Result<(), u32> {
+        self.maybe_prune();
         let limiter = self.limiter_for_tier(tier);
         let key = (tenant_id, host_id.to_owned());
         match limiter.check_key(&key) {
