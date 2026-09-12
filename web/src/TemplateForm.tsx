@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  Button,
   FormControlLabel,
   FormHelperText,
   IconButton,
@@ -29,7 +30,8 @@ import {
   tableRows,
   tableSetRow,
   TemplateField,
-  validTableKey,
+  validTableRowKey,
+  validTableRowValue,
 } from "./templates";
 
 type Props = {
@@ -121,7 +123,11 @@ function OptionalShell({
   );
 }
 
-/** Editable rows of a section: rename, edit the command, delete, add from presets. */
+/** Sentinel value of the add dropdown's "Custom…" entry (presets use their index). */
+const CUSTOM_ROW = "custom";
+
+/** Editable rows of a section: rename, edit the value, delete, add from presets — or,
+ *  when the field allows it, type both halves of a new row in a small form first. */
 function TableField({
   field,
   ini,
@@ -133,6 +139,20 @@ function TableField({
 }) {
   const rows = tableRows(ini, field);
   const taken = new Set(rows.map((r) => r.key));
+  const [customOpen, setCustomOpen] = useState(false);
+  const [customKey, setCustomKey] = useState("");
+  const [customValue, setCustomValue] = useState("");
+  const keyTrim = customKey.trim();
+  const valueTrim = customValue.trim();
+  const customKeyOk = validTableRowKey(field, keyTrim) && !taken.has(keyTrim);
+  const customValueOk = valueTrim !== "" && validTableRowValue(field, valueTrim);
+  const addCustom = () => {
+    if (!customKeyOk || !customValueOk) return;
+    onChange(tableAddRow(ini, field, { label: "", key: keyTrim, value: valueTrim }));
+    setCustomKey("");
+    setCustomValue("");
+    setCustomOpen(false);
+  };
   return (
     <div>
       <Typography variant="subtitle2">{field.label}</Typography>
@@ -140,8 +160,8 @@ function TableField({
       <Table size="small" sx={{ mb: 1 }}>
         <TableHead>
           <TableRow>
-            <TableCell sx={{ width: "14rem" }}>Name</TableCell>
-            <TableCell>Command</TableCell>
+            <TableCell sx={{ width: "14rem" }}>{field.keyLabel ?? "Name"}</TableCell>
+            <TableCell>{field.valueLabel ?? "Command"}</TableCell>
             <TableCell sx={{ width: "3rem" }} />
           </TableRow>
         </TableHead>
@@ -150,7 +170,7 @@ function TableField({
             <TableRow>
               <TableCell colSpan={3}>
                 <Typography variant="body2" color="text.secondary">
-                  No checks yet — add one below.
+                  {field.emptyText ?? "No checks yet — add one below."}
                 </Typography>
               </TableCell>
             </TableRow>
@@ -161,7 +181,9 @@ function TableField({
                 <CommittedTextField
                   value={r.key}
                   monospace
-                  validate={(v) => v === r.key || (validTableKey(v) && !taken.has(v))}
+                  validate={(v) =>
+                    v === r.key || (validTableRowKey(field, v.trim()) && !taken.has(v.trim()))
+                  }
                   onCommit={(v) => onChange(tableRenameRow(ini, field, r.key, v))}
                 />
               </TableCell>
@@ -169,11 +191,12 @@ function TableField({
                 <CommittedTextField
                   value={r.value}
                   monospace
+                  validate={(v) => validTableRowValue(field, v.trim())}
                   onCommit={(v) => onChange(tableSetRow(ini, field, r.key, v))}
                 />
               </TableCell>
               <TableCell sx={{ verticalAlign: "top" }}>
-                <Tooltip title="Remove this check">
+                <Tooltip title="Remove this row">
                   <IconButton
                     size="small"
                     onClick={() => onChange(tableRemoveRow(ini, field, r.key))}
@@ -189,25 +212,85 @@ function TableField({
       <TextField
         select
         size="small"
-        label="Add check"
+        label={field.addLabel ?? "Add check"}
         value=""
         sx={{ minWidth: "18rem" }}
         onChange={(e) => {
+          if (e.target.value === CUSTOM_ROW) {
+            setCustomOpen(true);
+            return;
+          }
           const preset = field.presets[Number(e.target.value)];
           if (preset) onChange(tableAddRow(ini, field, preset));
         }}
       >
         {field.presets.map((p, i) => (
-          <MenuItem key={i} value={String(i)}>
+          <MenuItem key={i} value={String(i)} disabled={field.uniqueKeys && taken.has(p.key)}>
             {p.label}
-            {taken.has(p.key) && (
+            {taken.has(p.key) && !field.uniqueKeys && (
               <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1 }}>
                 (again)
               </Typography>
             )}
           </MenuItem>
         ))}
+        {field.custom && (
+          <MenuItem key={CUSTOM_ROW} value={CUSTOM_ROW}>
+            Custom…
+          </MenuItem>
+        )}
       </TextField>
+      {field.custom && customOpen && (
+        <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mt: 1.5 }} alignItems="flex-start">
+          <TextField
+            size="small"
+            label={field.custom.keyLabel}
+            value={customKey}
+            autoFocus
+            onChange={(e) => setCustomKey(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") addCustom();
+            }}
+            error={keyTrim !== "" && !customKeyOk}
+            helperText={
+              keyTrim !== "" && taken.has(keyTrim) ? "Already listed." : field.custom.keyHelp
+            }
+            slotProps={{ input: { sx: { fontFamily: "monospace" } } }}
+            sx={{ minWidth: "16rem" }}
+          />
+          <TextField
+            size="small"
+            label={field.custom.valueLabel}
+            value={customValue}
+            onChange={(e) => setCustomValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") addCustom();
+            }}
+            error={valueTrim !== "" && !customValueOk}
+            helperText={field.custom.valueHelp}
+            slotProps={{ input: { sx: { fontFamily: "monospace" } } }}
+            sx={{ minWidth: "16rem" }}
+          />
+          <Button
+            variant="contained"
+            size="medium"
+            disabled={!customKeyOk || !customValueOk}
+            onClick={addCustom}
+          >
+            Add
+          </Button>
+          <Button
+            size="medium"
+            onClick={() => {
+              setCustomOpen(false);
+              setCustomKey("");
+              setCustomValue("");
+            }}
+          >
+            Cancel
+          </Button>
+        </Stack>
+      )}
     </div>
   );
 }

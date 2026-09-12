@@ -96,6 +96,31 @@ export type TemplateField =
       presets: TablePreset[];
       help?: string;
       when?: FieldWhen;
+      /** Column headings; default "Name" / "Command" (the check-table origin of this
+       *  field). Other uses of a `key = value` section rename them. */
+      keyLabel?: string;
+      valueLabel?: string;
+      /** Label of the add-row dropdown (default "Add check"). */
+      addLabel?: string;
+      /** Shown when the section has no entries (default "No checks yet — add one below."). */
+      emptyText?: string;
+      /** Entry-name rule; defaults to `validTableKey` (safe as an INI key and settings-path
+       *  segment). A section whose keys are foreign identifiers — Windows service names
+       *  like `MSSQL$SQLEXPRESS` — needs its own. */
+      keyPattern?: RegExp;
+      /** Value rule; unrestricted by default. */
+      valuePattern?: RegExp;
+      /** Entry names are identifiers of real things (a service), not labels: a preset whose
+       *  name is already listed is not added again, instead of getting a numeric suffix. */
+      uniqueKeys?: boolean;
+      /** Offer "Custom…" in the add dropdown: a small form where both the entry name and
+       *  its value are typed before the row is inserted. Presets only need a rename. */
+      custom?: {
+        keyLabel: string;
+        valueLabel: string;
+        keyHelp?: string;
+        valueHelp?: string;
+      };
     };
 
 export type TablePreset = {
@@ -112,6 +137,16 @@ export type TablePreset = {
 export const TABLE_KEY_RE = /^[A-Za-z0-9_-]{1,64}$/;
 export function validTableKey(key: string): boolean {
   return TABLE_KEY_RE.test(key) && key !== "default";
+}
+
+/** Whether `key` is acceptable as an entry name of this table (see `keyPattern`). */
+export function validTableRowKey(f: TemplateField & { kind: "table" }, key: string): boolean {
+  return f.keyPattern ? f.keyPattern.test(key) : validTableKey(key);
+}
+
+/** Whether `value` is acceptable in this table (see `valuePattern`). */
+export function validTableRowValue(f: TemplateField & { kind: "table" }, value: string): boolean {
+  return f.valuePattern ? f.valuePattern.test(value) : true;
 }
 
 export type BundleTemplate = {
@@ -227,7 +262,8 @@ export function tableRows(ini: string, f: TemplateField & { kind: "table" }) {
 }
 
 /** Insert a preset (or a blank custom row), deduplicating the name with a numeric
- *  suffix and enabling any modules the check needs. */
+ *  suffix (or, for `uniqueKeys` tables, leaving the document alone) and enabling any
+ *  modules the check needs. */
 export function tableAddRow(
   ini: string,
   f: TemplateField & { kind: "table" },
@@ -235,6 +271,7 @@ export function tableAddRow(
 ): string {
   const existing = new Set(listIniKeys(ini, f.section).map((r) => r.key));
   let key = preset.key;
+  if (f.uniqueKeys && existing.has(key)) return ini;
   for (let n = 2; existing.has(key); n++) key = `${preset.key}_${n}`;
   let next = setIniValue(ini, f.section, key, preset.value);
   for (const m of preset.modules ?? []) next = setIniValue(next, "/modules", m, "enabled");
@@ -248,7 +285,7 @@ export function tableRenameRow(
   newKey: string,
 ): string {
   const key = newKey.trim();
-  if (key === oldKey || !validTableKey(key)) return ini;
+  if (key === oldKey || !validTableRowKey(f, key)) return ini;
   if (listIniKeys(ini, f.section).some((r) => r.key === key)) return ini;
   return renameIniKey(ini, f.section, oldKey, key);
 }
@@ -295,6 +332,72 @@ function aliasField(id: string, label: string, help?: string): TemplateField {
     valueLabel: "command",
   };
 }
+
+/** A Windows service short name or a systemd unit name: `MSSQL$SQLEXPRESS`, `php8.2-fpm`,
+ *  `getty@tty1`. No whitespace or path separators, since the name is written as an INI key. */
+export const SERVICE_NAME_RE = /^[A-Za-z0-9_.@$:+-]{1,128}$/;
+
+/** A host-tag name as group selectors will reference it. */
+export const TAG_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+
+/** Windows services people commonly want a host tag for: short names as `sc query` and
+ *  the service-tags section expect them. Every preset publishes its own tag — the agent
+ *  processes entries in name order and a stopped service removes its tag, so two services
+ *  sharing one tag would fight over it. */
+const WINDOWS_SERVICE_PRESETS: TablePreset[] = [
+  { label: "SQL Server (default instance)", key: "MSSQLSERVER", value: "sql-server" },
+  { label: "SQL Server Express", key: "MSSQL$SQLEXPRESS", value: "sql-server-express" },
+  { label: "SQL Server Agent", key: "SQLSERVERAGENT", value: "sql-server-agent" },
+  { label: "IIS (World Wide Web Publishing)", key: "W3SVC", value: "iis" },
+  { label: "Exchange Information Store", key: "MSExchangeIS", value: "exchange" },
+  { label: "Active Directory Domain Services", key: "NTDS", value: "active-directory" },
+  { label: "Active Directory Certificate Services", key: "CertSvc", value: "adcs" },
+  { label: "Azure AD Connect sync", key: "ADSync", value: "azure-ad-connect" },
+  { label: "DNS Server", key: "DNS", value: "dns-server" },
+  { label: "DHCP Server", key: "DHCPServer", value: "dhcp-server" },
+  { label: "Hyper-V Virtual Machine Management", key: "vmms", value: "hyper-v" },
+  { label: "Failover Clustering", key: "ClusSvc", value: "failover-cluster" },
+  { label: "Print Spooler", key: "Spooler", value: "print-server" },
+  { label: "WSUS", key: "WsusService", value: "wsus" },
+  { label: "Veeam Backup Service", key: "VeeamBackupSvc", value: "veeam" },
+  { label: "Apache HTTP Server", key: "Apache2.4", value: "apache" },
+  { label: "nginx", key: "nginx", value: "nginx" },
+  { label: "MySQL 8", key: "MySQL80", value: "mysql" },
+  { label: "PostgreSQL 16", key: "postgresql-x64-16", value: "postgres" },
+  { label: "MongoDB", key: "MongoDB", value: "mongodb" },
+  { label: "Redis", key: "Redis", value: "redis" },
+  { label: "RabbitMQ", key: "RabbitMQ", value: "rabbitmq" },
+  { label: "Elasticsearch", key: "elasticsearch-service-x64", value: "elasticsearch" },
+  { label: "Apache Tomcat 9", key: "Tomcat9", value: "tomcat" },
+  { label: "Jenkins", key: "jenkins", value: "jenkins" },
+  { label: "Docker Engine", key: "docker", value: "docker" },
+];
+
+/** systemd units, by the names the common distributions ship. */
+const LINUX_SERVICE_PRESETS: TablePreset[] = [
+  { label: "PostgreSQL", key: "postgresql", value: "postgres" },
+  { label: "MySQL", key: "mysql", value: "mysql" },
+  { label: "MariaDB", key: "mariadb", value: "mariadb" },
+  { label: "nginx", key: "nginx", value: "nginx" },
+  { label: "Apache (Debian/Ubuntu: apache2)", key: "apache2", value: "apache" },
+  { label: "Apache (RHEL/Fedora: httpd)", key: "httpd", value: "httpd" },
+  { label: "HAProxy", key: "haproxy", value: "haproxy" },
+  { label: "Redis (redis-server)", key: "redis-server", value: "redis" },
+  { label: "MongoDB (mongod)", key: "mongod", value: "mongodb" },
+  { label: "RabbitMQ", key: "rabbitmq-server", value: "rabbitmq" },
+  { label: "Elasticsearch", key: "elasticsearch", value: "elasticsearch" },
+  { label: "Apache Tomcat", key: "tomcat", value: "tomcat" },
+  { label: "Jenkins", key: "jenkins", value: "jenkins" },
+  { label: "Docker Engine", key: "docker", value: "docker" },
+  { label: "containerd", key: "containerd", value: "containerd" },
+  { label: "Kubernetes node (kubelet)", key: "kubelet", value: "kubernetes" },
+  { label: "k3s", key: "k3s", value: "k3s" },
+  { label: "BIND DNS (Debian/Ubuntu: bind9)", key: "bind9", value: "bind9" },
+  { label: "BIND DNS (RHEL/Fedora: named)", key: "named", value: "named" },
+  { label: "Samba (smbd)", key: "smbd", value: "samba" },
+  { label: "NFS server", key: "nfs-server", value: "nfs" },
+  { label: "OpenSSH server", key: "sshd", value: "sshd" },
+];
 
 /** Channels NSClient modules listen on — the possible targets of a scheduled check.
  *  Values are the module defaults from the reference docs. */
@@ -417,6 +520,82 @@ alias_services = check_service "exclude=clr_optimization_v4.0.30319_32" "exclude
 ; Watch specific services/processes — adjust to your host:
 ; alias_service_spooler = check_service service=Spooler
 ; alias_process_myapp = check_process process=myapp.exe "warn=working_set > 500m" "crit=working_set > 1g"
+`,
+  },
+  {
+    id: "detect-services",
+    title: "Detect installed services",
+    category: "System health",
+    description:
+      "Publish a host tag for each service you care about (SQL Server, IIS, PostgreSQL, …) " +
+      "so groups can select hosts by what runs on them. Assign this bundle broadly; the " +
+      "tags then drive which application bundles each host receives.",
+    fields: [
+      {
+        kind: "table",
+        id: "windows_services",
+        label: "Windows services",
+        section: "/settings/system/windows/service-tags",
+        help:
+          "Each row maps a Windows service (its short name, as in services.msc) to the tag " +
+          "to publish. While the service is running the host carries <tag> = enabled; when " +
+          "it is stopped or absent the tag is removed. Give every service its own tag. " +
+          "SQL Server is also detected from the registry on every Windows host as " +
+          "sqlserver = detected, running or not.",
+        keyLabel: "Service",
+        valueLabel: "Tag",
+        addLabel: "Add service",
+        emptyText: "No services yet — add one below.",
+        keyPattern: SERVICE_NAME_RE,
+        valuePattern: TAG_NAME_RE,
+        uniqueKeys: true,
+        custom: {
+          keyLabel: "Service name",
+          valueLabel: "Tag",
+          keyHelp: "Short name, e.g. MSSQL$SQLEXPRESS — not the display name.",
+          valueHelp: "Letters, digits, - _ . — e.g. sql-server.",
+        },
+        presets: WINDOWS_SERVICE_PRESETS,
+      },
+      {
+        kind: "table",
+        id: "linux_services",
+        label: "Linux systemd units",
+        section: "/settings/system/unix/service-tags",
+        help:
+          "Same idea for Linux: unit name (without .service) to tag. Unit names vary by " +
+          "distribution — apache2 on Debian/Ubuntu is httpd on RHEL — so add the one your " +
+          "hosts actually use.",
+        keyLabel: "Unit",
+        valueLabel: "Tag",
+        addLabel: "Add unit",
+        emptyText: "No units yet — add one below.",
+        keyPattern: SERVICE_NAME_RE,
+        valuePattern: TAG_NAME_RE,
+        uniqueKeys: true,
+        custom: {
+          keyLabel: "Unit name",
+          valueLabel: "Tag",
+          keyHelp: "As systemctl knows it, e.g. postgresql or php8.2-fpm.",
+          valueHelp: "Letters, digits, - _ . — e.g. postgres.",
+        },
+        presets: LINUX_SERVICE_PRESETS,
+      },
+    ],
+    ini: `; Turn "what runs here" into host tags. Each entry is service = tag; the agent
+; publishes tag = enabled while the service is running and removes it otherwise, so a
+; group selector like sql-server = enabled follows reality without anyone editing tags.
+; Windows hosts additionally report sqlserver = detected when SQL Server is installed.
+[/modules]
+CheckSystem = enabled
+
+[/settings/system/windows/service-tags]
+; MSSQLSERVER = sql-server
+; W3SVC = iis
+
+[/settings/system/unix/service-tags]
+; postgresql = postgres
+; nginx = nginx
 `,
   },
   {
