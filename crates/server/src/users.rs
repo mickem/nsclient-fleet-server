@@ -128,9 +128,6 @@ pub async fn invite(
         }
     };
 
-    // An address in PLATFORM_ADMIN_EMAILS that arrives by invitation rather than signup.
-    crate::platform_admin_bootstrap(&state, &user).await;
-
     if let Err(e) = crate::auth::handlers::issue_and_send_link(
         &state,
         &user.email,

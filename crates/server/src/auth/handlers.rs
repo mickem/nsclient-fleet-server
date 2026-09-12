@@ -181,10 +181,6 @@ pub async fn signup(
         }
     };
 
-    // A fresh install where the operator set PLATFORM_ADMIN_EMAILS and then signed up: the
-    // startup pass found no account for that address, so the grant happens here instead.
-    crate::platform_admin_bootstrap(&state, &user).await;
-
     if let Err(e) = issue_and_send_link(&state, &user.email, tenant.id, user.id, addr).await {
         tracing::error!(error = %e, "magic link send failed");
     }
@@ -536,18 +532,26 @@ async fn issue_session_cookie(
     tenant_id: i64,
     user_id: i64,
 ) -> Response {
-    match UserRepo::new(&state.db).get(tenant_id, user_id).await {
+    let user = match UserRepo::new(&state.db).get(tenant_id, user_id).await {
         Ok(Some(u)) if u.is_blocked() => {
             tracing::info!(user_id, "sign-in refused: account blocked");
             return (StatusCode::FORBIDDEN, "this account has been blocked").into_response();
         }
-        Ok(Some(_)) => {}
+        Ok(Some(u)) => u,
         Ok(None) => return (StatusCode::UNAUTHORIZED, "no such account").into_response(),
         Err(e) => {
             tracing::error!(error = %e, "sign-in user lookup failed");
             return (StatusCode::INTERNAL_SERVER_ERROR, "sign-in failed").into_response();
         }
-    }
+    };
+
+    // Here, and not at row creation. Reaching this point means the address was proven —
+    // a redeemed magic link, or the on-prem password. Granting at creation meant a tenant
+    // admin could invite a listed address into their own tenant and have the flag land on a
+    // row they control; nobody gained a privilege they should not have, but the real
+    // operator's later signup was then refused as a duplicate and their sign-in put them in
+    // the attacker's tenant as a view-only member, where they could be deleted.
+    crate::platform_admin_bootstrap(state, &user).await;
 
     let token = random_token();
     let hash = hash_token(&token);

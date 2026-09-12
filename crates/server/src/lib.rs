@@ -164,11 +164,19 @@ pub async fn ensure_platform_admins(db: &Db, cfg: &Config) -> anyhow::Result<()>
     Ok(())
 }
 
-/// Grant the flag to a user who has just been created, if their address is in the bootstrap
+/// Grant the flag to a user who has just *signed in*, if their address is in the bootstrap
 /// list. This is what makes `PLATFORM_ADMIN_EMAILS` work on a brand-new install, where the
-/// operator sets the variable and *then* signs up.
+/// operator sets the variable and then signs up.
+///
+/// Called from `issue_session_cookie` — the one place a session is minted — and deliberately
+/// not at row creation. A row is created by whoever asked for it; a session means the
+/// address was proven, by a redeemed magic link or the on-prem password. See the call site
+/// for what granting at creation allowed a tenant admin to do.
 pub(crate) async fn platform_admin_bootstrap(state: &AppState, user: &fleet_core::user::User) {
     if !state.config.is_bootstrap_platform_admin(&user.email) {
+        return;
+    }
+    if user.is_platform_admin {
         return;
     }
     match UserRepo::new(&state.db)
@@ -178,7 +186,7 @@ pub(crate) async fn platform_admin_bootstrap(state: &AppState, user: &fleet_core
         Ok(_) => tracing::info!(
             email = %user.email,
             user_id = user.id,
-            "platform admin granted from PLATFORM_ADMIN_EMAILS at account creation"
+            "platform admin granted from PLATFORM_ADMIN_EMAILS on sign-in"
         ),
         Err(e) => tracing::error!(error = %e, "platform admin bootstrap failed"),
     }

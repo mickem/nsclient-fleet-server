@@ -1,0 +1,13 @@
+-- One account per address, across the whole install.
+--
+-- Uniqueness was enforced in application code only (`UserRepo::find_by_email`, which is not
+-- tenant-scoped), while the schema's UNIQUE was per tenant. That gap mattered because
+-- `PLATFORM_ADMIN_EMAILS` is matched by address: a tenant admin who learned a listed address
+-- could invite it into their own tenant first, and the real operator's later signup was then
+-- refused as a duplicate. Making the database agree with the code closes the race rather than
+-- relying on two callers both remembering to check.
+--
+-- If this migration fails with a uniqueness error, the database already holds the same
+-- address in more than one tenant. That cannot happen through the API, so resolve it by hand
+-- — decide which row is real, delete the other — and restart. Do not drop the index.
+CREATE UNIQUE INDEX idx_users_email_global ON users(email);

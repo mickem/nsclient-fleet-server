@@ -22,6 +22,12 @@ impl Drop for TestServer {
 }
 
 async fn start() -> TestServer {
+    start_with(|_| {}).await
+}
+
+/// As [`start`], with a chance to adjust the config first — for the handful of behaviours
+/// that only exist under a particular setting.
+async fn start_with(adjust: impl FnOnce(&mut fleet_server::config::Config)) -> TestServer {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
 
@@ -29,7 +35,9 @@ async fn start() -> TestServer {
     let db = fleet_storage::open(&db_path).await.unwrap();
     fleet_storage::run_migrations(&db.write).await.unwrap();
 
-    let cfg = test_config(db_path);
+    let mut cfg = test_config(db_path);
+    adjust(&mut cfg);
+    let cfg = cfg;
     let (mtls_cert_pem, mtls_key_pem) =
         fleet_server::mtls::generate_self_signed_server("127.0.0.1").unwrap();
     let email = fleet_server::auth::email::EmailSender::from_config(cfg.smtp.as_ref()).unwrap();
@@ -224,6 +232,83 @@ async fn hsts_is_not_sent_when_we_are_not_the_tls_terminator() {
         .await
         .unwrap();
     assert!(r.headers().get("strict-transport-security").is_none());
+}
+
+/// The flag follows a proven address, not a created row.
+///
+/// Granting at row creation let a tenant admin invite a listed address into their own
+/// tenant and have the flag land on a row they controlled. Nobody gained a privilege they
+/// should not have — but the real operator's later signup was then refused as a duplicate,
+/// and signing in put them in the attacker's tenant as a view-only member.
+#[tokio::test]
+async fn the_platform_admin_flag_waits_for_a_proven_sign_in() {
+    let s = start_with(|cfg| {
+        cfg.platform_admin_emails = vec!["ops@vendor.example".to_string()];
+    })
+    .await;
+
+    let flag = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT is_platform_admin FROM users WHERE email = 'ops@vendor.example'",
+        )
+        .fetch_one(&s.db.read)
+        .await
+        .unwrap()
+    };
+
+    // Someone else creates the row first — an invitation into their tenant, modelled here
+    // as the row creation that invitation performs.
+    let t = TenantRepo::new(&s.db)
+        .create("attacker", "Attacker", "free", None)
+        .await
+        .unwrap();
+    let u = UserRepo::new(&s.db)
+        .create(t.id, "ops@vendor.example", fleet_core::user::Role::ViewOnly)
+        .await
+        .unwrap();
+    assert_eq!(flag().await, 0, "creating the row must not grant the flag");
+
+    // Proving the address does grant it.
+    let c = client();
+    let token = "test-token-abcdefghij";
+    MagicLinkRepo::new(&s.db)
+        .create(
+            &hash_token(token),
+            t.id,
+            u.id,
+            fleet_core::time::now_unix() + 600,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        complete_exchange(&c, &s.base_url, token).await.status(),
+        303
+    );
+    assert_eq!(flag().await, 1, "a proven sign-in grants the flag");
+}
+
+/// The application check for a duplicate address is not tenant-scoped, but the schema's
+/// UNIQUE was — so the two disagreed, and closing that gap is what makes the check above a
+/// guarantee rather than a convention.
+#[tokio::test]
+async fn the_same_address_cannot_exist_in_two_tenants() {
+    let s = start().await;
+    let tenants = TenantRepo::new(&s.db);
+    let users = UserRepo::new(&s.db);
+    let a = tenants.create("a", "A", "free", None).await.unwrap();
+    let b = tenants.create("b", "B", "free", None).await.unwrap();
+
+    users
+        .create(a.id, "ops@vendor.example", fleet_core::user::Role::Owner)
+        .await
+        .unwrap();
+    assert!(
+        users
+            .create(b.id, "ops@vendor.example", fleet_core::user::Role::Owner)
+            .await
+            .is_err(),
+        "the database must refuse the same address in a second tenant"
+    );
 }
 
 #[tokio::test]
