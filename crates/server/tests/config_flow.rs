@@ -663,6 +663,56 @@ async fn bad_selector_rejected() {
     assert_eq!(r.status(), 400);
 }
 
+/// The server never extracts, so traversal is an agent-side risk — but a hand-crafted base
+/// bundle used to carry `../../` entries straight through compose into output we sign.
+#[tokio::test]
+async fn a_zip_entry_that_escapes_the_archive_is_refused() {
+    let s = start().await;
+    signup_login(&s, "escape", "escape@example.com").await;
+
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        use std::io::Write;
+        let mut w = zip::ZipWriter::new(&mut cursor);
+        let opts = zip::write::SimpleFileOptions::default();
+        w.start_file("config.json", opts).unwrap();
+        w.write_all(b"{}").unwrap();
+        w.start_file("../../etc/cron.d/pwn", opts).unwrap();
+        w.write_all(b"* * * * * root sh -c :").unwrap();
+        w.finish().unwrap();
+    }
+
+    let form = reqwest::multipart::Form::new()
+        .text("name", "escapee")
+        .text("version", "1.0.0")
+        .part(
+            "bundle",
+            reqwest::multipart::Part::bytes(cursor.into_inner()).file_name("escapee.zip"),
+        );
+    let id = s
+        .cookie_jar
+        .post(format!("{}/api/bundles", s.base_url))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let r = s
+        .cookie_jar
+        .get(format!("{}/api/bundles/{}/config", s.base_url, id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 409);
+    assert!(r.text().await.unwrap().contains("escapes the archive"));
+}
+
 #[tokio::test]
 async fn compose_edit_next_version_preserves_scripts() {
     let s = start().await;

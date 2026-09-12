@@ -584,21 +584,80 @@ fn build_zip(
     Ok(cursor.into_inner())
 }
 
+/// Most a bundle may expand to across all its entries.
+///
+/// Bundles carry configuration, scripts and small assets; the largest tier allows a 250 MB
+/// upload, and nothing legitimate inflates far past that. The cap is on the *total*, so a
+/// thousand small entries cannot add up to the same attack a single large one would.
+const MAX_INFLATED_TOTAL: u64 = 512 * 1024 * 1024;
+
+/// Most entries we will walk. A zip can declare millions of them in a few kilobytes.
+const MAX_ZIP_ENTRIES: usize = 10_000;
+
+/// Read a bundle zip into memory, refusing anything that would cost more than it should.
+///
+/// Three separate limits, because a zip's header is written by whoever made the file and
+/// none of it is evidence of anything:
+///
+/// - the output buffer is never pre-sized from the declared size. `Vec::with_capacity` on
+///   an attacker-chosen `u64` is an allocation failure, and an allocation failure aborts
+///   the process — so a crafted header was a remote kill, reachable through the config-read
+///   endpoint by any tenant session.
+/// - inflation is read through `take`, against a budget shared by every entry, so the
+///   compression ratio cannot turn a 2 MiB upload into gigabytes of resident memory.
+/// - entry names must stay inside the archive. The server never extracts, so traversal is
+///   an agent-side risk rather than ours, but propagating `../../etc/…` from a hand-crafted
+///   upload into a composed bundle we sign makes it our problem.
+///
+/// Upload does not parse, so a crafted file is stored first and opened later by whoever
+/// reads the config — which is why this is a refusal and not a panic.
 fn read_zip_entries(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
+    read_zip_entries_within(bytes, MAX_INFLATED_TOTAL)
+}
+
+/// As [`read_zip_entries`], with the budget spelled out so tests can exercise the refusal
+/// without actually inflating half a gigabyte.
+fn read_zip_entries_within(bytes: &[u8], mut budget: u64) -> Result<Vec<(String, Vec<u8>)>> {
     use std::io::Read;
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
-    let mut out = Vec::with_capacity(archive.len());
+    if archive.len() > MAX_ZIP_ENTRIES {
+        anyhow::bail!(
+            "bundle declares {} entries (limit {MAX_ZIP_ENTRIES})",
+            archive.len()
+        );
+    }
+
+    let mut out = Vec::with_capacity(archive.len().min(1024));
     for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
+        let file = archive.by_index(i)?;
         if file.is_dir() {
             continue;
         }
-        let mut name = file.name().replace('\\', "/");
-        if let Some(stripped) = name.strip_prefix("./") {
-            name = stripped.to_string();
+
+        // `enclosed_name` is the library's own answer to "is this name safe to join onto a
+        // directory": it rejects absolute paths, parent components and Windows drive
+        // prefixes. Taking it before normalising means we never have to decide which of
+        // those our own normalisation happened to cover.
+        let Some(safe) = file.enclosed_name() else {
+            anyhow::bail!("bundle entry {:?} escapes the archive", file.name());
+        };
+        let name = safe
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        if name.is_empty() {
+            continue;
         }
-        let mut data = Vec::with_capacity(file.size() as usize);
-        file.read_to_end(&mut data)?;
+
+        // Read against the shared budget, one byte past it so overrun is detectable rather
+        // than a silent truncation that we would then sign.
+        let mut data = Vec::new();
+        let read = file.take(budget + 1).read_to_end(&mut data)? as u64;
+        if read > budget {
+            anyhow::bail!("bundle expands past {} MiB", budget / (1024 * 1024));
+        }
+        budget -= read;
         out.push((name, data));
     }
     Ok(out)
@@ -958,4 +1017,93 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         s.push_str(&format!("{b:02x}"));
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn zip_of(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut cursor);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for (name, data) in entries {
+                w.start_file(*name, opts).unwrap();
+                w.write_all(data).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        cursor.into_inner()
+    }
+
+    #[test]
+    fn inflation_is_capped_across_all_entries_together() {
+        // Four megabytes of zeros deflate to a few kilobytes. A per-entry cap would let a
+        // thousand of these add up to the same attack, so the budget is shared.
+        let blob = zip_of(&[
+            ("a.bin", vec![0u8; 4 * 1024 * 1024]),
+            ("b.bin", vec![0u8; 4 * 1024 * 1024]),
+        ]);
+        assert!(blob.len() < 64 * 1024, "the crafted input is small");
+
+        // Either entry fits on its own; together they do not.
+        read_zip_entries_within(&blob, 6 * 1024 * 1024)
+            .expect_err("two 4 MiB entries must not pass a 6 MiB budget");
+        let ok = read_zip_entries_within(&blob, 16 * 1024 * 1024).expect("within budget");
+        assert_eq!(ok.len(), 2);
+    }
+
+    #[test]
+    fn a_declared_size_never_becomes_an_allocation() {
+        // The output buffer used to be pre-sized from the zip header. A crafted entry
+        // declaring a terabyte was therefore an allocation failure, and an allocation
+        // failure aborts the process — a remote kill through the config-read endpoint.
+        // We cannot assert "did not abort" directly, so assert the behaviour that replaced
+        // it: the refusal is by bytes actually read, and it is an error, not a panic.
+        let blob = zip_of(&[("pad.bin", vec![7u8; 1024 * 1024])]);
+        let err = read_zip_entries_within(&blob, 1024).unwrap_err();
+        assert!(
+            err.to_string().contains("expands past"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn entries_that_escape_the_archive_are_refused() {
+        for name in ["../../etc/cron.d/pwn", "/etc/shadow", "a/../../b"] {
+            let blob = zip_of(&[(name, b"x".to_vec())]);
+            let err = read_zip_entries_within(&blob, 1024 * 1024)
+                .unwrap_err_or_ok_names()
+                .unwrap_or_else(|| panic!("{name} should be refused"));
+            assert!(err.contains("escapes the archive"), "{name}: {err}");
+        }
+    }
+
+    /// Small helper so the loop above reads as "this must be refused" rather than as
+    /// unwrapping in two directions.
+    trait RefusalExt {
+        fn unwrap_err_or_ok_names(self) -> Option<String>;
+    }
+    impl RefusalExt for Result<Vec<(String, Vec<u8>)>> {
+        fn unwrap_err_or_ok_names(self) -> Option<String> {
+            match self {
+                Ok(_) => None,
+                Err(e) => Some(e.to_string()),
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_entries_survive_normalisation() {
+        let blob = zip_of(&[
+            ("config.json", b"{}".to_vec()),
+            ("scripts/check_disk.ps1", b"Write-Output 'ok'".to_vec()),
+        ]);
+        let entries = read_zip_entries_within(&blob, 1024 * 1024).unwrap();
+        let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["config.json", "scripts/check_disk.ps1"]);
+    }
 }

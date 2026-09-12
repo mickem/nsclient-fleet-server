@@ -225,8 +225,17 @@ pub fn router(state: AppState) -> Router {
             "/api/groups/:id/bundles/:bundle_id",
             axum::routing::delete(bundles::unassign_from_group),
         )
+        // The body limit is scoped to this one route on purpose. axum's 2 MiB default
+        // applied to the upload, so every tier limit above 2 MB was unreachable — the
+        // body was refused before the handler that checks the tier ever ran. Raising it
+        // globally would hand the same allowance to every JSON route instead.
         .route("/api/bundles", get(bundles::list))
-        .route("/api/bundles", post(bundles::upload))
+        .route(
+            "/api/bundles",
+            post(bundles::upload).layer(axum::extract::DefaultBodyLimit::max(
+                fleet_core::tier::MAX_BUNDLE_MB_ANY_TIER as usize * 1024 * 1024,
+            )),
+        )
         .route(
             "/api/bundle-key",
             get(bundles::get_bundle_key).put(bundles::set_bundle_key),

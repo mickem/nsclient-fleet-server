@@ -118,3 +118,28 @@ mod tests {
         assert!(lookup("bogus").is_none());
     }
 }
+
+/// The largest `max_bundle_mb` any tier allows.
+///
+/// The bundle upload route needs one fixed ceiling at the transport layer, because the body
+/// is rejected or accepted before a handler exists to look the caller's tenant up. Per-tier
+/// enforcement still happens in the handler; this only has to be no smaller than the most
+/// generous tier, or that tier's limit would be unreachable.
+pub const MAX_BUNDLE_MB_ANY_TIER: u32 = 250;
+
+#[cfg(test)]
+mod ceiling_tests {
+    use super::*;
+
+    #[test]
+    fn the_transport_ceiling_is_not_below_any_tier() {
+        for t in ALL {
+            assert!(
+                t.max_bundle_mb <= MAX_BUNDLE_MB_ANY_TIER,
+                "tier {} allows {} MB, above the transport ceiling",
+                t.name,
+                t.max_bundle_mb
+            );
+        }
+    }
+}
