@@ -1,0 +1,32 @@
+# nsclient-fleet, single-tenant, with a self-signed certificate.
+#
+#   echo "MASTER_KEY=$(openssl rand -base64 32)" > .env
+#   docker compose up -d
+#
+# Keep that .env: MASTER_KEY cannot be recovered, and starting with a different one leaves
+# every tenant CA and host override in the database undecryptable.
+
+services:
+  fleet:
+    image: ghcr.io/mickem/nsclient-fleet:latest
+    container_name: nsclient-fleet
+    restart: unless-stopped
+    environment:
+      MASTER_KEY: ${MASTER_KEY:?set MASTER_KEY in .env — see the header of this file}
+      # The address agents dial and email links point at. Must resolve from outside this
+      # container; it also decides the SAN of the certificate agents pin.
+      BASE_URL: https://fleet.example.com:8443
+      ON_PREM: "true"
+      ON_PREM_ADMIN_EMAIL: admin@example.com
+      ON_PREM_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
+    ports:
+      # One port carries the operator UI and agent mTLS — they are separated by ALPN
+      # inside the process, not by port number.
+      - "8443:8443"
+    volumes:
+      # The database, the bundles, and both server certificates. data/mtls-server.key in
+      # particular is unrecoverable: lose it and every enrolled agent must be re-enrolled.
+      - fleet-data:/data
+
+volumes:
+  fleet-data:

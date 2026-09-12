@@ -97,6 +97,7 @@ fn test_config(db_path: PathBuf) -> fleet_server::config::Config {
         listen_mtls: "127.0.0.1:0".into(),
         agent_mtls_url: "https://127.0.0.1".into(),
         acme: None,
+        tls: None,
         database_path: db_path,
         base_url: "http://localhost".into(),
         on_prem: false,

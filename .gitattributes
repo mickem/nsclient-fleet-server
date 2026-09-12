@@ -1,0 +1,10 @@
+# Normalise line endings in the repository; let git decide on checkout.
+* text=auto
+
+# Except where CRLF actually breaks something. The container entrypoint is run by
+# /bin/sh inside a Linux image: checked out with CRLF on a Windows working copy, a
+# `docker build` from that copy produces an image that dies with
+# "exec /usr/local/bin/entrypoint.sh: no such file or directory" — the shebang line
+# ends in ^M, so the kernel looks for an interpreter that does not exist.
+*.sh        text eol=lf
+Dockerfile  text eol=lf

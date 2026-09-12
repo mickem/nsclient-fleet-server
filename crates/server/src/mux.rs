@@ -8,9 +8,9 @@
 //!
 //! | ClientHello                  | config                          | served by      |
 //! | ---------------------------- | ------------------------------- | -------------- |
-//! | ALPN `acme-tls/1`            | ACME challenge (throwaway cert) | nothing — handshake only |
+//! | ALPN `acme-tls/1`            | ACME challenge (throwaway cert), or dropped when ACME is off | nothing — handshake only |
 //! | ALPN `nsclient-fleet/1`, or agent SNI  | mTLS: client cert **required**, pinned self-signed cert | agent router |
-//! | anything else                | ACME cert, no client cert asked | operator router |
+//! | anything else                | the web cert (ACME or `TLS_CERT`), no client cert asked | operator router |
 //!
 //! Why the agent branch keeps its own self-signed cert rather than sharing the ACME one:
 //! agents pin `mtls_server_cert_pem` from their enroll response and trust nothing else, so
@@ -43,8 +43,13 @@ const ACME_ALPN: &[u8] = b"acme-tls/1";
 /// TLS configs for the two non-agent branches, plus the optional SNI fallback.
 pub struct MuxTls {
     /// Serves the TLS-ALPN-01 challenge certificate. From `AcmeState::challenge_rustls_config`.
-    pub acme_challenge: Arc<ServerConfig>,
-    /// Serves the real certificate to browsers. From `AcmeState::default_rustls_config`.
+    ///
+    /// `None` when the web certificate came from disk instead of Let's Encrypt: there is no
+    /// issuance to answer for, so a client offering `acme-tls/1` is refused rather than
+    /// handed the operator's real certificate under an ALPN it did not ask for.
+    pub acme_challenge: Option<Arc<ServerConfig>>,
+    /// Serves the real certificate to browsers. From `AcmeState::default_rustls_config`, or
+    /// built from `TLS_CERT`/`TLS_KEY`.
     pub web: Arc<ServerConfig>,
     /// Hostname that also routes to the agent branch when a client sends no ALPN.
     /// Belt-and-braces for a TLS stack that can't set ALPN; `None` disables it.
@@ -151,9 +156,16 @@ async fn handle_conn(
 
     match branch {
         Branch::Acme => {
+            let Some(challenge) = tls.acme_challenge.clone() else {
+                tracing::debug!(
+                    ip = %peer_addr.ip(),
+                    "acme-tls/1 offered but ACME is not enabled — dropping"
+                );
+                return Ok(());
+            };
             // Completing the handshake *is* the challenge response. Let's Encrypt reads the
             // certificate we present and hangs up; there is no application data.
-            match start.into_stream(tls.acme_challenge.clone()).await {
+            match start.into_stream(challenge).await {
                 Ok(_) => tracing::info!(ip = %peer_addr.ip(), "served TLS-ALPN-01 challenge"),
                 Err(e) => {
                     tracing::warn!(ip = %peer_addr.ip(), error = %e, "TLS-ALPN-01 handshake failed")

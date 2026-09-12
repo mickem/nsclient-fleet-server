@@ -1,0 +1,178 @@
+name: Publish docker image
+
+# Builds the container image from the binaries attached to a release and pushes it to GHCR
+# as ghcr.io/<owner>/nsclient-fleet.
+#
+# Triggering on `release: published` rather than on the release workflow is deliberate.
+# Every push to main produces a DRAFT release candidate, and a draft has no published
+# artifacts to build from — so this runs only once a human has published something, which
+# is also exactly when the download URLs the Dockerfile uses start resolving.
+#
+# Nothing is compiled here: the image installs the musl binary already attached to the
+# release and checks it against that release's SHA256SUMS. So the container and a VM
+# install run byte-identical code, and re-running this workflow on the same tag rebuilds
+# the same image from the same inputs.
+#
+# A manual run is a rehearsal: it builds both architectures and stops, unless `push` is
+# ticked.
+#
+# First publish only: GHCR creates the package private even from a public repository, so
+# the documented `docker run` will fail for everyone until someone opens the package's
+# settings once and changes its visibility to public.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        type: string
+        description: "Release tag to build, with or without the v prefix (e.g. 0.1.0)"
+        required: true
+      push:
+        type: boolean
+        description: "Push to the registry (otherwise build only)"
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+# Publishing the same tag twice concurrently would have two builds racing to write the
+# same manifest. Queue them instead, and never cancel one midway: a half-pushed multi-arch
+# manifest is worse than a slow one.
+concurrency:
+  group: publish-docker-${{ github.event.release.tag_name || inputs.version }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Everything the later steps need, decided in one place: the version, whether to
+      # push, and the exact tag list. Values arrive as env vars rather than being
+      # interpolated into the script, so nothing from a tag name can be executed as shell
+      # — the same rule release.yml follows.
+      - name: Resolve release identity
+        id: id
+        env:
+          EVENT: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PUSH: ${{ inputs.push }}
+          OWNER: ${{ github.repository_owner }}
+          REGISTRY: ${{ env.REGISTRY }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT" = "release" ]; then
+            raw="$RELEASE_TAG"
+            push=true
+            # A release candidate must never move `latest`: RCs are prereleases built from
+            # main, and `latest` is what an unpinned `docker run` gets.
+            if [ "$PRERELEASE" = "true" ]; then latest=false; else latest=true; fi
+          else
+            raw="$INPUT_VERSION"
+            push="$INPUT_PUSH"
+            latest=false
+          fi
+
+          # Git tags carry the `v`; release titles, the version compiled into the binary
+          # and the asset file names do not. Strip it once, here, so everything downstream
+          # — image tag and build arg alike — speaks the bare version.
+          version="${raw#v}"
+          if [ -z "$version" ]; then
+            echo "::error::No version to build (empty tag or input)" >&2
+            exit 1
+          fi
+
+          # Registry paths must be lowercase; an account or org name need not be.
+          image="${REGISTRY}/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/nsclient-fleet"
+
+          tags="${image}:${version}"
+          if [ "$latest" = "true" ]; then
+            tags="${tags}"$'\n'"${image}:latest"
+          fi
+
+          {
+            echo "version=$version"
+            echo "push=$push"
+            echo "image=${image}:${version}"
+            echo "tags<<EOF"
+            echo "$tags"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "version=$version push=$push latest=$latest"
+          echo "tags:"; echo "$tags"
+
+      # The image is amd64 + arm64; the runner is amd64, so the arm64 leg builds under
+      # emulation. It only has to run a download, a checksum and one `--version`, so the
+      # cost is seconds rather than a cross-compile.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.id.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # One invocation for both platforms: the Dockerfile selects the matching musl asset
+      # from TARGETARCH and verifies it against the release's SHA256SUMS, so nothing here
+      # varies per architecture. FLEET_REPO keeps the download URL pointed at whichever
+      # repository is running this, rather than at a hardcoded upstream.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: docker
+          platforms: linux/amd64,linux/arm64
+          push: ${{ steps.id.outputs.push == 'true' }}
+          build-args: |
+            FLEET_VERSION=${{ steps.id.outputs.version }}
+            FLEET_REPO=${{ github.repository }}
+          tags: ${{ steps.id.outputs.tags }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      # Proves the manifest resolves and that what came back out of the registry is the
+      # build we meant to publish. The runner is amd64, so this exercises that leg only —
+      # the arm64 binary was already checksummed and run inside its own build.
+      - name: Verify the published image
+        if: steps.id.outputs.push == 'true'
+        env:
+          IMAGE: ${{ steps.id.outputs.image }}
+          EXPECTED: nsclient-fleet ${{ steps.id.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$IMAGE"
+          got=$(docker run --rm --pull=always "$IMAGE" nsclient-fleet --version)
+          echo "reported: $got"
+          if [ "$got" != "$EXPECTED" ]; then
+            echo "::error::published image reports '$got', expected '$EXPECTED'" >&2
+            exit 1
+          fi
+
+      - name: Summary
+        if: steps.id.outputs.push == 'true'
+        env:
+          IMAGE: ${{ steps.id.outputs.image }}
+          TAGS: ${{ steps.id.outputs.tags }}
+        run: |
+          {
+            echo "### Published"
+            echo
+            echo '```'
+            echo "$TAGS"
+            echo '```'
+            echo
+            echo "\`docker run --rm $IMAGE nsclient-fleet --version\`"
+          } >> "$GITHUB_STEP_SUMMARY"
