@@ -185,8 +185,14 @@ must offer ALPN `nsclient-fleet/1`; anything that terminates TLS in front of the
 that re-encrypts, an inspecting middlebox, most L7 load balancers) breaks them.
 
 ```bash
-# On a fresh VM, as root
-curl -L https://github.com/mickem/nsclient-fleet-server/releases/latest/download/bootstrap-vm.sh | bash
+# On a fresh VM, as root. Verify the script before running it — it runs as root, and every
+# release asset carries a build provenance attestation so that you can.
+VERSION=v0.1.0
+BASE=https://github.com/mickem/nsclient-fleet-server/releases/download/$VERSION
+curl -fsSLO "$BASE/bootstrap-vm.sh" && curl -fsSLO "$BASE/SHA256SUMS"
+grep ' bootstrap-vm.sh$' SHA256SUMS | sha256sum -c -
+gh attestation verify bootstrap-vm.sh --repo mickem/nsclient-fleet-server
+bash bootstrap-vm.sh
 # then edit /etc/nsclient-fleet/env, point DNS at the VM, and:
 systemctl enable --now nsclient-fleet
 

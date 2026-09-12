@@ -60,23 +60,42 @@ fi
 # The unit file lives next to this script in a checkout, but the documented install is
 # `curl … | bash` — there $0 is "bash" and there is no sibling file, so fall back to
 # pulling the unit from the same release this script came from.
+#
+# A downloaded unit is checked against that release's SHA256SUMS before being installed.
+# Both come from the same origin, so this catches a truncated or corrupted download rather
+# than a compromised release — verifying the *release* is the operator's job, before
+# running this script at all, and the deployment docs say how (`gh attestation verify`).
+# What it does buy is that a half-written unit file never gets installed as root.
 UNIT_DEST=/etc/systemd/system/nsclient-fleet.service
 UNIT_SRC="$(dirname "${BASH_SOURCE[0]:-$0}")/nsclient-fleet.service"
-UNIT_URL="${UNIT_URL:-https://github.com/mickem/nsclient-fleet-server/releases/latest/download/nsclient-fleet.service}"
+RELEASE_BASE="${RELEASE_BASE:-https://github.com/mickem/nsclient-fleet-server/releases/latest/download}"
+UNIT_URL="${UNIT_URL:-$RELEASE_BASE/nsclient-fleet.service}"
+SUMS_URL="${SUMS_URL:-$RELEASE_BASE/SHA256SUMS}"
 
 if [[ -f "$UNIT_SRC" ]]; then
   install -m 644 "$UNIT_SRC" "$UNIT_DEST"
 else
   echo "fetching unit file from $UNIT_URL"
-  tmp="$(mktemp)"
-  trap 'rm -f "$tmp"' EXIT
-  if ! curl -fsSL "$UNIT_URL" -o "$tmp"; then
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+  if ! curl -fsSL "$UNIT_URL" -o "$tmpdir/nsclient-fleet.service"; then
     echo "bootstrap: could not download the systemd unit from $UNIT_URL" >&2
     echo "  Fetch it manually from the repo and install it at $UNIT_DEST," >&2
     echo "  or re-run with UNIT_URL=<url> pointing at nsclient-fleet.service." >&2
     exit 1
   fi
-  install -m 644 "$tmp" "$UNIT_DEST"
+
+  if curl -fsSL "$SUMS_URL" -o "$tmpdir/SHA256SUMS"; then
+    if ! (cd "$tmpdir" && grep ' nsclient-fleet\.service$' SHA256SUMS | sha256sum -c -); then
+      echo "bootstrap: the downloaded unit file does not match $SUMS_URL — refusing to install it." >&2
+      exit 1
+    fi
+  else
+    echo "bootstrap: could not fetch $SUMS_URL — installing the unit unverified." >&2
+    echo "  Older releases do not list it. Check $UNIT_DEST by hand before starting the service." >&2
+  fi
+
+  install -m 644 "$tmpdir/nsclient-fleet.service" "$UNIT_DEST"
 fi
 systemctl daemon-reload
 

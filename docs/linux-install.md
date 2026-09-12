@@ -42,8 +42,23 @@ agents get their own port. One port is the default and the better answer — see
 As root on a fresh host:
 
 ```bash
-curl -L https://github.com/mickem/nsclient-fleet-server/releases/latest/download/bootstrap-vm.sh | bash
+VERSION=v0.1.0
+BASE=https://github.com/mickem/nsclient-fleet-server/releases/download/$VERSION
+
+curl -fsSLO "$BASE/bootstrap-vm.sh"
+curl -fsSLO "$BASE/SHA256SUMS"
+grep ' bootstrap-vm.sh$' SHA256SUMS | sha256sum -c -
+gh attestation verify bootstrap-vm.sh --repo mickem/nsclient-fleet-server
+
+less bootstrap-vm.sh          # it runs as root
+bash bootstrap-vm.sh
 ```
+
+Pin a version rather than tracking `latest`, and verify before running: piping a URL into a
+root shell means whatever that URL serves today is what runs as root today. Every release
+asset carries a build provenance attestation, which is the part that says the file came out
+of this repository's release workflow — a checksum file served from the same origin only
+catches a corrupted download.
 
 That creates the `nsclient-fleet` system user (no shell), the directory tree under
 `/opt/nsclient-fleet`, a template `/etc/nsclient-fleet/env`, and installs the systemd unit.

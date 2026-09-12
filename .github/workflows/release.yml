@@ -276,8 +276,15 @@ jobs:
     if: github.event_name == 'push'
     permissions:
       contents: write
+      # Keyless signing of the build provenance: GitHub mints a short-lived OIDC token for
+      # this job, Sigstore issues a certificate for it, and the attestation records which
+      # workflow at which commit produced each file. `gh attestation verify` then answers
+      # "did this binary come out of this repository's release workflow" — which a checksum
+      # file served from the same origin as the binary cannot.
+      id-token: write
+      attestations: write
     steps:
-      # Only so bootstrap-vm.sh can be attached as an asset.
+      # Only so bootstrap-vm.sh and the unit file can be attached as assets.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -286,12 +293,26 @@ jobs:
           pattern: nsclient-fleet-*
           merge-multiple: true
 
+      # The script and the unit are release assets that get executed and installed as root,
+      # so they belong in the checksum file and in the attestation exactly as much as the
+      # binaries do. They used to be attached without either.
+      - name: Stage the installer assets
+        run: cp scripts/bootstrap-vm.sh scripts/nsclient-fleet.service dist/
+
       - name: Checksums
         working-directory: dist
         run: |
-          # Explicit glob rather than '*' so the checksum file can never list itself.
-          sha256sum nsclient-fleet-* > SHA256SUMS
+          # Explicit names rather than '*' so the checksum file can never list itself.
+          sha256sum nsclient-fleet-* bootstrap-vm.sh nsclient-fleet.service > SHA256SUMS
           cat SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: |
+            dist/nsclient-fleet-*
+            dist/bootstrap-vm.sh
+            dist/nsclient-fleet.service
 
       - name: Attach to release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
@@ -303,12 +324,8 @@ jobs:
           # Pins the RC to the exact commit it was built from: when a draft is published,
           # GitHub creates its tag here rather than at whatever main has drifted to.
           target_commitish: ${{ github.sha }}
-          # bootstrap-vm.sh ships as an asset because the documented one-time VM setup is
-          # `curl -L .../releases/latest/download/bootstrap-vm.sh | bash` — without this it
-          # 404s. The unit file ships alongside it because that piped invocation has no
-          # checkout to copy it from, so the script downloads it from this same release.
-          files: |
-            dist/*
-            scripts/bootstrap-vm.sh
-            scripts/nsclient-fleet.service
+          # dist now holds the binaries, SHA256SUMS, and the two installer assets — see the
+          # staging step above for why those are in there rather than attached from the
+          # checkout directly.
+          files: dist/*
           generate_release_notes: true

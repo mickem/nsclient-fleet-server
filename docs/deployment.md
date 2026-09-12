@@ -279,10 +279,32 @@ platform console, so it can be closed without a redeploy. See [§14](#14-the-pla
 
 ## 6. First-time VM setup
 
+The bootstrap script runs as root, so download it, check where it came from, read it, and
+only then run it. Piping a URL straight into a root shell means whatever that URL serves
+today is what runs as root today.
+
 ```bash
-# As root on a fresh VM
-curl -L https://github.com/mickem/nsclient-fleet-server/releases/latest/download/bootstrap-vm.sh | bash
+# As root on a fresh VM. Pin a version rather than tracking `latest`.
+VERSION=v0.1.0
+BASE=https://github.com/mickem/nsclient-fleet-server/releases/download/$VERSION
+
+curl -fsSLO "$BASE/bootstrap-vm.sh"
+curl -fsSLO "$BASE/SHA256SUMS"
+grep ' bootstrap-vm.sh$' SHA256SUMS | sha256sum -c -
+
+# What the release workflow signed, rather than what this origin is serving right now.
+# Needs the `gh` CLI; skip it only if you have no way to install one.
+gh attestation verify bootstrap-vm.sh --repo mickem/nsclient-fleet-server
+
+less bootstrap-vm.sh          # it is short, and it runs as root
+bash bootstrap-vm.sh
 ```
+
+`SHA256SUMS` covers the binaries, the bootstrap script and the systemd unit, and every one
+of them carries a build provenance attestation naming the workflow and commit that produced
+it. The checksum file is served from the same origin as what it describes, so on its own it
+only catches a corrupted download — the attestation is the part that says the file came out
+of this repository's release workflow.
 
 The script creates the `nsclient-fleet` system user (no shell), lays out `/opt/nsclient-fleet/{,data,data/bundles,data/acme}`
 and `/etc/nsclient-fleet`, installs the systemd unit, and writes a template `/etc/nsclient-fleet/env`.
