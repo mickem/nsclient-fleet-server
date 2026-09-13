@@ -410,16 +410,11 @@ impl EnrolledAgent {
 }
 
 fn parse_certs(pem: &str) -> Result<Vec<Vec<u8>>> {
-    let mut out = Vec::new();
-    let mut rest = pem.as_bytes();
-    while let Some((item, remaining)) =
-        rustls_pemfile::read_one_from_slice(rest).map_err(|e| anyhow!("pem parse: {e:?}"))?
-    {
-        rest = remaining;
-        if let rustls_pemfile::Item::X509Certificate(c) = item {
-            out.push(c.to_vec());
-        }
-    }
+    use rustls::pki_types::pem::PemObject;
+    let out = rustls::pki_types::CertificateDer::pem_slice_iter(pem.as_bytes())
+        .map(|c| c.map(|c| c.as_ref().to_vec()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| anyhow!("pem parse: {e:?}"))?;
     if out.is_empty() {
         Err(anyhow!("no certificates in PEM"))
     } else {
@@ -428,14 +423,8 @@ fn parse_certs(pem: &str) -> Result<Vec<Vec<u8>>> {
 }
 
 fn parse_pkcs8_key(pem: &str) -> Result<Vec<u8>> {
-    let mut rest = pem.as_bytes();
-    while let Some((item, remaining)) =
-        rustls_pemfile::read_one_from_slice(rest).map_err(|e| anyhow!("pem parse: {e:?}"))?
-    {
-        rest = remaining;
-        if let rustls_pemfile::Item::Pkcs8Key(k) = item {
-            return Ok(k.secret_pkcs8_der().to_vec());
-        }
-    }
-    Err(anyhow!("no pkcs8 private key in PEM"))
+    use rustls::pki_types::pem::PemObject;
+    rustls::pki_types::PrivatePkcs8KeyDer::from_pem_slice(pem.as_bytes())
+        .map(|k| k.secret_pkcs8_der().to_vec())
+        .map_err(|e| anyhow!("no pkcs8 private key in PEM: {e:?}"))
 }

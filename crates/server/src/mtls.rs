@@ -6,6 +6,7 @@ use anyhow::{anyhow, Context, Result};
 use axum::Router;
 use hyper::body::Incoming;
 use hyper_util::rt::TokioIo;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
@@ -203,16 +204,13 @@ async fn build_state(db: &Db, server_cert_pem: &str, server_key_pem: &str) -> Re
 }
 
 fn parse_all_cert_pem(pem: &str) -> Result<Vec<Vec<u8>>> {
-    let mut out = Vec::new();
-    let mut rest = pem.as_bytes();
-    while let Some((item, remaining)) =
-        rustls_pemfile::read_one_from_slice(rest).map_err(|e| anyhow!("pem parse: {e:?}"))?
-    {
-        rest = remaining;
-        if let rustls_pemfile::Item::X509Certificate(c) = item {
-            out.push(c.to_vec());
-        }
-    }
+    // `pem_slice_iter` yields only the sections of the requested type, so the "read one,
+    // match on which kind it turned out to be, discard the rest" loop this replaces is gone
+    // — the type asked for *is* the filter.
+    let out = CertificateDer::pem_slice_iter(pem.as_bytes())
+        .map(|c| c.map(|c| c.as_ref().to_vec()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| anyhow!("pem parse: {e:?}"))?;
     if out.is_empty() {
         Err(anyhow!("no certificates in PEM"))
     } else {
@@ -228,16 +226,9 @@ fn parse_first_cert_pem(pem: &str) -> Result<Vec<u8>> {
 }
 
 fn parse_first_pkcs8_key_pem(pem: &str) -> Result<Vec<u8>> {
-    let mut rest = pem.as_bytes();
-    while let Some((item, remaining)) =
-        rustls_pemfile::read_one_from_slice(rest).map_err(|e| anyhow!("pem parse: {e:?}"))?
-    {
-        rest = remaining;
-        if let rustls_pemfile::Item::Pkcs8Key(k) = item {
-            return Ok(k.secret_pkcs8_der().to_vec());
-        }
-    }
-    Err(anyhow!("no pkcs8 private key in PEM"))
+    PrivatePkcs8KeyDer::from_pem_slice(pem.as_bytes())
+        .map(|k| k.secret_pkcs8_der().to_vec())
+        .map_err(|e| anyhow!("no pkcs8 private key in PEM: {e:?}"))
 }
 
 pub async fn serve(addr: &str, ctx: MtlsContext, router: Router) -> Result<()> {

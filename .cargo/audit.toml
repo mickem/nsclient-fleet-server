@@ -1,0 +1,26 @@
+# Advisories cargo-audit reports that we have consciously decided not to act on.
+#
+# The bar for an entry here is high, and "we looked and it is not exploitable" is not on its
+# own enough — an unexploitable advisory that has a fixed version gets the fixed version,
+# because the next reader should not have to redo the analysis. An entry belongs here only
+# when there is nothing to upgrade to.
+#
+# Re-check this list whenever it is touched: an advisory that gains a fix should leave.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — Marvin attack on `rsa`, a timing side channel in RSA decryption.
+    #
+    # There is no fixed version; the advisory has said "no fixed upgrade is available" since
+    # 2023, because the fix requires a rewrite the crate has not landed.
+    #
+    # It is also not built here. `rsa` reaches Cargo.lock through `sqlx-mysql`, an optional
+    # dependency of `sqlx` behind the `mysql` feature, which this workspace does not enable —
+    # we take `sqlx` with `default-features = false` and the `sqlite` feature alone. Confirm
+    # with `cargo tree -i rsa --workspace --target all`, which prints nothing.
+    #
+    # cargo-audit reads Cargo.lock, which records optional dependencies whether or not their
+    # feature is on, so it cannot see that. Nothing in this repository performs an RSA
+    # operation of any kind.
+    "RUSTSEC-2023-0071",
+]

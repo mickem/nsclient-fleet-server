@@ -21,6 +21,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use axum::Router;
 use futures_util::StreamExt;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
 use rustls_acme::{caches::DirCache, AcmeConfig};
@@ -189,8 +190,9 @@ fn load_server_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig>
     let key_pem =
         std::fs::read(key_path).with_context(|| format!("read TLS key {}", key_path.display()))?;
 
-    let certs: Vec<CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut cert_pem.as_slice()).collect::<std::result::Result<_, _>>()?;
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| anyhow::anyhow!("{}: {e:?}", cert_path.display()))?;
     if certs.is_empty() {
         bail!(
             "{} contains no CERTIFICATE block — is it the key file, or DER rather than PEM?",
@@ -198,13 +200,13 @@ fn load_server_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig>
         );
     }
 
-    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_pem.as_slice())?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "{} contains no private key — expected a PKCS#8, PKCS#1 or SEC1 PEM block",
-                key_path.display()
-            )
-        })?;
+    let key: PrivateKeyDer<'static> = PrivateKeyDer::from_pem_slice(&key_pem).map_err(|e| {
+        anyhow::anyhow!(
+            "{} contains no usable private key — expected a PKCS#8, PKCS#1 or SEC1 PEM \
+                 block ({e:?})",
+            key_path.display()
+        )
+    })?;
 
     let mut config = ServerConfig::builder()
         .with_no_client_auth()
