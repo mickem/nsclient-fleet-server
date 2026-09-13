@@ -42,8 +42,23 @@ agents get their own port. One port is the default and the better answer — see
 As root on a fresh host:
 
 ```bash
-curl -L https://github.com/mickem/nsclient-fleet-server/releases/latest/download/bootstrap-vm.sh | bash
+VERSION=v0.1.0
+BASE=https://github.com/mickem/nsclient-fleet-server/releases/download/$VERSION
+
+curl -fsSLO "$BASE/bootstrap-vm.sh"
+curl -fsSLO "$BASE/SHA256SUMS"
+grep ' bootstrap-vm.sh$' SHA256SUMS | sha256sum -c -
+gh attestation verify bootstrap-vm.sh --repo mickem/nsclient-fleet-server
+
+less bootstrap-vm.sh          # it runs as root
+bash bootstrap-vm.sh
 ```
+
+Pin a version rather than tracking `latest`, and verify before running: piping a URL into a
+root shell means whatever that URL serves today is what runs as root today. Every release
+asset carries a build provenance attestation, which is the part that says the file came out
+of this repository's release workflow — a checksum file served from the same origin only
+catches a corrupted download.
 
 That creates the `nsclient-fleet` system user (no shell), the directory tree under
 `/opt/nsclient-fleet`, a template `/etc/nsclient-fleet/env`, and installs the systemd unit.
@@ -52,8 +67,15 @@ Prefer to do it by hand, or the script does not suit your distribution:
 
 ```bash
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin nsclient-fleet
-sudo mkdir -p /opt/nsclient-fleet/data/{bundles,acme} /etc/nsclient-fleet
-sudo chown -R nsclient-fleet:nsclient-fleet /opt/nsclient-fleet
+sudo install -d -m 0755 /opt/nsclient-fleet
+# 0750, not the default 0755: the data directory holds the database — every tenant's
+# encrypted CA key and every session hash — plus the ACME account key and the bundles.
+sudo install -d -m 0750 /opt/nsclient-fleet/data \
+  /opt/nsclient-fleet/data/bundles /opt/nsclient-fleet/data/acme
+sudo install -d -m 0750 -o root -g nsclient-fleet /etc/nsclient-fleet
+# Only the data the service writes. /opt/nsclient-fleet itself, and the binary in it,
+# stay root-owned.
+sudo chown -R nsclient-fleet:nsclient-fleet /opt/nsclient-fleet/data
 sudo curl -L -o /etc/systemd/system/nsclient-fleet.service \
   https://github.com/mickem/nsclient-fleet-server/releases/latest/download/nsclient-fleet.service
 ```
@@ -69,7 +91,8 @@ curl -L -O https://github.com/mickem/nsclient-fleet-server/releases/latest/downl
 curl -L -O https://github.com/mickem/nsclient-fleet-server/releases/latest/download/SHA256SUMS
 grep ' nsclient-fleet-x86_64-unknown-linux-musl$' SHA256SUMS | sha256sum -c -
 
-sudo install -o nsclient-fleet -g nsclient-fleet -m 0755 \
+# root-owned: the service should not be able to rewrite its own executable.
+sudo install -o root -g root -m 0755 \
   nsclient-fleet-x86_64-unknown-linux-musl /opt/nsclient-fleet/nsclient-fleet
 /opt/nsclient-fleet/nsclient-fleet --version
 ```

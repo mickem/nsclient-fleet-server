@@ -88,11 +88,42 @@ pub async fn enroll(
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DesiredState {
+    /// Part of the descriptor a bundle's signature covers. Defaulted so a response from a
+    /// server predating the field still deserializes — signature verification then fails,
+    /// which is the correct answer for a server that cannot say which tenant it is.
+    #[serde(default)]
+    pub tenant_id: i64,
     pub state_hash: String,
     pub next_poll_in_seconds: u32,
     pub merged_config_json: serde_json::Value,
     #[serde(default)]
     pub bundles: Vec<serde_json::Value>,
+}
+
+impl DesiredState {
+    /// The signed descriptor for one entry of `bundles`, as the server advertised it.
+    ///
+    /// Reading the fields out of the response rather than reconstructing them is the point:
+    /// the agent verifies the server's own claim about what this bundle *is*, so a claim
+    /// that does not match what was signed fails rather than being quietly accepted.
+    pub fn descriptor<'a>(
+        &'a self,
+        bundle: &'a serde_json::Value,
+    ) -> Result<fleet_core::bundlesig::BundleDescriptor<'a>> {
+        let field = |k: &str| -> Result<&'a str> {
+            bundle[k]
+                .as_str()
+                .ok_or_else(|| anyhow!("bundle entry is missing a string `{k}`"))
+        };
+        Ok(fleet_core::bundlesig::BundleDescriptor {
+            tenant_id: self.tenant_id,
+            bundle_id: field("id")?,
+            name: field("name")?,
+            version: field("version")?,
+            format: field("format")?,
+            sha256_hex: field("sha256")?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -253,14 +284,19 @@ impl EnrolledAgent {
         Ok(())
     }
 
-    /// Download a bundle by id and verify integrity (sha256) + signature (Ed25519 over the
-    /// SHA-256 digest of the bytes, using the bundle-signing pubkey received at enrollment).
-    pub async fn fetch_bundle(
+    /// Download a bundle by id and verify integrity (sha256) + authenticity.
+    ///
+    /// The signature is Ed25519 over the bundle's *descriptor* — tenant, id, name, version,
+    /// format and digest — not over the digest alone, so it says which bundle these bytes
+    /// are and not merely that the server once saw them. See `fleet_core::bundlesig`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn fetch_bundle_verified(
         &self,
-        bundle_id: &str,
-        expected_sha256_hex: &str,
+        descriptor: fleet_core::bundlesig::BundleDescriptor<'_>,
         signature_b64: &str,
     ) -> Result<Vec<u8>> {
+        let bundle_id = descriptor.bundle_id;
+        let expected_sha256_hex = descriptor.sha256_hex;
         use base64::{engine::general_purpose::STANDARD, Engine as _};
         use ed25519_dalek::pkcs8::DecodePublicKey;
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -289,14 +325,16 @@ impl EnrolledAgent {
             ));
         }
 
-        // 2. signature over the sha256 digest
+        // 2. signature over the descriptor the server advertised for this bundle. The
+        //    digest is one field of it, so step 1 having passed means the signature now
+        //    covers these exact bytes *under this identity*.
         let sig_bytes = STANDARD
             .decode(signature_b64)
             .map_err(|e| anyhow!("signature base64: {e}"))?;
         let sig = Signature::from_slice(&sig_bytes).map_err(|e| anyhow!("signature parse: {e}"))?;
         let vk = VerifyingKey::from_public_key_pem(&self.bundle_signing_pub_pem)
             .map_err(|e| anyhow!("verifying key parse: {e}"))?;
-        vk.verify(&actual, &sig)
+        vk.verify(&descriptor.to_signing_bytes(), &sig)
             .map_err(|e| anyhow!("signature verify failed: {e}"))?;
 
         Ok(bytes)
@@ -372,16 +410,11 @@ impl EnrolledAgent {
 }
 
 fn parse_certs(pem: &str) -> Result<Vec<Vec<u8>>> {
-    let mut out = Vec::new();
-    let mut rest = pem.as_bytes();
-    while let Some((item, remaining)) =
-        rustls_pemfile::read_one_from_slice(rest).map_err(|e| anyhow!("pem parse: {e:?}"))?
-    {
-        rest = remaining;
-        if let rustls_pemfile::Item::X509Certificate(c) = item {
-            out.push(c.to_vec());
-        }
-    }
+    use rustls::pki_types::pem::PemObject;
+    let out = rustls::pki_types::CertificateDer::pem_slice_iter(pem.as_bytes())
+        .map(|c| c.map(|c| c.as_ref().to_vec()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| anyhow!("pem parse: {e:?}"))?;
     if out.is_empty() {
         Err(anyhow!("no certificates in PEM"))
     } else {
@@ -390,14 +423,8 @@ fn parse_certs(pem: &str) -> Result<Vec<Vec<u8>>> {
 }
 
 fn parse_pkcs8_key(pem: &str) -> Result<Vec<u8>> {
-    let mut rest = pem.as_bytes();
-    while let Some((item, remaining)) =
-        rustls_pemfile::read_one_from_slice(rest).map_err(|e| anyhow!("pem parse: {e:?}"))?
-    {
-        rest = remaining;
-        if let rustls_pemfile::Item::Pkcs8Key(k) = item {
-            return Ok(k.secret_pkcs8_der().to_vec());
-        }
-    }
-    Err(anyhow!("no pkcs8 private key in PEM"))
+    use rustls::pki_types::pem::PemObject;
+    rustls::pki_types::PrivatePkcs8KeyDer::from_pem_slice(pem.as_bytes())
+        .map(|k| k.secret_pkcs8_der().to_vec())
+        .map_err(|e| anyhow!("no pkcs8 private key in PEM: {e:?}"))
 }

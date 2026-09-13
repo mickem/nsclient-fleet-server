@@ -91,6 +91,17 @@ where
         if !who.is_platform_admin {
             return Err(forbidden("platform administration"));
         }
+        // Cookie only. The platform flag is the one cross-tenant privilege in the system,
+        // and a bearer token carrying it is a single string that reads every tenant — one
+        // that lives in a CI variable or a shell history rather than in a browser. There is
+        // nothing here a script needs to do.
+        if who.via != crate::auth::Credential::Session {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "the platform console requires a signed-in session, not an API key",
+            )
+                .into_response());
+        }
         Ok(PlatformAdmin(who))
     }
 }
@@ -106,6 +117,7 @@ pub struct TierLimitsView {
     pub min_poll_interval_secs: u32,
     pub per_host_requests_per_minute: u32,
     pub max_bundle_mb: u32,
+    pub max_bundles: u32,
 }
 
 impl From<TierLimits> for TierLimitsView {
@@ -116,6 +128,7 @@ impl From<TierLimits> for TierLimitsView {
             min_poll_interval_secs: t.min_poll_interval_secs,
             per_host_requests_per_minute: t.per_host_requests_per_minute,
             max_bundle_mb: t.max_bundle_mb,
+            max_bundles: t.max_bundles,
         }
     }
 }
@@ -207,11 +220,15 @@ pub struct SettingsView {
     pub on_prem: bool,
 }
 
-/// What an anonymous visitor is allowed to know: whether the signup form is worth showing.
+/// What an anonymous visitor is allowed to know: whether the signup form is worth showing,
+/// and which Turnstile widget it has to render to be accepted.
 #[derive(Serialize)]
 pub struct PublicConfigView {
     pub signups_enabled: bool,
     pub on_prem: bool,
+    /// `None` when Turnstile is off, in which case the form submits without a token and
+    /// the server accepts it. Public by design: the site key names the widget.
+    pub turnstile_site_key: Option<String>,
 }
 
 // ---------------------------------------------------------------------------------------
@@ -266,19 +283,6 @@ pub struct CreateTenantResponse {
     pub owner_invited: bool,
 }
 
-/// Slug rules, applied here and not at signup.
-///
-/// The slug reaches a certificate subject DN (`fleet_enrollment::generate_tenant_ca`) and
-/// operator-facing URLs, so it is restricted to what is safe in both.
-fn valid_slug(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 63
-        && s.chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        && !s.starts_with('-')
-        && !s.ends_with('-')
-}
-
 pub async fn create_tenant(
     State(state): State<AppState>,
     PlatformAdmin(who): PlatformAdmin,
@@ -287,12 +291,8 @@ pub async fn create_tenant(
 ) -> Response {
     let slug = body.slug.trim().to_lowercase();
     let name = body.name.trim();
-    if !valid_slug(&slug) {
-        return (
-            StatusCode::BAD_REQUEST,
-            "slug must be 1-63 characters of a-z, 0-9 and dashes, not starting or ending with a dash",
-        )
-            .into_response();
+    if !fleet_core::tenant::valid_slug(&slug) {
+        return (StatusCode::BAD_REQUEST, fleet_core::tenant::SLUG_RULE).into_response();
     }
     if name.is_empty() {
         return (StatusCode::BAD_REQUEST, "name is required").into_response();
@@ -307,6 +307,17 @@ pub async fn create_tenant(
         }
         other => other,
     };
+    // Inviting an owner means minting a magic link, which on-prem does not have — it
+    // authenticates one administrator from configuration. Creating the tenant is still
+    // fine; naming an owner for it is the part that would sign in a second user.
+    if state.config.on_prem && owner_email.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "on-prem mode has no magic links, so a tenant cannot be created with an owner. \
+             Create it without one.",
+        )
+            .into_response();
+    }
 
     let tenants = TenantRepo::new(&state.db);
     let users = UserRepo::new(&state.db);
@@ -523,6 +534,7 @@ fn is_empty_overrides(ov: &TierOverrides) -> bool {
         && ov.min_poll_interval_secs.is_none()
         && ov.per_host_requests_per_minute.is_none()
         && ov.max_bundle_mb.is_none()
+        && ov.max_bundles.is_none()
 }
 
 // ---------------------------------------------------------------------------------------
@@ -810,6 +822,7 @@ pub async fn public_config(State(state): State<AppState>) -> Response {
     Json(PublicConfigView {
         signups_enabled: enabled,
         on_prem: state.config.on_prem,
+        turnstile_site_key: state.config.turnstile_site_key.clone(),
     })
     .into_response()
 }
@@ -828,19 +841,6 @@ async fn actor_email(state: &AppState, user_id: i64) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn slug_rules() {
-        assert!(valid_slug("acme"));
-        assert!(valid_slug("acme-corp-2"));
-        assert!(!valid_slug(""));
-        assert!(!valid_slug("-acme"));
-        assert!(!valid_slug("acme-"));
-        assert!(!valid_slug("Acme"), "uppercase is not allowed");
-        assert!(!valid_slug("acme corp"), "spaces reach a certificate DN");
-        assert!(!valid_slug("acme.corp"));
-        assert!(!valid_slug(&"a".repeat(64)));
-    }
 
     #[test]
     fn all_null_overrides_are_no_overrides() {

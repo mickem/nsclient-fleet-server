@@ -25,6 +25,15 @@ export function AppNavbar({ me, onLogout, handleDrawerToggle }: Props) {
     onLogout();
   };
 
+  /** For "I think someone else has my session" — ends every session this account has,
+   *  including this one. Previously only an admin blocking or deleting the account could
+   *  do that, which is a much bigger hammer. */
+  const logoutEverywhere = async () => {
+    handleClose();
+    await fetch("/api/auth/logout-all", { method: "POST", credentials: "include" });
+    onLogout();
+  };
+
   return (
     <Box sx={{ flexGrow: 1 }}>
       <AppBar position="fixed" sx={{ zIndex: (theme) => theme.zIndex.drawer + 1 }}>
@@ -75,6 +84,7 @@ export function AppNavbar({ me, onLogout, handleDrawerToggle }: Props) {
               </MenuItem>
               <Divider />
               <MenuItem onClick={logout}>Logout</MenuItem>
+              <MenuItem onClick={logoutEverywhere}>Sign out everywhere</MenuItem>
             </Menu>
           </Box>
         </Toolbar>

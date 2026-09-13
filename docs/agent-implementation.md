@@ -128,6 +128,7 @@ Responses:
 
 ```json
 {
+  "tenant_id": 7,
   "state_hash": "…",
   "next_poll_in_seconds": 60,
   "merged_config_json": {},
@@ -137,7 +138,7 @@ Responses:
       "name": "…",
       "version": "…",
       "sha256": "<hex digest of the bundle bytes>",
-      "signature": "<base64 Ed25519 signature>",
+      "signature": "<base64 Ed25519 signature over this bundle's descriptor>",
       "url": "/agent/v1/bundles/<id>",
       "priority": 10,
       "format": "plain"
@@ -153,6 +154,11 @@ Responses:
 
 Notes:
 
+- `tenant_id` identifies the tenant these bundles belong to. You need it to
+  verify a bundle signature (§4); it is sent rather than derived because your
+  certificate carries the tenant *slug*, not this id. There is nothing to trust
+  here — a wrong value simply fails signature verification, since the verifying
+  key is per tenant.
 - `merged_config_json` is currently always `{}` — real configuration lives
   inside bundle contents; the agent is responsible for unpacking and applying
   them (see `crates/server/src/desired_state.rs`).
@@ -165,12 +171,34 @@ Notes:
 For each entry in `bundles` (process in ascending `priority` order):
 
 1. `GET {mtls_url}{bundle.url}` — the server re-checks that the bundle is in
-   this host's effective set and returns `403` otherwise, so a compromised
-   host cannot fetch arbitrary tenant bundles.
+   this host's effective set and returns `403` otherwise. What bounds that set
+   is group membership, and group membership is only as trustworthy as the
+   tags the selectors read: a selector clause that accepts `agent`-sourced
+   tags can be satisfied by a host claiming the tag in its own state report.
+   Clauses default to operator-set tags precisely so that the effective set is
+   not something the host chooses — see §5.
 2. **Verify integrity**: SHA-256 of the raw bytes must equal `sha256` (hex).
-3. **Verify authenticity**: `signature` is a base64 Ed25519 signature **over
-   the 32-byte SHA-256 digest** (not over the raw bytes), verified with
-   `bundle_signing_pub_pem` obtained at enrollment.
+3. **Verify authenticity**: `signature` is a base64 Ed25519 signature over the
+   bundle's **descriptor** — not over the bytes, and not over their digest
+   alone — verified with `bundle_signing_pub_pem` obtained at enrollment.
+
+   The descriptor is the identity the server advertised for this bundle,
+   serialised as a version prefix followed by six NUL-separated fields:
+
+   ```
+   nsclient-fleet/bundle-sig/v2 \0 tenant_id \0 id \0 name \0 version \0 format \0 sha256
+   ```
+
+   `tenant_id` is the top-level field of the same desired-state response;
+   everything else comes from this bundle's entry, verbatim, including the
+   `sha256` you just checked the bytes against. Sign nothing yourself and
+   reconstruct nothing — read the fields out of the response, because what you
+   are verifying is the server's own claim about *what this bundle is*.
+
+   A signature over the digest alone would say only "this tenant's server saw
+   these bytes once", which lets an old signed blob be re-advertised under a
+   different name, version or id. Reference implementation:
+   `fleet_core::bundlesig`.
 4. **Decrypt if sealed**: bytes starting with the `NSEB1` magic are a
    client-side-encrypted envelope (`format: "enc-v1"`); decrypt with the
    locally-configured bundle key, using the advertised `name`/`version` as
@@ -208,14 +236,32 @@ All fields are optional server-side (`crates/server/src/agent_api.rs`,
 
 - `applied_state_hash` set → server records it and updates `last_seen_at`.
   Omit it (null) when nothing was applied; the server still touches
-  `last_seen_at`.
-- `reported_tags` → upserted as agent-reported tags. If any value actually
-  changed, the server bumps the tenant `config_version`, which can change the
-  result of your *next* desired-state poll (tags feed group selectors). The
-  call is idempotent — resending identical tags is a no-op — so it is safe to
-  send the full tag map every time.
+  `last_seen_at`. It must be exactly 64 hex characters — it is the SHA-256 the
+  server sent you and nothing else is meaningful; anything else is a `400`.
+- `reported_tags` → **the host's complete set of self-reported tags**, stored
+  with `source = "agent"` and kept distinct from tags an operator set. Send the
+  full map every time: it *replaces* what was stored, so a key you stop
+  reporting is removed rather than left standing. Omitting the field entirely
+  means "no answer" and leaves the stored set alone; an explicit `{}` is an
+  answer and clears it. Resending an identical map is a no-op.
+
+  Capped at 128 tags, keys at 128 bytes and values at 256 bytes — the same
+  limits a selector can compare, so anything longer could never be matched. Over
+  any of them the whole report is refused with `400`.
+
+  A change here affects only *this* host's next desired-state poll (tags feed
+  group selectors); it does not disturb any other host in the tenant.
+
+  **Trust boundary.** These tags are the host's claims about itself and are
+  treated as such. A selector clause reads operator-set tags only unless it
+  says `"source": "agent"` or `"source": "any"`, so reporting `role=sql_server`
+  does not by itself put a host in the SQL group. An operator who does write a
+  clause over agent tags is stating that hosts in that tenant may place
+  themselves in that group, and the console says so at the point they write it.
+  Anything gating access to scripts or secrets should stay on operator tags.
 - `errors` → logged server-side; use it for bundle verification or apply
-  failures.
+  failures. At most 32 entries of 512 characters reach the log; send a summary,
+  not a log file.
 - `local_config_present` → whether the host has configuration of its own that
   takes precedence over what you were sent. Send the fact on every report, both
   ways round, and **never** send the configuration itself — it typically holds
@@ -224,7 +270,10 @@ All fields are optional server-side (`crates/server/src/agent_api.rs`,
   [agent-integration.md §2.1](agent-integration.md#21-local-configuration).
 
 Report tags early (right after enrollment, before the first apply) so the host
-gets matched into groups and receives its real desired state promptly.
+gets matched into groups and receives its real desired state promptly — for the
+groups whose selectors opt into agent tags. A host that matches only
+operator-set selectors is placed by the operator, and reporting tags changes
+nothing about its membership.
 
 ## 6. Certificate renewal
 

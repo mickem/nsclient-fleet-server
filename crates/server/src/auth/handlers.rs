@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     rate_limit::RateDecision,
+    session_cookie_name,
     tokens::{hash_token, random_token},
-    AuthedUser, EXCHANGE_COOKIE, SESSION_COOKIE,
+    AuthedUser, EXCHANGE_COOKIE,
 };
 use crate::AppState;
 
@@ -87,25 +88,92 @@ pub async fn signup(
         }
     }
 
-    let token = body.turnstile_token.as_deref().unwrap_or("");
-    if !state.turnstile.verify(token, addr.ip()).await {
-        return (StatusCode::FORBIDDEN, "turnstile failed").into_response();
-    }
-
     let email = body.email.trim().to_lowercase();
     let slug = body.tenant_slug.trim().to_lowercase();
     if email.is_empty() || slug.is_empty() || body.tenant_name.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "missing field").into_response();
     }
+    // The same rule the platform console applies. Signup used to only trim and lowercase,
+    // and the slug becomes a CA subject — see `fleet_core::tenant::valid_slug`.
+    if !fleet_core::tenant::valid_slug(&slug) {
+        return (StatusCode::BAD_REQUEST, fleet_core::tenant::SLUG_RULE).into_response();
+    }
+
+    // Before the Turnstile round trip, the tenant CA generation and the SMTP send, because
+    // all three are expensive and this is the only thing standing between an anonymous
+    // caller and all of them. Signup used to reach the CA keygen and the mail server with
+    // no limiter at all and without touching the daily email budget, so a loop here could
+    // both fill the database with unredeemed tenants and spend the whole day's sends on
+    // addresses of the caller's choosing. The same limiter as send-link, so the two share
+    // one budget rather than each having their own.
+    let decision = state.rate_limits.check(&email, addr.ip());
+    match decision {
+        RateDecision::Allow => {}
+        RateDecision::EmailLimited | RateDecision::IpLimited => {
+            tracing::info!(rate_limit = ?decision, ip = %addr.ip(), "signup rate-limited");
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many attempts — wait a minute and try again",
+            )
+                .into_response();
+        }
+        RateDecision::BudgetExceeded => {
+            tracing::error!(target: "alert.send_budget", "global daily email budget exceeded — refusing signup");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sign-in mail is temporarily unavailable — try again later",
+            )
+                .into_response();
+        }
+    }
+
+    let token = body.turnstile_token.as_deref().unwrap_or("");
+    if !state.turnstile.verify(token, addr.ip()).await {
+        return (StatusCode::FORBIDDEN, "turnstile failed").into_response();
+    }
 
     let tenants = TenantRepo::new(&state.db);
     let users = UserRepo::new(&state.db);
 
+    // A taken slug still says so. It is the field the person filling in the form has to
+    // change, and a workspace name is not a secret — a certificate subject carries it.
     if tenants.get_by_slug(&slug).await.unwrap_or(None).is_some() {
         return (StatusCode::CONFLICT, "slug taken").into_response();
     }
-    if users.find_by_email(&email).await.unwrap_or(None).is_some() {
-        return (StatusCode::CONFLICT, "email already registered").into_response();
+
+    // A registered address does not. `send-link` is carefully uniform about exactly this,
+    // and signup answering "email already registered" to an anonymous caller handed back
+    // what that endpoint refuses to say — with a free slug, anyone could test any address.
+    //
+    // Mailing that user a sign-in link rather than doing nothing keeps the answer useful to
+    // the person it is actually about: someone who forgot they already have an account gets
+    // in, and learns nothing new if they do not.
+    //
+    // The two paths still differ in how long they take — this one skips a CA keygen — so
+    // this closes a status-code oracle rather than every oracle. Equalising the timing would
+    // mean doing the work and throwing it away, which is worse than the thing it fixes.
+    if let Ok(Some(existing)) = users.find_by_email(&email).await {
+        tracing::info!(
+            user_id = existing.id,
+            "signup for an address that already has an account"
+        );
+        if !existing.is_blocked() {
+            let state = state.clone();
+            tokio::spawn(async move {
+                if let Err(e) = issue_and_send_link(
+                    &state,
+                    &existing.email,
+                    existing.tenant_id,
+                    existing.id,
+                    addr,
+                )
+                .await
+                {
+                    tracing::error!(error = %e, "sign-in link for an existing account failed");
+                }
+            });
+        }
+        return StatusCode::NO_CONTENT.into_response();
     }
 
     let trial = now_unix() + TRIAL_DAYS * 86_400;
@@ -147,10 +215,6 @@ pub async fn signup(
         }
     };
 
-    // A fresh install where the operator set PLATFORM_ADMIN_EMAILS and then signed up: the
-    // startup pass found no account for that address, so the grant happens here instead.
-    crate::platform_admin_bootstrap(&state, &user).await;
-
     if let Err(e) = issue_and_send_link(&state, &user.email, tenant.id, user.id, addr).await {
         tracing::error!(error = %e, "magic link send failed");
     }
@@ -164,11 +228,7 @@ pub async fn send_link(
     Json(body): Json<SendLinkBody>,
 ) -> Response {
     if state.config.on_prem {
-        return (
-            StatusCode::NOT_FOUND,
-            "magic-link login disabled in on-prem mode",
-        )
-            .into_response();
+        return magic_links_disabled();
     }
 
     let email = body.email.trim().to_lowercase();
@@ -257,6 +317,21 @@ pub struct ConfirmForm {
     pub csrf: String,
 }
 
+/// The single refusal, so the three routes that make up magic-link sign-in cannot drift
+/// apart on whether on-prem has them.
+///
+/// On-prem authenticates one administrator from configuration and has no mail path at all.
+/// `send-link` refused already, but the exchange routes did not — so a platform admin could
+/// mint a link through the console and sign in a second user, which is exactly the invariant
+/// `crate::users` says holds.
+fn magic_links_disabled() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        "magic-link login disabled in on-prem mode",
+    )
+        .into_response()
+}
+
 /// GET is the click target in the magic-link email. It deliberately does NOT sign anyone in:
 /// a link click is a top-level GET that a cross-site page can trigger, so redeeming the token
 /// and setting a session here would be login CSRF — an attacker who minted a link for their
@@ -271,6 +346,9 @@ pub async fn exchange(
     jar: CookieJar,
     Query(q): Query<ExchangeQuery>,
 ) -> Response {
+    if state.config.on_prem {
+        return magic_links_disabled();
+    }
     let csrf = random_token();
     let mut cookie = Cookie::new(EXCHANGE_COOKIE, csrf.clone());
     cookie.set_http_only(true);
@@ -302,6 +380,9 @@ pub async fn exchange_confirm(
     jar: CookieJar,
     Form(form): Form<ConfirmForm>,
 ) -> Response {
+    if state.config.on_prem {
+        return magic_links_disabled();
+    }
     let matches = jar
         .get(EXCHANGE_COOKIE)
         .map(|c| constant_time_eq(c.value().as_bytes(), form.csrf.as_bytes()))
@@ -393,23 +474,54 @@ fn html_attr_escape(s: &str) -> String {
     out
 }
 
+/// Delay applied to every refused attempt.
+///
+/// Not a substitute for the rate limit above it — it is what makes an attacker who has
+/// several source addresses pay for each guess too. Long enough to matter over thousands of
+/// attempts, short enough that a mistyped password does not read as a broken login page.
+const FAILED_LOGIN_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
 pub async fn on_prem_login(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     jar: CookieJar,
     Json(body): Json<OnPremLoginBody>,
 ) -> Response {
     if !state.config.on_prem {
         return (StatusCode::NOT_FOUND, "password login is on-prem only").into_response();
     }
+
+    // Nothing rate-limited, delayed or logged this route. It is the single credential that
+    // an on-prem install is protected by, and it was the one unauthenticated endpoint an
+    // attacker could hammer for free and in silence.
+    if !state.rate_limits.check_ip(addr.ip()) {
+        tracing::warn!(ip = %addr.ip(), "on-prem login rate-limited");
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many attempts — wait and try again",
+        )
+            .into_response();
+    }
+
     let admin_email = state.config.on_prem_admin_email.as_deref().unwrap_or("");
-    let admin_pw = state.config.on_prem_admin_password.as_deref().unwrap_or("");
-    if admin_email.is_empty() || admin_pw.is_empty() {
+    if admin_email.is_empty() {
         return (StatusCode::SERVICE_UNAVAILABLE, "admin not configured").into_response();
     }
 
     let email_match = body.email.trim().eq_ignore_ascii_case(admin_email);
-    let pw_match = constant_time_eq(body.password.as_bytes(), admin_pw.as_bytes());
+    let pw_match = verify_admin_password(&state.config, &body.password);
+    let Some(pw_match) = pw_match else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "admin not configured").into_response();
+    };
     if !(email_match && pw_match) {
+        // Logged with the peer address: a failed sign-in against the only account an
+        // on-prem install has is the thing an operator most wants to be able to see.
+        tracing::warn!(
+            ip = %addr.ip(),
+            email_match,
+            "on-prem login refused"
+        );
+        tokio::time::sleep(FAILED_LOGIN_DELAY).await;
         return (StatusCode::UNAUTHORIZED, "bad credentials").into_response();
     }
 
@@ -420,7 +532,35 @@ pub async fn on_prem_login(
             return (StatusCode::INTERNAL_SERVER_ERROR, "admin user missing").into_response();
         }
     };
+    tracing::info!(ip = %addr.ip(), user_id = user.id, "on-prem login succeeded");
     issue_session_cookie(&state, jar, user.tenant_id, user.id).await
+}
+
+/// `Some(true)`/`Some(false)` when a credential is configured, `None` when none is.
+///
+/// The hash is checked first because a deployment that has one has said which answer it
+/// means; the two cannot both be set (startup refuses that).
+fn verify_admin_password(cfg: &crate::config::Config, offered: &str) -> Option<bool> {
+    if let Some(phc) = cfg.on_prem_admin_password_hash.as_deref() {
+        use argon2::password_hash::{PasswordHash, PasswordVerifier};
+        let parsed = match PasswordHash::new(phc) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(error = %e, "ON_PREM_ADMIN_PASSWORD_HASH is not a valid PHC string");
+                return None;
+            }
+        };
+        return Some(
+            argon2::Argon2::default()
+                .verify_password(offered.as_bytes(), &parsed)
+                .is_ok(),
+        );
+    }
+    let plain = cfg
+        .on_prem_admin_password
+        .as_deref()
+        .filter(|p| !p.is_empty())?;
+    Some(constant_time_eq(offered.as_bytes(), plain.as_bytes()))
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -443,18 +583,26 @@ async fn issue_session_cookie(
     tenant_id: i64,
     user_id: i64,
 ) -> Response {
-    match UserRepo::new(&state.db).get(tenant_id, user_id).await {
+    let user = match UserRepo::new(&state.db).get(tenant_id, user_id).await {
         Ok(Some(u)) if u.is_blocked() => {
             tracing::info!(user_id, "sign-in refused: account blocked");
             return (StatusCode::FORBIDDEN, "this account has been blocked").into_response();
         }
-        Ok(Some(_)) => {}
+        Ok(Some(u)) => u,
         Ok(None) => return (StatusCode::UNAUTHORIZED, "no such account").into_response(),
         Err(e) => {
             tracing::error!(error = %e, "sign-in user lookup failed");
             return (StatusCode::INTERNAL_SERVER_ERROR, "sign-in failed").into_response();
         }
-    }
+    };
+
+    // Here, and not at row creation. Reaching this point means the address was proven —
+    // a redeemed magic link, or the on-prem password. Granting at creation meant a tenant
+    // admin could invite a listed address into their own tenant and have the flag land on a
+    // row they control; nobody gained a privilege they should not have, but the real
+    // operator's later signup was then refused as a duplicate and their sign-in put them in
+    // the attacker's tenant as a view-only member, where they could be deleted.
+    crate::platform_admin_bootstrap(state, &user).await;
 
     let token = random_token();
     let hash = hash_token(&token);
@@ -466,7 +614,7 @@ async fn issue_session_cookie(
         return (StatusCode::INTERNAL_SERVER_ERROR, "session create failed").into_response();
     }
 
-    let mut cookie = Cookie::new(SESSION_COOKIE, token);
+    let mut cookie = Cookie::new(session_cookie_name(state.config.cookie_secure), token);
     cookie.set_http_only(true);
     cookie.set_same_site(SameSite::Lax);
     cookie.set_path("/");
@@ -488,11 +636,65 @@ fn time_dur(secs: i64) -> time::Duration {
 }
 
 pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> Response {
-    if let Some(c) = jar.get(SESSION_COOKIE) {
+    let name = session_cookie_name(state.config.cookie_secure);
+    if let Some(c) = jar.get(name) {
         let hash = hash_token(c.value());
         let _ = SessionRepo::new(&state.db).delete(&hash).await;
     }
-    let mut clear = Cookie::new(SESSION_COOKIE, "");
+    let mut clear = Cookie::new(name, "");
+    clear.set_path("/");
+    clear.set_max_age(time::Duration::ZERO);
+    let jar = jar.remove(clear);
+
+    let mut headers = HeaderMap::new();
+    for c in jar.iter() {
+        if let Ok(value) = HeaderValue::from_str(&c.to_string()) {
+            headers.append(header::SET_COOKIE, value);
+        }
+    }
+    (headers, StatusCode::NO_CONTENT).into_response()
+}
+
+/// Sign out of every session this user has, including the one making the request.
+///
+/// What someone reaches for when they think a session has been taken. Until now the only
+/// way to get it was for an admin to block or delete the account, which is a much bigger
+/// hammer than "I left myself logged in somewhere".
+pub async fn logout_everywhere(
+    State(state): State<AppState>,
+    who: AuthedUser,
+    jar: CookieJar,
+) -> Response {
+    let removed = match SessionRepo::new(&state.db)
+        .delete_for_user(who.tenant_id, who.user_id)
+        .await
+    {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::error!(error = %e, "sign-out-everywhere failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "sign-out failed").into_response();
+        }
+    };
+    tracing::info!(
+        user_id = who.user_id,
+        removed,
+        "signed out of every session"
+    );
+
+    crate::audit::record(
+        &state,
+        who.tenant_id,
+        Some(who.user_id),
+        "user.sessions_revoked",
+        "user",
+        &who.user_id.to_string(),
+        Some(&serde_json::json!({ "sessions": removed })),
+    )
+    .await;
+
+    // Clear this browser's cookie too, so the page it came from does not keep presenting a
+    // token that no longer resolves.
+    let mut clear = Cookie::new(session_cookie_name(state.config.cookie_secure), "");
     clear.set_path("/");
     clear.set_max_age(time::Duration::ZERO);
     let jar = jar.remove(clear);

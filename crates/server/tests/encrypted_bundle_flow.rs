@@ -3,7 +3,6 @@
 //! refuses to read it, and that an agent holding the key — and only such an agent —
 //! can open it.
 
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -64,9 +63,11 @@ async fn start() -> TestServer {
         on_prem: false,
         on_prem_admin_email: None,
         on_prem_admin_password: None,
+        on_prem_admin_password_hash: None,
         platform_admin_emails: Vec::new(),
         magic_link_ttl_secs: 900,
         session_ttl_secs: 3600,
+        session_idle_ttl_secs: 3600,
         bootstrap_ttl_secs: 3600,
         host_lost_after_secs: 172_800,
         client_cert_lifetime_days: 90,
@@ -74,6 +75,7 @@ async fn start() -> TestServer {
         daily_email_budget: 1_000_000,
         smtp: None,
         turnstile_secret: None,
+        turnstile_site_key: None,
         master_key,
         bootstrap_jwt_secret,
     };
@@ -343,9 +345,17 @@ async fn encrypted_bundle_end_to_end() {
         .unwrap();
     assert_eq!(a.status(), 204);
 
-    let mut tags = BTreeMap::new();
-    tags.insert("role".into(), "db".into());
-    agent.report_state(None, tags).await.unwrap();
+    // The operator places the host, not the host itself: this group carries secrets, and a
+    // selector over operator tags is the only kind a compromised host cannot talk its way
+    // into. See `fleet_core::selector`.
+    let t = s
+        .cookie_jar
+        .put(format!("{}/api/hosts/{}/tags/role", s.base_url, host_id))
+        .json(&serde_json::json!({"value": "db"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(t.status(), 204);
     s.agent_limits.forget_last_poll(&host_id);
     let ds = agent.fetch_desired_state(None).await.unwrap().unwrap();
     assert_eq!(ds.bundles.len(), 1);
@@ -353,7 +363,7 @@ async fn encrypted_bundle_end_to_end() {
 
     // 7. Download: sha + signature verify against the ciphertext, exactly as for plain.
     let downloaded = agent
-        .fetch_bundle(&bundle_id, &expected_sha, &signature)
+        .fetch_bundle_verified(ds.descriptor(&ds.bundles[0]).unwrap(), &signature)
         .await
         .unwrap();
     assert_eq!(downloaded, blob);

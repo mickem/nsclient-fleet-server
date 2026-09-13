@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use fleet_core::aead::MasterKey;
 use fleet_storage::Db;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use tempfile::TempDir;
 
@@ -33,26 +34,13 @@ impl Drop for TestServer {
 }
 
 fn parse_certs(pem: &str) -> Vec<CertificateDer<'static>> {
-    let mut out = Vec::new();
-    let mut rest = pem.as_bytes();
-    while let Some((item, remaining)) = rustls_pemfile::read_one_from_slice(rest).unwrap() {
-        rest = remaining;
-        if let rustls_pemfile::Item::X509Certificate(c) = item {
-            out.push(c);
-        }
-    }
-    out
+    CertificateDer::pem_slice_iter(pem.as_bytes())
+        .collect::<Result<_, _>>()
+        .expect("test pem parses")
 }
 
 fn parse_key(pem: &str) -> PrivatePkcs8KeyDer<'static> {
-    let mut rest = pem.as_bytes();
-    while let Some((item, remaining)) = rustls_pemfile::read_one_from_slice(rest).unwrap() {
-        rest = remaining;
-        if let rustls_pemfile::Item::Pkcs8Key(k) = item {
-            return k.clone_key();
-        }
-    }
-    panic!("no pkcs8 key in pem");
+    PrivatePkcs8KeyDer::from_pem_slice(pem.as_bytes()).expect("test pem has a pkcs8 key")
 }
 
 /// Stand-in for the config `rustls-acme` hands the web branch in production: a real
@@ -99,9 +87,11 @@ async fn start() -> TestServer {
         on_prem: false,
         on_prem_admin_email: None,
         on_prem_admin_password: None,
+        on_prem_admin_password_hash: None,
         platform_admin_emails: Vec::new(),
         magic_link_ttl_secs: 900,
         session_ttl_secs: 3600,
+        session_idle_ttl_secs: 3600,
         bootstrap_ttl_secs: 3600,
         host_lost_after_secs: 172_800,
         client_cert_lifetime_days: 90,
@@ -109,6 +99,7 @@ async fn start() -> TestServer {
         daily_email_budget: 1_000_000,
         smtp: None,
         turnstile_secret: None,
+        turnstile_site_key: None,
         master_key,
         bootstrap_jwt_secret,
     };

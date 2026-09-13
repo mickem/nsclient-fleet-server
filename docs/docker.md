@@ -10,15 +10,26 @@ backups applies here too — only the packaging differs.
 
 ---
 
-## The one-liner
+## Starting it
+
+`MASTER_KEY` comes first, on its own, because it is the one value you cannot recreate. It
+encrypts every tenant CA and every host override; a container started with a different one
+cannot read the data in the volume it just mounted, and there is no recovery. Generate it
+once and store it somewhere you will still have it in a year.
+
+```bash
+MASTER_KEY=$(openssl rand -base64 32)   # once — then put it in a password manager
+```
+
+Then start the container with it:
 
 ```bash
 docker run -d --name nsclient-fleet --restart unless-stopped \
-  -e MASTER_KEY="$(openssl rand -base64 32)" \
+  -e MASTER_KEY="$MASTER_KEY" \
   -e BASE_URL="https://fleet.example.internal:9443" \
   -e ON_PREM=true \
   -e ON_PREM_ADMIN_EMAIL=admin@example.internal \
-  -e ON_PREM_ADMIN_PASSWORD='a strong password' \
+  -e ON_PREM_ADMIN_PASSWORD_HASH='<argon2 PHC string>' \
   -v fleet-data:/data \
   -p 9443:9443 \
   ghcr.io/mickem/nsclient-fleet:latest
@@ -29,32 +40,27 @@ start, signs you in by password, and serves the UI and agent mTLS on one port. O
 `https://fleet.example.internal:9443/` — your browser will warn about the certificate until
 you do [TLS](#tls) below.
 
+`ON_PREM_ADMIN_PASSWORD_HASH` takes an argon2 PHC string, which is what to use when you can
+produce one — `docker run` arguments land in the shell history, the process list and
+`docker inspect`. `ON_PREM_ADMIN_PASSWORD` takes the plaintext instead; setting both is a
+startup error. Either way the failed-login path is rate-limited, delayed and logged.
+
 <!-- @formatter:off -->
-> **Save that `MASTER_KEY`.** Generated inline it exists only in that container's
-> environment. It encrypts every tenant CA and host override, it cannot be recovered, and a
-> container recreated with a different one cannot read the data in the volume it just
-> mounted. Generate it once, keep it in a password manager, and pass the same value every
-> time:
->
-> ```bash
-> MASTER_KEY=$(openssl rand -base64 32)   # once, then store it
-> docker run -e MASTER_KEY="$MASTER_KEY" ...
-> ```
->
-> The container refuses to start without it rather than generating one into `/data` —
-> a key sitting in the same volume, and the same backup, as the database it encrypts is
-> not protecting much.
+> The container refuses to start without `MASTER_KEY` rather than generating one into
+> `/data` — a key sitting in the same volume, and the same backup, as the database it
+> encrypts is not protecting much.
 <!-- @formatter:on -->
 
 ## What is in the image
 
 | | |
 | --- | --- |
-| Base | `alpine`, plus `ca-certificates` and `tini` |
+| Base | `alpine`, pinned by digest, plus `ca-certificates` and `tini` |
 | Binary | The released `*-unknown-linux-musl` build, verified against the release's `SHA256SUMS` at build time |
 | User | `fleet` (uid 10001), non-root |
 | Port | 9443 — above the privileged range so root is not needed, and not 8443, which the NSClient++ web UI already uses |
 | Volume | `/data` |
+| Health | `HEALTHCHECK` hits `/healthz`, which answers only once the database is reachable |
 
 `amd64` and `arm64` are published under the same tag. Pin `:<version>` in production;
 `:latest` follows the most recent non-prerelease.

@@ -92,4 +92,15 @@ forge bundles, and rotating one doesn't invalidate the other).
   their only trust root, so rotating it cuts off every enrolled agent — renewal cannot
   help (it runs over the now-broken mTLS channel); the fleet must re-enroll with fresh
   bootstrap tokens. Changing `MTLS_HOST` triggers the same regeneration automatically.
-  A graceful rotation (serve old + new during an overlap window) is future work.
+  A graceful rotation (serve old + new during an overlap window, with agents refreshing the
+  pin on renewal) is future work, and the single largest gap in this document: because
+  `mtls-server.key` sits on the same disk as the database, a compromise of the VM is a
+  compromise of the pin, and the only recovery today is re-enrolling the whole fleet by
+  hand. Until it exists, treat that key as needing the same custody as `MASTER_KEY` — and
+  note that the two must not live in the same backup, for the reason
+  [deployment.md](deployment.md#backups) gives.
+
+  `POST /api/hosts/:id/revoke-certs` is the per-host version of that recovery: it revokes
+  every certificate a host holds and returns it to pending with a fresh bootstrap token,
+  keeping its tags, groups, overrides and history. It does not help with a compromised
+  *server* key, which is why the overlap window is still the missing piece.

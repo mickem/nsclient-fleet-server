@@ -6,12 +6,16 @@ pub mod auth;
 pub mod bundles;
 pub mod config;
 pub mod config_api;
+pub mod conn;
+pub mod csrf;
 pub mod desired_state;
 pub mod hosts;
+pub mod housekeeping;
 pub mod https;
 pub mod mtls;
 pub mod mux;
 pub mod platform;
+pub mod security_headers;
 pub mod tenant_setup;
 pub mod trial_expiry;
 pub mod users;
@@ -54,6 +58,24 @@ pub struct AppState {
     /// Memoized desired state, invalidated by the tenant's `config_version`. Shared across
     /// clones of `AppState` — one cache per process.
     pub desired_state_cache: Arc<crate::desired_state::DesiredStateCache>,
+}
+
+/// Narrow a directory we own to owner-only access.
+///
+/// Best-effort and Unix-only: a failure is logged, not fatal, because a deployment that has
+/// deliberately widened a directory should not be unable to start. Windows has no mode bits
+/// worth setting here — the on-prem Windows install is a single-administrator machine and
+/// inherits the parent ACL.
+pub fn restrict_dir(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)) {
+            tracing::warn!(path = %path.display(), error = %e, "could not restrict directory permissions");
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 async fn healthz(State(state): State<AppState>) -> Response {
@@ -144,11 +166,19 @@ pub async fn ensure_platform_admins(db: &Db, cfg: &Config) -> anyhow::Result<()>
     Ok(())
 }
 
-/// Grant the flag to a user who has just been created, if their address is in the bootstrap
+/// Grant the flag to a user who has just *signed in*, if their address is in the bootstrap
 /// list. This is what makes `PLATFORM_ADMIN_EMAILS` work on a brand-new install, where the
-/// operator sets the variable and *then* signs up.
+/// operator sets the variable and then signs up.
+///
+/// Called from `issue_session_cookie` — the one place a session is minted — and deliberately
+/// not at row creation. A row is created by whoever asked for it; a session means the
+/// address was proven, by a redeemed magic link or the on-prem password. See the call site
+/// for what granting at creation allowed a tenant admin to do.
 pub(crate) async fn platform_admin_bootstrap(state: &AppState, user: &fleet_core::user::User) {
     if !state.config.is_bootstrap_platform_admin(&user.email) {
+        return;
+    }
+    if user.is_platform_admin {
         return;
     }
     match UserRepo::new(&state.db)
@@ -158,7 +188,7 @@ pub(crate) async fn platform_admin_bootstrap(state: &AppState, user: &fleet_core
         Ok(_) => tracing::info!(
             email = %user.email,
             user_id = user.id,
-            "platform admin granted from PLATFORM_ADMIN_EMAILS at account creation"
+            "platform admin granted from PLATFORM_ADMIN_EMAILS on sign-in"
         ),
         Err(e) => tracing::error!(error = %e, "platform admin bootstrap failed"),
     }
@@ -176,6 +206,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/auth/login", post(auth::handlers::on_prem_login))
         .route("/api/auth/logout", post(auth::handlers::logout))
+        .route(
+            "/api/auth/logout-all",
+            post(auth::handlers::logout_everywhere),
+        )
         .route("/api/hosts", get(hosts::list).post(hosts::create))
         .route("/api/hosts/bulk-delete", post(hosts::bulk_delete))
         .route("/api/hosts/bulk-tags", post(hosts::bulk_tags))
@@ -184,6 +218,10 @@ pub fn router(state: AppState) -> Router {
             get(hosts::detail).delete(hosts::delete_host),
         )
         .route("/api/hosts/:id/desired", get(hosts::desired))
+        .route(
+            "/api/hosts/:id/revoke-certs",
+            post(hosts::revoke_host_certs),
+        )
         .route(
             "/api/hosts/:id/tags/:key",
             axum::routing::put(config_api::put_tag),
@@ -219,13 +257,26 @@ pub fn router(state: AppState) -> Router {
             "/api/groups/:id/bundles/:bundle_id",
             axum::routing::delete(bundles::unassign_from_group),
         )
+        // The body limit is scoped to this one route on purpose. axum's 2 MiB default
+        // applied to the upload, so every tier limit above 2 MB was unreachable — the
+        // body was refused before the handler that checks the tier ever ran. Raising it
+        // globally would hand the same allowance to every JSON route instead.
         .route("/api/bundles", get(bundles::list))
-        .route("/api/bundles", post(bundles::upload))
+        .route(
+            "/api/bundles",
+            post(bundles::upload).layer(axum::extract::DefaultBodyLimit::max(
+                fleet_core::tier::MAX_BUNDLE_MB_ANY_TIER as usize * 1024 * 1024,
+            )),
+        )
         .route(
             "/api/bundle-key",
             get(bundles::get_bundle_key).put(bundles::set_bundle_key),
         )
         .route("/api/bundles/compose", post(bundles::compose))
+        .route(
+            "/api/bundles/:id",
+            axum::routing::delete(bundles::delete_bundle),
+        )
         .route("/api/bundles/:id/config", get(bundles::get_config))
         .route("/api/bundles/:id/download", get(bundles::ui_download))
         .route("/api/audit", get(audit::list))
@@ -272,7 +323,16 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             auth::middleware::session_layer,
         ))
+        // Outside the session layer, so a refused cross-origin request never reaches the
+        // point of resolving who it claims to be.
+        .layer(axum::middleware::from_fn(csrf::layer))
         .fallback(frontend)
+        // Outermost, and deliberately after `.fallback`, so the headers reach the SPA and
+        // every error response as well as the API routes.
+        .layer(axum::middleware::from_fn_with_state(
+            security_headers::SecurityHeaders::from_config(&state.config),
+            security_headers::layer,
+        ))
         .with_state(state)
 }
 

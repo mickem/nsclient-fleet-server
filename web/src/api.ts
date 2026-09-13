@@ -45,6 +45,8 @@ export type ApiKeyView = {
   token_prefix: string;
   created_at: number;
   last_used_at: number | null;
+  /** Null for a key that never expires. */
+  expires_at: number | null;
 };
 
 /** Only ever returned by `POST /api/keys`; the token is unrecoverable afterwards. */
@@ -130,11 +132,17 @@ export type CreateHostResponse = {
   expires_at: number;
 };
 
+/** Which tag source a leaf will accept a value from. Omitted means `manual`, which is
+ *  what every selector written before this field existed means. `agent` and `any` accept
+ *  values the host reports about itself, so a leaf using either lets hosts decide their
+ *  own membership — and therefore which bundles they are served. */
+export type SourceFilter = "manual" | "agent" | "any";
+
 // Selector expression tree — mirrors fleet_core::selector::Expr (serde tag = "op").
 export type Expr =
-  | { op: "eq"; key: string; value: string }
-  | { op: "in"; key: string; values: string[] }
-  | { op: "exists"; key: string }
+  | { op: "eq"; key: string; value: string; source?: SourceFilter }
+  | { op: "in"; key: string; values: string[]; source?: SourceFilter }
+  | { op: "exists"; key: string; source?: SourceFilter }
   | { op: "not"; expr: Expr }
   | { op: "and"; exprs: Expr[] }
   | { op: "or"; exprs: Expr[] };
@@ -206,6 +214,7 @@ export type TierLimits = {
   min_poll_interval_secs: number;
   per_host_requests_per_minute: number;
   max_bundle_mb: number;
+  max_bundles: number;
 };
 
 /** The numeric fields that may be overridden per tenant. `null` in any field means "inherit
@@ -215,6 +224,7 @@ export type TierOverrides = {
   min_poll_interval_secs: number | null;
   per_host_requests_per_minute: number | null;
   max_bundle_mb: number | null;
+  max_bundles: number | null;
 };
 
 export type PlatformTenantView = {
@@ -252,7 +262,24 @@ export type PlatformUserView = {
 export type PlatformSettings = { signups_enabled: boolean; on_prem: boolean };
 
 /** Unauthenticated: whether the sign-in page should offer a signup link at all. */
-export type PublicConfig = { signups_enabled: boolean; on_prem: boolean };
+export type PublicConfig = {
+  signups_enabled: boolean;
+  on_prem: boolean;
+  /** Null when Turnstile is off for this deployment. Public by design — the site key
+   *  names the widget, it is not a credential. */
+  turnstile_site_key: string | null;
+};
+
+/** Result of revoking a host's certificates. The bootstrap token is part of the answer,
+ *  not a separate step: revoking without one would strand the host, since enrollment
+ *  refuses a host that is already enrolled. */
+export type RevokeHostResponse = {
+  host_id: string;
+  revoked_certs: number;
+  bootstrap_token: string;
+  install_command: string;
+  expires_at: number;
+};
 
 export type CreateTenantResponse = {
   tenant: PlatformTenantView;

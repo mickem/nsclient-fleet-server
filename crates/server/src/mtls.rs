@@ -6,16 +6,18 @@ use anyhow::{anyhow, Context, Result};
 use axum::Router;
 use hyper::body::Incoming;
 use hyper_util::rt::TokioIo;
-use hyper_util::server::conn::auto::Builder as HttpBuilder;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
 use std::sync::RwLock;
 use tokio::net::TcpListener;
+use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 use tower::Service;
 use x509_parser::prelude::FromDer;
 
+use crate::conn::{http_builder, ConnLimit, HANDSHAKE_TIMEOUT};
 use fleet_storage::{Db, TenantSecretsRepo};
 
 #[derive(Clone, Debug)]
@@ -32,12 +34,21 @@ pub use fleet_proto::AGENT_ALPN;
 
 pub(crate) struct MtlsState {
     pub(crate) tls_config: Arc<ServerConfig>,
-    tenant_by_dn: HashMap<String, (i64, String)>,
+    /// Keyed by the **raw DER** of the CA's subject, not a printed-and-canonicalised
+    /// string. Two tenants whose subjects differ only in whitespace or case printed the
+    /// same under the old canonicalisation, and resolution was `find` over a hash map —
+    /// first hit wins, in whatever order the map happened to iterate. A tenant could
+    /// therefore be resolved to the wrong one and refused on the SAN cross-check, which is
+    /// a cross-tenant outage triggered by naming a tenant. DER is what the certificate
+    /// actually carries; comparing it needs no normalisation to get wrong.
+    tenant_by_issuer_der: HashMap<Vec<u8>, (i64, String)>,
 }
 
 impl MtlsState {
     fn trusts_tenant(&self, tenant_id: i64) -> bool {
-        self.tenant_by_dn.values().any(|(id, _)| *id == tenant_id)
+        self.tenant_by_issuer_der
+            .values()
+            .any(|(id, _)| *id == tenant_id)
     }
 }
 
@@ -124,17 +135,32 @@ async fn build_state(db: &Db, server_cert_pem: &str, server_key_pem: &str) -> Re
     let cas = secrets.list_all_cas().await?;
 
     let mut roots = RootCertStore::empty();
-    let mut tenant_by_dn = HashMap::new();
+    let mut tenant_by_issuer_der: HashMap<Vec<u8>, (i64, String)> = HashMap::new();
     for ca in &cas {
         let der = parse_first_cert_pem(&ca.ca_cert_pem)
             .with_context(|| format!("ca pem for tenant {}", ca.tenant_id))?;
+        let subject_der = ca_subject_der(&der)
+            .with_context(|| format!("ca subject for tenant {}", ca.tenant_id))?;
+
+        // Two tenants cannot share a CA subject: slugs are unique and validated, so this
+        // is a bug or a hand-edited database rather than something a user can cause. Refuse
+        // both rather than picking one — resolving a leaf to the wrong tenant is worse than
+        // refusing it, and taking the whole rebuild down would strand every other tenant.
+        if let Some((other_id, _)) = tenant_by_issuer_der.get(&subject_der) {
+            tracing::error!(
+                tenant_id = ca.tenant_id,
+                other_tenant_id = other_id,
+                subject_dn = %ca.ca_subject_dn,
+                "two tenants share a CA subject — neither will be trusted until this is resolved"
+            );
+            tenant_by_issuer_der.remove(&subject_der);
+            continue;
+        }
+
         roots
             .add(CertificateDer::from(der))
             .with_context(|| format!("add ca for tenant {}", ca.tenant_id))?;
-        tenant_by_dn.insert(
-            ca.ca_subject_dn.clone(),
-            (ca.tenant_id, ca.tenant_slug.clone()),
-        );
+        tenant_by_issuer_der.insert(subject_der, (ca.tenant_id, ca.tenant_slug.clone()));
     }
 
     let server_certs = parse_all_cert_pem(server_cert_pem)?
@@ -156,6 +182,8 @@ async fn build_state(db: &Db, server_cert_pem: &str, server_key_pem: &str) -> Re
     let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
         .build()
         .map_err(|e| anyhow!("verifier build: {e}"))?;
+    // Wrapped so the CertificateRequest carries no hint list — see `NoRootHints`.
+    let verifier = Arc::new(NoRootHints(verifier));
 
     let mut cfg = ServerConfig::builder()
         .with_client_cert_verifier(verifier)
@@ -171,21 +199,18 @@ async fn build_state(db: &Db, server_cert_pem: &str, server_key_pem: &str) -> Re
 
     Ok(MtlsState {
         tls_config: Arc::new(cfg),
-        tenant_by_dn,
+        tenant_by_issuer_der,
     })
 }
 
 fn parse_all_cert_pem(pem: &str) -> Result<Vec<Vec<u8>>> {
-    let mut out = Vec::new();
-    let mut rest = pem.as_bytes();
-    while let Some((item, remaining)) =
-        rustls_pemfile::read_one_from_slice(rest).map_err(|e| anyhow!("pem parse: {e:?}"))?
-    {
-        rest = remaining;
-        if let rustls_pemfile::Item::X509Certificate(c) = item {
-            out.push(c.to_vec());
-        }
-    }
+    // `pem_slice_iter` yields only the sections of the requested type, so the "read one,
+    // match on which kind it turned out to be, discard the rest" loop this replaces is gone
+    // — the type asked for *is* the filter.
+    let out = CertificateDer::pem_slice_iter(pem.as_bytes())
+        .map(|c| c.map(|c| c.as_ref().to_vec()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| anyhow!("pem parse: {e:?}"))?;
     if out.is_empty() {
         Err(anyhow!("no certificates in PEM"))
     } else {
@@ -201,16 +226,9 @@ fn parse_first_cert_pem(pem: &str) -> Result<Vec<u8>> {
 }
 
 fn parse_first_pkcs8_key_pem(pem: &str) -> Result<Vec<u8>> {
-    let mut rest = pem.as_bytes();
-    while let Some((item, remaining)) =
-        rustls_pemfile::read_one_from_slice(rest).map_err(|e| anyhow!("pem parse: {e:?}"))?
-    {
-        rest = remaining;
-        if let rustls_pemfile::Item::Pkcs8Key(k) = item {
-            return Ok(k.secret_pkcs8_der().to_vec());
-        }
-    }
-    Err(anyhow!("no pkcs8 private key in PEM"))
+    PrivatePkcs8KeyDer::from_pem_slice(pem.as_bytes())
+        .map(|k| k.secret_pkcs8_der().to_vec())
+        .map_err(|e| anyhow!("no pkcs8 private key in PEM: {e:?}"))
 }
 
 pub async fn serve(addr: &str, ctx: MtlsContext, router: Router) -> Result<()> {
@@ -227,7 +245,11 @@ pub async fn serve(addr: &str, ctx: MtlsContext, router: Router) -> Result<()> {
 /// another mTLS server the symptom is a TLS trust failure (`UnknownCA`, from a trust store
 /// belonging to someone else) rather than anything resembling a port collision.
 pub async fn serve_on(listener: TcpListener, ctx: MtlsContext, router: Router) -> Result<()> {
+    let limit = ConnLimit::new("agent-mtls");
     loop {
+        // Taken before `accept` — see `crate::conn::ConnLimit` for why the backpressure
+        // belongs in the kernel backlog rather than in an accept-then-drop.
+        let permit = limit.acquire().await;
         let (stream, peer_addr) = match listener.accept().await {
             Ok(p) => p,
             Err(e) => {
@@ -241,6 +263,7 @@ pub async fn serve_on(listener: TcpListener, ctx: MtlsContext, router: Router) -
             if let Err(e) = handle_conn(stream, peer_addr, snapshot, router).await {
                 tracing::debug!(error = %e, ip = %peer_addr.ip(), "mTLS conn ended");
             }
+            drop(permit);
         });
     }
 }
@@ -291,10 +314,14 @@ async fn handle_conn(
     router: Router,
 ) -> Result<()> {
     let acceptor = TlsAcceptor::from(state.tls_config.clone());
-    let tls = match acceptor.accept(stream).await {
-        Ok(t) => t,
-        Err(e) => {
+    let tls = match timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => {
             log_handshake_failure(&e, peer_addr.ip());
+            return Ok(());
+        }
+        Err(_) => {
+            tracing::info!(ip = %peer_addr.ip(), "mTLS handshake timed out");
             return Ok(());
         }
     };
@@ -325,7 +352,7 @@ pub(crate) async fn serve_tls_conn(
     }
     let leaf_der = peer_chain[0].clone();
 
-    let leaf = match parse_leaf(&leaf_der, &state.tenant_by_dn) {
+    let leaf = match parse_leaf(&leaf_der, &state.tenant_by_issuer_der) {
         Ok(l) => l,
         Err(e) => {
             // The chain verified against a tenant CA but the leaf's identity claims are
@@ -353,7 +380,7 @@ pub(crate) async fn serve_tls_conn(
         }
     });
 
-    HttpBuilder::new(hyper_util::rt::TokioExecutor::new())
+    http_builder()
         .serve_connection(io, svc_fn)
         .await
         .map_err(|e| anyhow!("http: {e}"))?;
@@ -362,19 +389,26 @@ pub(crate) async fn serve_tls_conn(
 
 fn parse_leaf(
     der: &CertificateDer<'_>,
-    tenant_by_dn: &HashMap<String, (i64, String)>,
+    tenant_by_issuer_der: &HashMap<Vec<u8>, (i64, String)>,
 ) -> Result<PeerHostContext> {
     let (_, parsed) = x509_parser::certificate::X509Certificate::from_der(der.as_ref())
         .map_err(|e| anyhow!("parse leaf: {e}"))?;
 
     // The leaf's Issuer field — if we got here, rustls already verified the chain against
-    // our trust store, so this issuer string is authentic.
-    let issuer = canonicalize_dn(&parsed.tbs_certificate.issuer.to_string());
-    let (tenant_id, tenant_slug) = tenant_by_dn
-        .iter()
-        .find(|(stored, _)| canonicalize_dn(stored) == issuer)
-        .map(|(_, v)| v.clone())
-        .ok_or_else(|| anyhow!("issuer not in tenant map: {issuer}"))?;
+    // our trust store, so this issuer is authentic. Matched on its raw DER: an exact
+    // lookup on the bytes the certificate carries, rather than a scan comparing printed
+    // forms that two tenants could share.
+    let issuer_der = parsed.tbs_certificate.issuer.as_raw();
+    let (tenant_id, tenant_slug) =
+        tenant_by_issuer_der
+            .get(issuer_der)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!(
+                    "issuer not in tenant map: {}",
+                    parsed.tbs_certificate.issuer
+                )
+            })?;
 
     // Now read the host_id and the SAN-encoded slug. Cross-check the slug.
     let mut san_slug: Option<String> = None;
@@ -419,13 +453,73 @@ fn parse_leaf(
     })
 }
 
-/// rustls and x509-parser format DNs slightly differently (RDN ordering, casing). For Phase 3
-/// we accept either by canonicalising to lowercase and stripping whitespace.
-fn canonicalize_dn(dn: &str) -> String {
-    dn.chars()
-        .filter(|c| !c.is_whitespace())
-        .flat_map(|c| c.to_lowercase())
-        .collect()
+/// A client-certificate verifier that answers the same as the one it wraps, except that it
+/// hints at no trust anchors at all.
+///
+/// rustls puts the DN of every root in the trust store into the `certificate_authorities`
+/// extension of the CertificateRequest. That store is one CA per tenant, and the subject
+/// carries the tenant's slug — so anyone who could open a connection on the agent branch was
+/// handed a list of every customer. The hints exist to help a client choose among several
+/// certificates; our agents hold exactly one and present it unconditionally, and an empty
+/// list is specified to mean "send whatever you have".
+#[derive(Debug)]
+struct NoRootHints(Arc<dyn rustls::server::danger::ClientCertVerifier>);
+
+impl rustls::server::danger::ClientCertVerifier for NoRootHints {
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        &[]
+    }
+
+    fn offer_client_auth(&self) -> bool {
+        self.0.offer_client_auth()
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        self.0.client_auth_mandatory()
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+        self.0.verify_client_cert(end_entity, intermediates, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.0.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.0.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.supported_verify_schemes()
+    }
+}
+
+/// The raw DER of a CA certificate's subject, which is exactly the bytes a leaf issued by
+/// it carries in its issuer field.
+///
+/// This replaces canonicalising the printed DN. Printed forms differ between libraries in
+/// RDN ordering and casing, which is why the old code lowercased and stripped whitespace —
+/// and stripping whitespace is what let `ac me` and `acme` become the same key.
+fn ca_subject_der(cert_der: &[u8]) -> Result<Vec<u8>> {
+    let (_, parsed) = x509_parser::certificate::X509Certificate::from_der(cert_der)
+        .map_err(|e| anyhow!("parse ca: {e}"))?;
+    Ok(parsed.tbs_certificate.subject.as_raw().to_vec())
 }
 
 /// Load the mTLS server identity from `dir`, generating and persisting it on first run.

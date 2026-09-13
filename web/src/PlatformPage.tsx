@@ -52,7 +52,7 @@ import {
 } from "./api";
 import { RefreshButton } from "./RefreshButton";
 
-/** The four numeric fields a tenant may have overridden, and how to label them. Kept in one
+/** The numeric fields a tenant may have overridden, and how to label them. Kept in one
  *  place because the edit form, the "what does this tier grant" hint and the summary chip on
  *  each row all iterate the same list. */
 const OVERRIDE_FIELDS: { key: keyof TierOverrides; label: string; unit?: string }[] = [
@@ -60,6 +60,7 @@ const OVERRIDE_FIELDS: { key: keyof TierOverrides; label: string; unit?: string 
   { key: "min_poll_interval_secs", label: "Min poll interval", unit: "s" },
   { key: "per_host_requests_per_minute", label: "Requests / host / min" },
   { key: "max_bundle_mb", label: "Max bundle size", unit: "MB" },
+  { key: "max_bundles", label: "Max bundles" },
 ];
 
 const EMPTY_OVERRIDES: TierOverrides = {
@@ -67,6 +68,7 @@ const EMPTY_OVERRIDES: TierOverrides = {
   min_poll_interval_secs: null,
   per_host_requests_per_minute: null,
   max_bundle_mb: null,
+  max_bundles: null,
 };
 
 /** Unix seconds ↔ the `yyyy-mm-dd` an `<input type="date">` speaks. A trial set for a given
@@ -615,7 +617,7 @@ function SubscriptionDialog({
             helperText={
               base
                 ? `${fmtLimit(base.max_hosts)} hosts · poll every ${base.min_poll_interval_secs}s · ` +
-                  `${base.per_host_requests_per_minute} req/host/min · ${base.max_bundle_mb} MB bundles`
+                  `${base.per_host_requests_per_minute} req/host/min · ${base.max_bundle_mb} MB bundles · ${base.max_bundles} bundles`
                 : "Tiers are defined in code and applied on the tenant's next request."
             }
             fullWidth

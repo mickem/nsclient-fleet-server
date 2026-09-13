@@ -47,6 +47,11 @@ pub struct BundleRef {
 
 #[derive(Serialize)]
 pub struct DesiredStateResponse {
+    /// The tenant these bundles belong to. Part of the descriptor a bundle's signature
+    /// covers, and the agent cannot derive it from its certificate (which carries the
+    /// slug), so it is sent rather than guessed at. Cross-checked by the signature itself:
+    /// the verifying key is per tenant, so a wrong value here just fails verification.
+    pub tenant_id: i64,
     pub state_hash: String,
     pub next_poll_in_seconds: u32,
     pub merged_config_json: serde_json::Value,
@@ -131,6 +136,7 @@ pub async fn desired_state(
         .collect();
 
     Json(DesiredStateResponse {
+        tenant_id: ctx.tenant_id,
         state_hash: ds.state_hash,
         next_poll_in_seconds: next_poll,
         merged_config_json: ds.merged_config,
@@ -147,8 +153,10 @@ pub struct StateReport {
     pub bundles_installed: Vec<serde_json::Value>,
     #[serde(default)]
     pub errors: Vec<String>,
+    /// The host's full view of its own tags, or `None` when the field is absent and the
+    /// agent is saying nothing. An explicit `{}` is an answer — it clears them.
     #[serde(default)]
-    pub reported_tags: BTreeMap<String, String>,
+    pub reported_tags: Option<BTreeMap<String, String>>,
     /// Whether the host carries configuration of its own that outranks what we send it.
     ///
     /// `None` means the agent said nothing — a build older than the field — and is stored as
@@ -159,6 +167,58 @@ pub struct StateReport {
     pub local_config_present: Option<bool>,
 }
 
+/// Longest hostname or OS string we will store. Both are the host's own description of
+/// itself and both are rendered in the console.
+pub const MAX_HOST_DESCRIPTOR_LEN: usize = 256;
+
+/// Most error strings one report may carry, and how long each may be. An agent reporting
+/// its bundle failures needs a handful of lines, not a log file.
+const MAX_ERRORS: usize = 32;
+const MAX_ERROR_LEN: usize = 512;
+
+/// A state hash is a SHA-256 in hex, and nothing else is meaningful.
+///
+/// It was stored verbatim up to the body limit and echoed back into the console, so a host
+/// could put two megabytes of anything into a field an operator reads.
+fn valid_state_hash(h: &str) -> bool {
+    h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Trim what a host says about itself to something storable, or None if it says nothing.
+///
+/// Truncates rather than refusing: a hostname is descriptive, not load-bearing, and
+/// refusing an enrollment over a long one would be a worse outcome than storing 256
+/// characters of it.
+pub fn clamp_descriptor(v: Option<&str>) -> Option<String> {
+    let v = v?.trim();
+    if v.is_empty() {
+        return None;
+    }
+    Some(v.chars().take(MAX_HOST_DESCRIPTOR_LEN).collect())
+}
+
+/// Bound what a host may store about itself.
+///
+/// The limits are the selector's own: a key or value longer than a selector can compare is
+/// something that could never be matched, so accepting it is storing what cannot be used.
+/// Agent tags were previously taken as sent, with no cap on count or length, and were never
+/// deleted except with the host.
+fn check_reported_tags(tags: &BTreeMap<String, String>) -> Result<(), &'static str> {
+    use fleet_core::selector::{MAX_KEY_LEN, MAX_TAGS_PER_HOST, MAX_VALUE_LEN};
+    if tags.len() > MAX_TAGS_PER_HOST {
+        return Err("too many tags");
+    }
+    for (k, v) in tags {
+        if k.trim().is_empty() || k.len() > MAX_KEY_LEN {
+            return Err("tag key is empty or too long");
+        }
+        if v.len() > MAX_VALUE_LEN {
+            return Err("tag value is too long");
+        }
+    }
+    Ok(())
+}
+
 pub async fn state_report(
     State(state): State<AppState>,
     axum::Extension(ctx): axum::Extension<PeerHostContext>,
@@ -166,9 +226,16 @@ pub async fn state_report(
 ) -> Response {
     let hosts_repo = HostRepo::new(&state.db);
     let tags_repo = HostTagsRepo::new(&state.db);
-    let tenants_repo = TenantRepo::new(&state.db);
 
     if let Some(hash) = &body.applied_state_hash {
+        if !valid_state_hash(hash) {
+            tracing::info!(host_id = %ctx.host_id, "rejected a malformed applied_state_hash");
+            return (
+                StatusCode::BAD_REQUEST,
+                "applied_state_hash must be 64 hex characters",
+            )
+                .into_response();
+        }
         if let Err(e) = hosts_repo
             .update_current_state_hash(ctx.tenant_id, &ctx.host_id, hash)
             .await
@@ -207,15 +274,25 @@ pub async fn state_report(
         }
     }
 
-    if !body.reported_tags.is_empty() {
+    if let Some(reported) = &body.reported_tags {
+        if let Err(msg) = check_reported_tags(reported) {
+            tracing::info!(host_id = %ctx.host_id, %msg, "rejected reported tags");
+            return (StatusCode::BAD_REQUEST, msg).into_response();
+        }
         match tags_repo
-            .upsert_agent_tags(ctx.tenant_id, &ctx.host_id, &body.reported_tags)
+            .replace_agent_tags(ctx.tenant_id, &ctx.host_id, reported)
             .await
         {
             Ok(true) => {
-                if let Err(e) = tenants_repo.bump_config_version(ctx.tenant_id).await {
-                    tracing::error!(error = %e, "config_version bump failed");
-                }
+                // This host's entry, not the tenant's config version. A host's own tags
+                // change only its own group membership, but bumping the version made every
+                // other host's cached state stale too — so one host toggling a value at its
+                // allowed request rate kept the whole tenant recomputing, on every poll and
+                // on every hosts-page load.
+                state
+                    .desired_state_cache
+                    .invalidate_host(ctx.tenant_id, &ctx.host_id);
+
                 // No trust-store rebuild here: it is built purely from tenant CAs
                 // (`build_state` reads `list_all_cas` and nothing else), and reported tags
                 // cannot change it. Rebuilding re-read every CA and rebuilt a rustls
@@ -224,14 +301,28 @@ pub async fn state_report(
             }
             Ok(false) => { /* no-op: nothing changed */ }
             Err(e) => {
-                tracing::error!(error = %e, "upsert_agent_tags failed");
+                tracing::error!(error = %e, "replace_agent_tags failed");
                 return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
             }
         }
     }
 
     if !body.errors.is_empty() {
-        tracing::warn!(host_id = %ctx.host_id, errors = ?body.errors, "host reported errors");
+        // Capped on both axes before it reaches a log line. These are not stored, but they
+        // are written to the journal verbatim, and "the host decides how much it writes to
+        // your disk" is not a property worth having.
+        let shown: Vec<String> = body
+            .errors
+            .iter()
+            .take(MAX_ERRORS)
+            .map(|e| e.chars().take(MAX_ERROR_LEN).collect())
+            .collect();
+        tracing::warn!(
+            host_id = %ctx.host_id,
+            reported = body.errors.len(),
+            errors = ?shown,
+            "host reported errors"
+        );
     }
 
     Json(serde_json::json!({})).into_response()
@@ -263,7 +354,12 @@ pub async fn renew(
         _ => return (StatusCode::INTERNAL_SERVER_ERROR, "tenant secrets missing").into_response(),
     };
 
-    let ca_key_pem = match state.config.master_key.decrypt(&secrets.ca_key_encrypted) {
+    let ca_key_pem = match state.config.master_key.decrypt(
+        fleet_core::aead::Purpose::TenantCaKey {
+            tenant_id: ctx.tenant_id,
+        },
+        &secrets.ca_key_encrypted,
+    ) {
         Ok(b) => match String::from_utf8(b) {
             Ok(s) => s,
             Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "ca key corrupt").into_response(),

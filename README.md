@@ -71,12 +71,30 @@ Roles are enforced server-side (`crates/core/src/user.rs` defines them; every ha
 `can_*` method); the UI only hides controls a role cannot use. A role change applies on the
 user's next request, without them signing in again.
 
+Two things every role can see, deliberately, and worth knowing before you invite someone as
+`view_only`:
+
+- **The audit log**, tenant-wide, including the email addresses of who did what and who was
+  invited. Its purpose is that everyone in a tenant can see what happened to their fleet; the
+  cost is that the member list is not private within a tenant.
+- **A host's `state_hash`**, which is derived from its configuration. It is an HMAC under a
+  key only the server holds, so it is not a way to read that configuration back — see
+  `crates/server/src/desired_state.rs`.
+
+Encrypted bundles are the exception that goes the other way: their contents are unreadable to
+*every* role, and to the server. The key lives in the browser, in `sessionStorage`, so an
+operator who unlocks it on a shared machine should close the tab. That placement is what
+makes the Content-Security-Policy on this origin load-bearing rather than decorative —
+`crates/server/src/security_headers.rs`.
+
 The owner cannot be re-roled or removed, and nobody can change their own role or delete their
 own account — together that keeps a tenant from locking itself out. Deleting a user signs them
 out immediately and leaves their audit entries in place, without attribution.
 
 Invitations are unavailable when `ON_PREM=true`: that mode disables magic links and
-authenticates a single administrator from `ON_PREM_ADMIN_EMAIL` / `ON_PREM_ADMIN_PASSWORD`.
+authenticates a single administrator from `ON_PREM_ADMIN_EMAIL` plus either
+`ON_PREM_ADMIN_PASSWORD_HASH` (an argon2 PHC string, preferred) or
+`ON_PREM_ADMIN_PASSWORD`.
 
 ## Platform console
 
@@ -120,10 +138,29 @@ curl -sS -X POST https://app.example.com/api/hosts \
 The response also carries `host_id`, `bootstrap_token` and `expires_at`; the token is
 single-use and expires in an hour, same as one issued from the UI.
 
+```bash
+# A host's private key is believed stolen: cut it off and re-enroll it
+curl -sS -X POST https://app.example.com/api/hosts/$HOST_ID/revoke-certs   -H "Authorization: Bearer $NSCLIENT_FLEET_API_KEY" | jq -r .install_command
+```
+
+Revoking retires every certificate the host holds and returns it to pending with a fresh
+bootstrap token, so its tags, group membership, overrides and history survive — unlike
+deleting it, which used to be the only way to stop a certificate being accepted. Renewal
+retires the certificate it replaces on its own, but only once the agent has used the new
+one, so a lost renewal response costs the host nothing.
+
 The key itself is shown once at creation — only its SHA-256 reaches the database, alongside a
 short prefix (`nsk_a1B2c3D4…`) so keys are still identifiable in the list. Keys are private to
 their owner: nobody else can list or revoke them, admins included. Revoking a key, changing
 the owner's role, or deleting the owner all take effect on the key's next request.
+
+Two things a key deliberately cannot do, whatever its owner's role. It cannot create another
+key — otherwise revoking a leaked one revokes nothing, because its holder makes a
+replacement first. And it cannot reach the platform console, which is the one cross-tenant
+privilege in the system and has nothing a script needs. Both are a signed-in session only.
+
+Keys can be given an expiry, and the console offers one by default: a key with no end is a
+credential with no end.
 
 ## Dev environment variables
 
@@ -148,7 +185,8 @@ All other env vars have working dev defaults. Useful overrides:
 | `BUNDLE_DIR`                                            | `data/bundles`          | Local bundle store root                                                                                                                                   |
 | `ON_PREM`                                               | `false`                 | Disables signup + magic links; enables password admin login                                                                                               |
 | `ON_PREM_ADMIN_EMAIL`                                   |                         | Required when `ON_PREM=true`                                                                                                                              |
-| `ON_PREM_ADMIN_PASSWORD`                                |                         | Required when `ON_PREM=true`                                                                                                                              |
+| `ON_PREM_ADMIN_PASSWORD`                                |                         | Plaintext. One of this or the hash below is required when `ON_PREM=true`                                                                                  |
+| `ON_PREM_ADMIN_PASSWORD_HASH`                           |                         | An argon2 PHC string, preferred over the plaintext. Setting both is a startup error                                                                       |
 | `PLATFORM_ADMIN_EMAILS`                                 |                         | Comma-separated; grants the platform console at boot and at account creation                                                                              |
 | `HOST_LOST_AFTER_HOURS`                                 | `48`                    | Silence after which a host reads **lost** rather than **offline**. Reporting only — nothing is revoked or deleted                                          |
 | `COOKIE_SECURE`                                         | `false`                 | Set `true` in production (HTTPS only)                                                                                                                     |
@@ -159,7 +197,7 @@ All other env vars have working dev defaults. Useful overrides:
 | `ACME_CONTACT`                                          |                         | Email registered with the ACME account                                                                                                                    |
 | `ACME_CACHE_DIR`                                        | `data/acme`             | Persistent cache so restarts don't re-issue certs                                                                                                         |
 | `ACME_STAGING`                                          | `false`                 | Use Let's Encrypt staging directory (for testing)                                                                                                         |
-| `BOOTSTRAP_JWT_SECRET`                                  | (= `MASTER_KEY`)        | Override only if you want separate keys                                                                                                                   |
+| `BOOTSTRAP_JWT_SECRET`                                  | derived from `MASTER_KEY` | Base64. Set only to use an unrelated key — the default is an HKDF subkey, not `MASTER_KEY` itself                                                        |
 
 ## Production deployment
 
@@ -173,8 +211,14 @@ must offer ALPN `nsclient-fleet/1`; anything that terminates TLS in front of the
 that re-encrypts, an inspecting middlebox, most L7 load balancers) breaks them.
 
 ```bash
-# On a fresh VM, as root
-curl -L https://github.com/mickem/nsclient-fleet-server/releases/latest/download/bootstrap-vm.sh | bash
+# On a fresh VM, as root. Verify the script before running it — it runs as root, and every
+# release asset carries a build provenance attestation so that you can.
+VERSION=v0.1.0
+BASE=https://github.com/mickem/nsclient-fleet-server/releases/download/$VERSION
+curl -fsSLO "$BASE/bootstrap-vm.sh" && curl -fsSLO "$BASE/SHA256SUMS"
+grep ' bootstrap-vm.sh$' SHA256SUMS | sha256sum -c -
+gh attestation verify bootstrap-vm.sh --repo mickem/nsclient-fleet-server
+bash bootstrap-vm.sh
 # then edit /etc/nsclient-fleet/env, point DNS at the VM, and:
 systemctl enable --now nsclient-fleet
 

@@ -51,10 +51,12 @@ function AnonRoutes({
   onDone,
   signupsEnabled,
   onPrem,
+  turnstileSiteKey,
 }: {
   onDone: () => void;
   signupsEnabled: boolean;
   onPrem: boolean;
+  turnstileSiteKey: string | null;
 }) {
   const navigate = useNavigate();
   const login = (
@@ -71,7 +73,11 @@ function AnonRoutes({
         path="/signup"
         element={
           signupsEnabled ? (
-            <Signup onDone={onDone} onSwitchToLogin={() => navigate("/login")} />
+            <Signup
+              onDone={onDone}
+              onSwitchToLogin={() => navigate("/login")}
+              turnstileSiteKey={turnstileSiteKey}
+            />
           ) : (
             <Navigate to="/login" replace />
           )
@@ -94,6 +100,7 @@ export default function App() {
   // Until the answer arrives the magic-link form shows; on-prem swaps in the password
   // form as soon as the server says so.
   const onPrem = publicConfig?.on_prem ?? false;
+  const turnstileSiteKey = publicConfig?.turnstile_site_key ?? null;
 
   const refresh = async () => {
     try {
@@ -121,7 +128,12 @@ export default function App() {
         {!ready ? null : me ? (
           <AuthedRoutes me={me} onLogout={refresh} />
         ) : (
-          <AnonRoutes onDone={refresh} signupsEnabled={signupsEnabled} onPrem={onPrem} />
+          <AnonRoutes
+            onDone={refresh}
+            signupsEnabled={signupsEnabled}
+            onPrem={onPrem}
+            turnstileSiteKey={turnstileSiteKey}
+          />
         )}
       </BrowserRouter>
     </ThemeProvider>

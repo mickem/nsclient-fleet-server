@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::{
     body::Body,
@@ -32,8 +33,21 @@ pub struct AgentRateLimits {
 struct AgentRateLimitsInner {
     // Tier name → limiter. We size each limiter for that tier's per-host RPM.
     by_tier: std::sync::RwLock<HashMap<&'static str, Arc<HostKeyedLimiter>>>,
+    /// Last desired-state poll per host. Bounded by the number of hosts that have ever
+    /// polled this process, which is not the same as the number that still exist: a
+    /// deleted host's entry used to stay forever. Swept by [`AgentRateLimits::prune`].
     last_poll: Mutex<HashMap<String, Instant>>,
+    /// Checks since the last sweep, so pruning costs nothing on the common path.
+    since_prune: AtomicUsize,
 }
+
+/// Checks between sweeps of the per-host maps.
+const PRUNE_EVERY: usize = 512;
+
+/// How long a host's last-poll entry outlives its last poll. Well past any tier's poll
+/// interval, so a live agent's entry is never dropped out from under it and handed a free
+/// poll; short enough that a deleted or decommissioned host stops costing anything.
+const LAST_POLL_TTL: Duration = Duration::from_secs(3_600);
 
 impl AgentRateLimits {
     pub fn new() -> Self {
@@ -41,6 +55,7 @@ impl AgentRateLimits {
             inner: Arc::new(AgentRateLimitsInner {
                 by_tier: std::sync::RwLock::new(HashMap::new()),
                 last_poll: Mutex::new(HashMap::new()),
+                since_prune: AtomicUsize::new(0),
             }),
         }
     }
@@ -59,12 +74,48 @@ impl AgentRateLimits {
         limiter
     }
 
+    /// Drop per-host state for hosts that have gone quiet, and keys whose quota has fully
+    /// replenished. Both maps are keyed on hosts, so they are bounded by the fleet — but a
+    /// deleted host's entries used to outlive it for the life of the process.
+    pub fn prune(&self) {
+        for limiter in self.inner.by_tier.read().expect("rl lock").values() {
+            limiter.retain_recent();
+        }
+        let cutoff = Instant::now() - LAST_POLL_TTL;
+        self.inner
+            .last_poll
+            .lock()
+            .expect("poll map lock")
+            .retain(|_, seen| *seen > cutoff);
+    }
+
+    fn maybe_prune(&self) {
+        if self.inner.since_prune.fetch_add(1, Ordering::Relaxed) + 1 >= PRUNE_EVERY {
+            self.inner.since_prune.store(0, Ordering::Relaxed);
+            self.prune();
+        }
+    }
+
+    /// Entries currently held across the per-host maps.
+    pub fn tracked_keys(&self) -> usize {
+        let limiters: usize = self
+            .inner
+            .by_tier
+            .read()
+            .expect("rl lock")
+            .values()
+            .map(|l| l.len())
+            .sum();
+        limiters + self.inner.last_poll.lock().expect("poll map lock").len()
+    }
+
     pub fn check_request(
         &self,
         tier: &fleet_core::tier::TierLimits,
         tenant_id: i64,
         host_id: &str,
     ) -> Result<(), u32> {
+        self.maybe_prune();
         let limiter = self.limiter_for_tier(tier);
         let key = (tenant_id, host_id.to_owned());
         match limiter.check_key(&key) {
@@ -120,10 +171,18 @@ impl AgentRateLimits {
 type TenantKeyedLimiter =
     Governor<i64, governor::state::keyed::DefaultKeyedStateStore<i64>, DefaultClock>;
 
+type IpKeyedLimiter = Governor<
+    std::net::IpAddr,
+    governor::state::keyed::DefaultKeyedStateStore<std::net::IpAddr>,
+    DefaultClock,
+>;
+
 #[derive(Clone)]
 pub struct EnrollmentLimits {
     inner: Arc<TenantKeyedLimiter>,
+    by_source: Arc<IpKeyedLimiter>,
     per_minute: u32,
+    since_prune: Arc<AtomicUsize>,
 }
 
 impl EnrollmentLimits {
@@ -131,7 +190,9 @@ impl EnrollmentLimits {
         let qpm = NonZeroU32::new(per_minute.max(1)).unwrap();
         Self {
             inner: Arc::new(Governor::keyed(Quota::per_minute(qpm))),
+            by_source: Arc::new(Governor::keyed(Quota::per_minute(qpm))),
             per_minute,
+            since_prune: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -139,8 +200,30 @@ impl EnrollmentLimits {
     pub fn check(&self, tenant_id: i64) -> Result<(), u32> {
         match self.inner.check_key(&tenant_id) {
             Ok(_) => Ok(()),
-            Err(_) => Err((60.0 / self.per_minute as f64).ceil() as u32),
+            Err(_) => Err(self.retry_after()),
         }
+    }
+
+    /// The same allowance, keyed on the peer address instead of the tenant.
+    ///
+    /// The per-tenant budget is the right shape for a leaked token — it bounds the damage
+    /// to the tenant whose token leaked. But it is keyed on a value the caller supplies, so
+    /// a caller holding tokens for several tenants gets several budgets. This one they
+    /// cannot pick.
+    pub fn check_source(&self, ip: std::net::IpAddr) -> Result<(), u32> {
+        if self.since_prune.fetch_add(1, Ordering::Relaxed) + 1 >= PRUNE_EVERY {
+            self.since_prune.store(0, Ordering::Relaxed);
+            self.by_source.retain_recent();
+            self.inner.retain_recent();
+        }
+        match self.by_source.check_key(&ip) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(self.retry_after()),
+        }
+    }
+
+    fn retry_after(&self) -> u32 {
+        (60.0 / self.per_minute as f64).ceil() as u32
     }
 }
 
@@ -172,19 +255,46 @@ pub async fn tier_layer(State(state): State<AppState>, req: Request<Body>, next:
     // reflected in the rustls trust store — the leaf still completes the handshake and yields
     // a valid `PeerHostContext`. The serial check is what actually cuts a deleted or revoked
     // host off: its `host_certs` rows are gone (deletion) or flagged (`revoked_at`), so
-    // `is_active` returns false and we refuse before any handler runs, including `renew`.
-    match fleet_storage::HostCertRepo::new(&state.db)
-        .is_active(&ctx.serial_hex)
+    // `standing` reports it inactive and we refuse before any handler runs, including
+    // `renew`.
+    let certs = fleet_storage::HostCertRepo::new(&state.db);
+    let standing = match certs
+        .standing(ctx.tenant_id, &ctx.host_id, &ctx.serial_hex)
         .await
     {
-        Ok(true) => {}
-        Ok(false) => {
-            tracing::info!(host_id = %ctx.host_id, serial = %ctx.serial_hex, "agent cert revoked or unknown");
-            return (StatusCode::FORBIDDEN, "cert revoked or unknown").into_response();
-        }
+        Ok(s) => s,
         Err(e) => {
-            tracing::error!(error = %e, "is_active check failed");
+            tracing::error!(error = %e, "cert standing check failed");
             return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+        }
+    };
+    if !standing.active {
+        tracing::info!(host_id = %ctx.host_id, serial = %ctx.serial_hex, "agent cert revoked or unknown");
+        return (StatusCode::FORBIDDEN, "cert revoked or unknown").into_response();
+    }
+
+    // Renewal issues a new certificate but cannot safely retire the old one at that
+    // moment: if the response never reaches the agent, the agent still holds only the old
+    // key and revoking it would strand the host. Using the new certificate is the proof
+    // that it arrived, so the previous ones are retired here, on the first request that
+    // presents a newer serial. Without this a host on schedule accumulates valid
+    // identities and a key stolen from it stays usable for the rest of its 90 days.
+    //
+    // Once per renewal, not once per request: `superseded` is zero on the overwhelmingly
+    // common path and no write happens. A failure is logged and the request proceeds — the
+    // next one retries, and refusing service over bookkeeping would be the wrong trade.
+    if standing.superseded > 0 {
+        match certs
+            .retire_superseded(ctx.tenant_id, &ctx.host_id, &ctx.serial_hex)
+            .await
+        {
+            Ok(n) => tracing::info!(
+                host_id = %ctx.host_id,
+                serial = %ctx.serial_hex,
+                revoked = n,
+                "retired certificates superseded by a completed renewal"
+            ),
+            Err(e) => tracing::error!(error = %e, "retiring superseded certs failed"),
         }
     }
 

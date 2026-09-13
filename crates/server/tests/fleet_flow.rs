@@ -59,9 +59,11 @@ async fn start() -> TestServer {
         on_prem: false,
         on_prem_admin_email: None,
         on_prem_admin_password: None,
+        on_prem_admin_password_hash: None,
         platform_admin_emails: Vec::new(),
         magic_link_ttl_secs: 900,
         session_ttl_secs: 3600,
+        session_idle_ttl_secs: 3600,
         bootstrap_ttl_secs: 3600,
         host_lost_after_secs: 172_800,
         client_cert_lifetime_days: 90,
@@ -69,6 +71,7 @@ async fn start() -> TestServer {
         daily_email_budget: 1_000_000,
         smtp: None,
         turnstile_secret: None,
+        turnstile_site_key: None,
         master_key,
         bootstrap_jwt_secret,
     };
@@ -235,7 +238,8 @@ async fn fifty_agents_enroll_heartbeat_and_report_state() {
         tags.insert("env".into(), "prod".into());
         tags.insert("agent_index".into(), i.to_string());
         agent
-            .report_state(Some(&format!("hash-{i:02}")), tags)
+            // A state hash is a SHA-256 in hex and the server now insists on that shape.
+            .report_state(Some(&format!("{i:064x}")), tags)
             .await
             .expect("state report");
     });
@@ -338,7 +342,12 @@ async fn fifty_agents_converge_on_assigned_bundle() {
         .post(format!("{}/api/groups", s.base_url))
         .json(&serde_json::json!({
             "name": "prod",
-            "selector": { "clauses": [ { "op": "eq", "key": "env", "value": "prod" } ] },
+            // Agent-sourced on purpose: this test is about fifty agents converging on
+            // their own, so the group has to be one they can place themselves in. See
+            // `fleet_core::selector` for what that opt-in costs.
+            "selector": { "clauses": [
+                { "op": "eq", "key": "env", "value": "prod", "source": "agent" }
+            ] },
         }))
         .send()
         .await
@@ -421,9 +430,8 @@ async fn fifty_agents_converge_on_assigned_bundle() {
         assert_eq!(ds.bundles.len(), 1, "bundle must be in desired state");
         let b = &ds.bundles[0];
         let bytes = agent
-            .fetch_bundle(
-                b["id"].as_str().unwrap(),
-                b["sha256"].as_str().unwrap(),
+            .fetch_bundle_verified(
+                ds.descriptor(b).expect("descriptor"),
                 b["signature"].as_str().unwrap(),
             )
             .await

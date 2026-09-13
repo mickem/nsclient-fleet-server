@@ -1,7 +1,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use std::net::SocketAddr;
+
 use axum::{
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -113,6 +115,8 @@ pub async fn create(
         nonce,
         iat: now,
         exp: now + state.config.bootstrap_ttl_secs as usize,
+        // Stamped by `encode_bootstrap`; the value here is ignored.
+        aud: String::new(),
     };
     let token = encode_bootstrap(&state.config.bootstrap_jwt_secret, &claims);
 
@@ -391,6 +395,102 @@ async fn status_inputs(
     Ok((thresholds, desired))
 }
 
+#[derive(Serialize)]
+pub struct RevokeHostResponse {
+    pub host_id: String,
+    /// Certificates this call revoked. Zero is normal for a host that never enrolled.
+    pub revoked_certs: u64,
+    /// A fresh bootstrap token, because revoking without one would strand the host: its
+    /// certificates stop working and enrollment refuses an already-enrolled host.
+    pub bootstrap_token: String,
+    pub install_command: String,
+    pub expires_at: i64,
+}
+
+/// Revoke every certificate a host holds and return it to pending with a new bootstrap
+/// token.
+///
+/// The lever for "this host's private key is believed stolen". Before this existed the
+/// only way to stop a certificate being accepted was to delete the host, which also threw
+/// away its tags, group membership, overrides and history — so in practice nobody did it,
+/// and `revoked_at` was a column nothing ever wrote. Keeping the host row means the
+/// operator re-runs enrollment and everything else about the host is exactly where they
+/// left it.
+pub async fn revoke_host_certs(
+    State(state): State<AppState>,
+    who: AuthedUser,
+    Path(host_id): Path<String>,
+) -> Response {
+    if !who.role.can_write_config() {
+        return crate::auth::forbidden("change configuration");
+    }
+    let tenant = match TenantRepo::new(&state.db).get(who.tenant_id).await {
+        Ok(Some(t)) => t,
+        _ => return (StatusCode::INTERNAL_SERVER_ERROR, "tenant missing").into_response(),
+    };
+
+    let nonce = random_token();
+    let nonce_hash = hash_token(&nonce);
+    let expires_at = now_unix() + state.config.bootstrap_ttl_secs;
+
+    let revoked = match HostRepo::new(&state.db)
+        .revoke_certs_and_reset_to_pending(who.tenant_id, &host_id, &nonce_hash, expires_at)
+        .await
+    {
+        Ok(Some(n)) => n,
+        Ok(None) => return (StatusCode::NOT_FOUND, "host not found").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "host cert revoke failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+        }
+    };
+
+    // The host is no longer enrolled, so its desired state is no longer anyone's to serve.
+    state
+        .desired_state_cache
+        .invalidate_host(who.tenant_id, &host_id);
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as usize;
+    let claims = BootstrapClaims {
+        host_id: host_id.clone(),
+        tenant_id: tenant.id,
+        nonce,
+        iat: now,
+        exp: now + state.config.bootstrap_ttl_secs as usize,
+        // Stamped by `encode_bootstrap`; the value here is ignored.
+        aud: String::new(),
+    };
+    let token = encode_bootstrap(&state.config.bootstrap_jwt_secret, &claims);
+    let install_command = format!(
+        "nscp enroll --server {} --token {}",
+        state.config.base_url.trim_end_matches('/'),
+        token
+    );
+
+    crate::audit::record(
+        &state,
+        who.tenant_id,
+        Some(who.user_id),
+        "host.certs_revoked",
+        "host",
+        &host_id,
+        Some(&serde_json::json!({ "revoked_certs": revoked })),
+    )
+    .await;
+
+    Json(RevokeHostResponse {
+        host_id,
+        revoked_certs: revoked,
+        bootstrap_token: token,
+        install_command,
+        expires_at,
+    })
+    .into_response()
+}
+
 pub async fn delete_host(
     State(state): State<AppState>,
     who: AuthedUser,
@@ -574,7 +674,9 @@ pub async fn bulk_tags(
     let tags_repo = HostTagsRepo::new(&state.db);
     let mut updated = 0usize;
     let mut not_found = Vec::new();
-    let mut changed = false;
+    // Which hosts actually changed, so only their memoized state is dropped rather than
+    // the whole tenant's.
+    let mut touched: Vec<String> = Vec::new();
     for host_id in host_ids {
         match hosts_repo.get(who.tenant_id, &host_id).await {
             Ok(Some(_)) => {}
@@ -587,12 +689,13 @@ pub async fn bulk_tags(
                 return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
             }
         }
+        let mut host_changed = false;
         for tag in &body.set {
             match tags_repo
                 .upsert_manual_tag(who.tenant_id, &host_id, &tag.key, &tag.value)
                 .await
             {
-                Ok(c) => changed |= c,
+                Ok(c) => host_changed |= c,
                 Err(e) => {
                     tracing::error!(error = %e, "tag upsert failed");
                     return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
@@ -604,17 +707,38 @@ pub async fn bulk_tags(
                 .delete_manual_tag(who.tenant_id, &host_id, key)
                 .await
             {
-                Ok(c) => changed |= c,
+                Ok(c) => host_changed |= c,
                 Err(e) => {
                     tracing::error!(error = %e, "tag delete failed");
                     return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
                 }
             }
         }
+        if host_changed {
+            touched.push(host_id.clone());
+        }
         updated += 1;
     }
-    if changed {
-        crate::config_api::bump_config_version(&state, who.tenant_id).await;
+    for host_id in &touched {
+        state
+            .desired_state_cache
+            .invalidate_host(who.tenant_id, host_id);
+    }
+    if !touched.is_empty() {
+        crate::audit::record(
+            &state,
+            who.tenant_id,
+            Some(who.user_id),
+            "host.tags_bulk_changed",
+            "host",
+            &touched.join(","),
+            Some(&serde_json::json!({
+                "set": body.set.iter().map(|t| &t.key).collect::<Vec<_>>(),
+                "remove": &body.remove,
+                "hosts": touched.len(),
+            })),
+        )
+        .await;
     }
     Json(BulkResult { updated, not_found }).into_response()
 }
@@ -722,8 +846,12 @@ pub struct EnrollResponse {
     pub mtls_server_cert_pem: String,
 }
 
-pub async fn enroll(State(state): State<AppState>, Json(body): Json<EnrollBody>) -> Response {
-    use fleet_storage::{HostCertRepo, TenantSecretsRepo};
+pub async fn enroll(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<EnrollBody>,
+) -> Response {
+    use fleet_storage::TenantSecretsRepo;
 
     let claims = match fleet_enrollment::decode_bootstrap(
         &state.config.bootstrap_jwt_secret,
@@ -751,10 +879,50 @@ pub async fn enroll(State(state): State<AppState>, Json(body): Json<EnrollBody>)
         return resp;
     }
 
+    // And a coarse per-source limit alongside it. The per-tenant one bounds the damage to
+    // one tenant, which is the right shape for a leaked token — but it is keyed on a value
+    // the caller supplies, so a caller holding tokens for several tenants has several
+    // budgets. This one they cannot pick.
+    if let Err(retry) = state.enrollment_limits.check_source(addr.ip()) {
+        let mut resp = (
+            StatusCode::TOO_MANY_REQUESTS,
+            "enrollment rate limit exceeded",
+        )
+            .into_response();
+        if let Ok(v) = axum::http::HeaderValue::from_str(&retry.to_string()) {
+            resp.headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, v);
+        }
+        return resp;
+    }
+
     let nonce_hash = hash_token(&claims.nonce);
     let hosts_repo = HostRepo::new(&state.db);
     let secrets_repo = TenantSecretsRepo::new(&state.db);
     let tenants_repo = TenantRepo::new(&state.db);
+
+    // Cheap read before the CA-key decrypt and the ECDSA signature below. A replayed but
+    // unexpired token used to pay for both before the nonce burn refused it. Not the
+    // authority — the burn is, and it re-checks all of this in the statement that clears
+    // it — so nothing here can let an enrollment through that the burn would not.
+    match hosts_repo
+        .bootstrap_pending(claims.tenant_id, &claims.host_id, &nonce_hash)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!(host_id = %claims.host_id, "enroll: nonce already used or expired");
+            return (
+                StatusCode::UNAUTHORIZED,
+                "bootstrap nonce already used or expired",
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "bootstrap_pending failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+        }
+    }
 
     let tenant = match tenants_repo.get(claims.tenant_id).await {
         Ok(Some(t)) => t,
@@ -769,7 +937,12 @@ pub async fn enroll(State(state): State<AppState>, Json(body): Json<EnrollBody>)
         }
     };
 
-    let ca_key_pem = match state.config.master_key.decrypt(&secrets.ca_key_encrypted) {
+    let ca_key_pem = match state.config.master_key.decrypt(
+        fleet_core::aead::Purpose::TenantCaKey {
+            tenant_id: claims.tenant_id,
+        },
+        &secrets.ca_key_encrypted,
+    ) {
         Ok(b) => match String::from_utf8(b) {
             Ok(s) => s,
             Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "ca key corrupt").into_response(),
@@ -795,44 +968,39 @@ pub async fn enroll(State(state): State<AppState>, Json(body): Json<EnrollBody>)
         }
     };
 
+    // Burn and record together. They used to be two statements, so a failure to record the
+    // certificate after the burn left the host marked enrolled with no certificate and its
+    // one-time token spent — unrecoverable except by deleting and recreating the host.
     let became_enrolled = match hosts_repo
-        .mark_enrolled_if_pending(
+        .enroll(
             claims.tenant_id,
             &claims.host_id,
             &nonce_hash,
-            body.hostname.as_deref(),
-            body.os.as_deref(),
+            crate::agent_api::clamp_descriptor(body.hostname.as_deref()).as_deref(),
+            crate::agent_api::clamp_descriptor(body.os.as_deref()).as_deref(),
+            fleet_storage::EnrolledCert {
+                serial: &issued.serial_hex,
+                fingerprint_sha256: &issued.fingerprint_sha256_hex,
+                issued_at: issued.not_before_unix,
+                expires_at: issued.not_after_unix,
+            },
         )
         .await
     {
         Ok(b) => b,
         Err(e) => {
-            tracing::error!(error = %e, "mark_enrolled_if_pending failed");
+            tracing::error!(error = %e, "enroll failed");
             return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
         }
     };
     if !became_enrolled {
+        // Lost the race with a simultaneous enrollment, or the state changed under us since
+        // the pre-check. The signed certificate is discarded rather than recorded.
         return (
             StatusCode::UNAUTHORIZED,
             "bootstrap nonce already used or expired",
         )
             .into_response();
-    }
-
-    let cert_repo = HostCertRepo::new(&state.db);
-    if let Err(e) = cert_repo
-        .record(
-            claims.tenant_id,
-            &claims.host_id,
-            &issued.serial_hex,
-            &issued.fingerprint_sha256_hex,
-            issued.not_before_unix,
-            issued.not_after_unix,
-        )
-        .await
-    {
-        tracing::error!(error = %e, "host_certs.record failed");
-        return (StatusCode::INTERNAL_SERVER_ERROR, "record failed").into_response();
     }
 
     // Load this tenant's CA into the mTLS trust store *before* answering. The response

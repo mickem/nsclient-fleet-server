@@ -63,6 +63,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(parent) = Path::new(&cfg.database_path).parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
+            fleet_server::restrict_dir(parent);
         }
     }
 
@@ -94,6 +95,15 @@ async fn main() -> anyhow::Result<()> {
 
     let email = EmailSender::from_config(cfg.smtp.as_ref())?;
     let turnstile = Turnstile::from_secret(cfg.turnstile_secret.clone());
+    // On-prem has no self-service signup at all, so there is nothing to protect. Anywhere
+    // else, an open signup form with no challenge is a standing invitation to script it —
+    // the rate limiter caps the damage but does not stop it, so say so at a level an
+    // operator will actually see rather than hiding it in the Turnstile constructor.
+    if cfg.turnstile_secret.is_none() && !cfg.on_prem {
+        tracing::warn!(
+            "TURNSTILE_SECRET and TURNSTILE_SITE_KEY are unset — self-service signup has no              bot challenge. Set both for any deployment reachable from the internet, or set              ON_PREM=true, or close signups from the platform console."
+        );
+    }
     let rate_limits = AuthRateLimits::new(cfg.daily_email_budget);
     let agent_limits = fleet_server::agent_limits::AgentRateLimits::new();
     let enrollment_limits = fleet_server::agent_limits::EnrollmentLimits::default();
@@ -102,6 +112,10 @@ async fn main() -> anyhow::Result<()> {
 
     let bundle_dir = std::env::var("BUNDLE_DIR").unwrap_or_else(|_| "data/bundles".into());
     std::fs::create_dir_all(&bundle_dir)?;
+    // Bundles can carry scripts and, in the plain format, secrets. Same reasoning as the
+    // ACME cache: the unit's UMask covers new files, this covers a directory that already
+    // exists with a wider mode.
+    fleet_server::restrict_dir(std::path::Path::new(&bundle_dir));
     let bundle_store: Arc<dyn fleet_server::bundles::BundleStore> = Arc::new(
         fleet_server::bundles::LocalBundleStore::new(std::path::PathBuf::from(bundle_dir)),
     );
@@ -120,7 +134,15 @@ async fn main() -> anyhow::Result<()> {
         desired_state_cache: Default::default(),
     };
 
+    // Both cleanups existed and neither was ever called, so these two tables only grew.
+    tokio::spawn(fleet_server::housekeeping::run(
+        db.clone(),
+        cfg.session_idle_ttl_secs,
+    ));
+
     backfill_all(&state, &db).await?;
+    fleet_server::tenant_setup::rebind_legacy_ciphertexts(&state, &db).await?;
+    fleet_server::tenant_setup::resign_bundles(&state, &db).await?;
     trust_store.rebuild().await?;
 
     // A dedicated agent port is bound only when LISTEN_MTLS is set (always, when ACME is

@@ -170,7 +170,24 @@ should not have to guess which certificate it ended up serving.
 | `ACME_CONTACT`   | unset        | Email registered with the ACME account; required with the above |
 | `ACME_CACHE_DIR` | `data/acme`  | Persist it, or restarts re-issue and hit rate limits       |
 | `ACME_STAGING`   | `false`      | Use the staging directory while testing a deploy           |
-| `COOKIE_SECURE`  | `false`      | **Set `true` in production**                               |
+| `COOKIE_SECURE`  | on when we terminate TLS | Derived from `ACME_DOMAINS`/`TLS_*`; set it only to override |
+
+### Response headers
+
+Set on every response, including the SPA and error pages, and derived from the
+configuration rather than separately switchable:
+
+| Header                      | Value                                  | When                      |
+| --------------------------- | -------------------------------------- | ------------------------- |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains`  | only when we terminate TLS |
+| `Content-Security-Policy`   | `default-src 'self'`, no third party except the Turnstile widget when it is configured | always |
+| `X-Content-Type-Options`    | `nosniff`                              | always                    |
+| `X-Frame-Options`           | `DENY` (and `frame-ancestors 'none'`)  | always                    |
+| `Referrer-Policy`           | `strict-origin-when-cross-origin`      | always                    |
+
+HSTS is gated on terminating TLS here: sending it from a plain-HTTP listener locks a
+browser out of that origin for a year. Behind a TLS-terminating reverse proxy, the proxy
+is the one that should send it.
 
 ### TLS from disk (no ACME)
 
@@ -217,9 +234,13 @@ to trust it.
 
 | Variable                                                | Default | Notes                                  |
 | ------------------------------------------------------- | ------- | -------------------------------------- |
-| `SMTP_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_FROM` | unset   | All five or none; falls back to stdout |
-| `TURNSTILE_SECRET`                                      | unset   | Cloudflare Turnstile siteverify secret |
+| `SMTP_HOST` / `_USER` / `_PASSWORD` / `_FROM`           | unset   | All four or none — a partial set is a startup error |
+| `SMTP_PORT`                                             | `587`   | 465 uses implicit TLS, anything else STARTTLS |
+| `MAGIC_LINKS_TO_LOG`                                    | `false` | Allows starting with no SMTP while terminating TLS. Every sign-in link then goes to the log in full |
+| `TURNSTILE_SECRET`                                      | unset   | Cloudflare Turnstile siteverify secret. Set with `TURNSTILE_SITE_KEY` or startup fails |
+| `TURNSTILE_SITE_KEY`                                    | unset   | Turnstile site key, served to the browser so the signup form can render the widget |
 | `DAILY_EMAIL_BUDGET`                                    | `5000`  | Global cap; sends past it are dropped  |
+| `SESSION_IDLE_HOURS`                                    | `72`    | Session ends after this much inactivity, independent of the 7-day absolute lifetime |
 | `PLATFORM_ADMIN_EMAILS`                                 | unset   | Comma-separated. Grants the platform console — see below |
 | `HOST_LOST_AFTER_HOURS`                                 | `48`    | Silence after which a host reads **lost** — see below  |
 
@@ -251,17 +272,40 @@ platform console, so it can be closed without a redeploy. See [§14](#14-the-pla
 | ------------------------ | ------- | -------------------------------------------- |
 | `ON_PREM`                | `false` | Disables signup + magic links; password login |
 | `ON_PREM_ADMIN_EMAIL`    | —       | Required when `ON_PREM=true`                 |
-| `ON_PREM_ADMIN_PASSWORD` | —       | Required when `ON_PREM=true`                 |
-| `BOOTSTRAP_JWT_SECRET`   | `MASTER_KEY` | Override only to separate the two keys  |
+| `ON_PREM_ADMIN_PASSWORD` | —       | Plaintext. One of this or the hash below is required when `ON_PREM=true` |
+| `ON_PREM_ADMIN_PASSWORD_HASH` | — | An argon2 PHC string. Preferred — the env file also lands in backups and config repos. Setting both is a startup error |
+| `BOOTSTRAP_JWT_SECRET`   | derived from `MASTER_KEY` | Base64. Set only to use an unrelated key; the default is an HKDF subkey, not `MASTER_KEY` itself |
 
 ---
 
 ## 6. First-time VM setup
 
+The bootstrap script runs as root, so download it, check where it came from, read it, and
+only then run it. Piping a URL straight into a root shell means whatever that URL serves
+today is what runs as root today.
+
 ```bash
-# As root on a fresh VM
-curl -L https://github.com/mickem/nsclient-fleet-server/releases/latest/download/bootstrap-vm.sh | bash
+# As root on a fresh VM. Pin a version rather than tracking `latest`.
+VERSION=v0.1.0
+BASE=https://github.com/mickem/nsclient-fleet-server/releases/download/$VERSION
+
+curl -fsSLO "$BASE/bootstrap-vm.sh"
+curl -fsSLO "$BASE/SHA256SUMS"
+grep ' bootstrap-vm.sh$' SHA256SUMS | sha256sum -c -
+
+# What the release workflow signed, rather than what this origin is serving right now.
+# Needs the `gh` CLI; skip it only if you have no way to install one.
+gh attestation verify bootstrap-vm.sh --repo mickem/nsclient-fleet-server
+
+less bootstrap-vm.sh          # it is short, and it runs as root
+bash bootstrap-vm.sh
 ```
+
+`SHA256SUMS` covers the binaries, the bootstrap script and the systemd unit, and every one
+of them carries a build provenance attestation naming the workflow and commit that produced
+it. The checksum file is served from the same origin as what it describes, so on its own it
+only catches a corrupted download — the attestation is the part that says the file came out
+of this repository's release workflow.
 
 The script creates the `nsclient-fleet` system user (no shell), lays out `/opt/nsclient-fleet/{,data,data/bundles,data/acme}`
 and `/etc/nsclient-fleet`, installs the systemd unit, and writes a template `/etc/nsclient-fleet/env`.
@@ -269,9 +313,10 @@ and `/etc/nsclient-fleet`, installs the systemd unit, and writes a template `/et
 Then:
 
 1. Edit `/etc/nsclient-fleet/env` — at minimum `MASTER_KEY`, `BASE_URL`, `ACME_DOMAINS`,
-   `ACME_CONTACT`, `COOKIE_SECURE=true`.
+   `ACME_CONTACT`.
 2. Confirm DNS resolves to this VM.
-3. Install the binary at `/opt/nsclient-fleet/nsclient-fleet` (`chown nsclient-fleet:nsclient-fleet`, mode 755).
+3. Install the binary at `/opt/nsclient-fleet/nsclient-fleet` (`chown root:root`, mode 755 — the
+   service should not be able to rewrite its own executable).
 4. `systemctl enable --now nsclient-fleet`
 
 Firewall: allow 443 from anywhere and 22 from your own addresses. Nothing else.
@@ -380,7 +425,7 @@ Then push it to the VM:
 VM_HOST=app.example.com VM_USER=deploy ./scripts/deploy.sh
 ```
 
-`deploy.sh` copies the artifact to `/tmp`, installs it as `nsclient-fleet:nsclient-fleet` mode 755, restarts the
+`deploy.sh` copies the artifact to a private staging directory, installs it as `root:root` mode 755, restarts the
 service, and tails the journal.
 
 There is **no graceful shutdown for in-flight requests** — `TimeoutStopSec=30` gives them 30
@@ -456,11 +501,14 @@ enough that most free tiers cover it.
 ```bash
 # /etc/cron.daily/nsclient-fleet-backup
 set -euo pipefail
-sqlite3 /opt/nsclient-fleet/data/fleet.db ".backup /tmp/fleet.db"   # consistent copy under WAL
+# A private 0700 directory, not a fixed /tmp path: /tmp is world-writable, and this copy
+# is the whole database — every tenant's encrypted CA key and every session hash.
+stage=$(mktemp -d)
+trap 'rm -rf "$stage"' EXIT
+sqlite3 /opt/nsclient-fleet/data/fleet.db ".backup $stage/fleet.db"   # consistent copy under WAL
 restic -r s3:https://<endpoint>/<bucket> backup \
-  /tmp/fleet.db /opt/nsclient-fleet/data/mtls-server.crt /opt/nsclient-fleet/data/mtls-server.key \
+  "$stage/fleet.db" /opt/nsclient-fleet/data/mtls-server.crt /opt/nsclient-fleet/data/mtls-server.key \
   /opt/nsclient-fleet/data/bundles
-rm -f /tmp/fleet.db
 ```
 
 Do not copy `fleet.db` with `cp` while the service runs — use `.backup`, or you may capture a
@@ -532,7 +580,6 @@ to have one generated and persisted on first start:
 
 ```
 TLS_SELF_SIGNED=true
-COOKIE_SECURE=true
 LISTEN_HTTPS=0.0.0.0:9443
 ```
 

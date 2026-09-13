@@ -31,7 +31,6 @@ use crate::AppState;
 pub trait BundleStore: Send + Sync {
     async fn put(&self, tenant_id: i64, bundle_id: &str, bytes: &[u8]) -> Result<()>;
     async fn get(&self, tenant_id: i64, bundle_id: &str) -> Result<Vec<u8>>;
-    #[allow(dead_code)]
     async fn delete(&self, tenant_id: i64, bundle_id: &str) -> Result<()>;
 }
 
@@ -142,13 +141,18 @@ pub async fn upload(
         }
     }
 
-    let name = match name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(n) => n.to_string(),
-        None => return (StatusCode::BAD_REQUEST, "missing name").into_response(),
+    // The same grammar compose enforces. Raw upload only checked non-empty, which mattered
+    // for more than tidiness: the encrypted-bundle AAD is `name || 0x00 || version`, so a
+    // name containing a NUL collides with a different (name, version) pair and the binding
+    // stops distinguishing them. NULs and newlines also flowed straight into audit JSON and
+    // the console from here.
+    let name = match name.as_deref().map(str::trim) {
+        Some(n) if valid_bundle_token(n) => n.to_string(),
+        _ => return (StatusCode::BAD_REQUEST, BUNDLE_TOKEN_RULE).into_response(),
     };
-    let version = match version.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(v) => v.to_string(),
-        None => return (StatusCode::BAD_REQUEST, "missing version").into_response(),
+    let version = match version.as_deref().map(str::trim) {
+        Some(v) if valid_bundle_token(v) => v.to_string(),
+        _ => return (StatusCode::BAD_REQUEST, BUNDLE_TOKEN_RULE).into_response(),
     };
     let bytes = match bytes {
         Some(b) if !b.is_empty() => b,
@@ -229,6 +233,30 @@ async fn persist_bundle(
         _ => return Err((StatusCode::INTERNAL_SERVER_ERROR, "tenant missing").into_response()),
     };
     let limits = fleet_core::tier::effective(&tenant.tier, tenant.tier_overrides_json.as_deref());
+
+    // Bundles are immutable and, until now, undeletable, so uploading was a one-way ratchet
+    // on disk: a config writer could fill the volume and nothing would ever reclaim it. The
+    // per-bundle size cap did not help, because nothing capped the count.
+    match BundlesRepo::new(&state.db).count(who.tenant_id).await {
+        Ok(n) if n as u64 >= limits.max_bundles as u64 => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(crate::hosts::TierLimitError {
+                    error: "tier_limit",
+                    limit: limits.max_bundles,
+                    current: n,
+                    tier: limits.name.to_string(),
+                }),
+            )
+                .into_response());
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "bundle count failed");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response());
+        }
+    }
+
     let max = (limits.max_bundle_mb as usize) * 1024 * 1024;
     if bytes.len() > max {
         return Err((
@@ -239,7 +267,20 @@ async fn persist_bundle(
     }
 
     let sha = sha256_hex(&bytes);
-    let signature_b64 = match sign_with_tenant_key(state, who.tenant_id, &bytes).await {
+
+    // The id is chosen here rather than by the insert, because the signature covers it —
+    // see `fleet_core::bundlesig` for why a signature over the digest alone was worth so
+    // little.
+    let bundle_id = fleet_core::bundlesig::new_bundle_id();
+    let descriptor = fleet_core::bundlesig::BundleDescriptor {
+        tenant_id: who.tenant_id,
+        bundle_id: &bundle_id,
+        name,
+        version,
+        format,
+        sha256_hex: &sha,
+    };
+    let signature_b64 = match sign_with_tenant_key(state, who.tenant_id, &descriptor).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "bundle sign failed");
@@ -250,6 +291,7 @@ async fn persist_bundle(
     let bundles = BundlesRepo::new(&state.db);
     let row = match bundles
         .create(
+            &bundle_id,
             who.tenant_id,
             name,
             version,
@@ -299,6 +341,10 @@ async fn persist_bundle(
 
     Ok(row.into())
 }
+
+/// Shared refusal text, so upload and compose say the same thing.
+const BUNDLE_TOKEN_RULE: &str =
+    "name and version must be 1-128 characters of letters, digits, '.', '_' or '-'";
 
 fn valid_bundle_token(s: &str) -> bool {
     !s.is_empty()
@@ -584,24 +630,139 @@ fn build_zip(
     Ok(cursor.into_inner())
 }
 
+/// Most a bundle may expand to across all its entries.
+///
+/// Bundles carry configuration, scripts and small assets; the largest tier allows a 250 MB
+/// upload, and nothing legitimate inflates far past that. The cap is on the *total*, so a
+/// thousand small entries cannot add up to the same attack a single large one would.
+const MAX_INFLATED_TOTAL: u64 = 512 * 1024 * 1024;
+
+/// Most entries we will walk. A zip can declare millions of them in a few kilobytes.
+const MAX_ZIP_ENTRIES: usize = 10_000;
+
+/// Read a bundle zip into memory, refusing anything that would cost more than it should.
+///
+/// Three separate limits, because a zip's header is written by whoever made the file and
+/// none of it is evidence of anything:
+///
+/// - the output buffer is never pre-sized from the declared size. `Vec::with_capacity` on
+///   an attacker-chosen `u64` is an allocation failure, and an allocation failure aborts
+///   the process — so a crafted header was a remote kill, reachable through the config-read
+///   endpoint by any tenant session.
+/// - inflation is read through `take`, against a budget shared by every entry, so the
+///   compression ratio cannot turn a 2 MiB upload into gigabytes of resident memory.
+/// - entry names must stay inside the archive. The server never extracts, so traversal is
+///   an agent-side risk rather than ours, but propagating `../../etc/…` from a hand-crafted
+///   upload into a composed bundle we sign makes it our problem.
+///
+/// Upload does not parse, so a crafted file is stored first and opened later by whoever
+/// reads the config — which is why this is a refusal and not a panic.
 fn read_zip_entries(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
+    read_zip_entries_within(bytes, MAX_INFLATED_TOTAL)
+}
+
+/// As [`read_zip_entries`], with the budget spelled out so tests can exercise the refusal
+/// without actually inflating half a gigabyte.
+fn read_zip_entries_within(bytes: &[u8], mut budget: u64) -> Result<Vec<(String, Vec<u8>)>> {
     use std::io::Read;
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
-    let mut out = Vec::with_capacity(archive.len());
+    if archive.len() > MAX_ZIP_ENTRIES {
+        anyhow::bail!(
+            "bundle declares {} entries (limit {MAX_ZIP_ENTRIES})",
+            archive.len()
+        );
+    }
+
+    let mut out = Vec::with_capacity(archive.len().min(1024));
     for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
+        let file = archive.by_index(i)?;
         if file.is_dir() {
             continue;
         }
-        let mut name = file.name().replace('\\', "/");
-        if let Some(stripped) = name.strip_prefix("./") {
-            name = stripped.to_string();
+
+        // `enclosed_name` is the library's own answer to "is this name safe to join onto a
+        // directory": it rejects absolute paths, parent components and Windows drive
+        // prefixes. Taking it before normalising means we never have to decide which of
+        // those our own normalisation happened to cover.
+        let Some(safe) = file.enclosed_name() else {
+            anyhow::bail!("bundle entry {:?} escapes the archive", file.name());
+        };
+        let name = safe
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        if name.is_empty() {
+            continue;
         }
-        let mut data = Vec::with_capacity(file.size() as usize);
-        file.read_to_end(&mut data)?;
+
+        // Read against the shared budget, one byte past it so overrun is detectable rather
+        // than a silent truncation that we would then sign.
+        let mut data = Vec::new();
+        let read = file.take(budget + 1).read_to_end(&mut data)? as u64;
+        if read > budget {
+            anyhow::bail!("bundle expands past {} MiB", budget / (1024 * 1024));
+        }
+        budget -= read;
         out.push((name, data));
     }
     Ok(out)
+}
+
+/// `DELETE /api/bundles/:id` — remove a bundle, its assignments and its bytes.
+///
+/// There was no way to delete one at all, which is why the disk only ever grew. Assignments
+/// go in the same transaction: a group left pointing at a bundle that is not there fails
+/// desired-state computation for every host in it.
+pub async fn delete_bundle(
+    State(state): State<AppState>,
+    who: AuthedUser,
+    Path(bundle_id): Path<String>,
+) -> Response {
+    if !who.role.can_write_config() {
+        return crate::auth::forbidden("change configuration");
+    }
+    let bundles = BundlesRepo::new(&state.db);
+    let row = match bundles.get(who.tenant_id, &bundle_id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return (StatusCode::NOT_FOUND, "bundle not found").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "bundle lookup failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+        }
+    };
+
+    match bundles.delete(who.tenant_id, &bundle_id).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "bundle not found").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "bundle delete failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+        }
+    }
+
+    // After the row, not before: a file with no row is wasted disk, a row with no file is a
+    // bundle that 500s on download. If this fails the row is still gone and the file is
+    // orphaned, which is the direction to fail in.
+    if let Err(e) = state.bundle_store.delete(who.tenant_id, &bundle_id).await {
+        tracing::error!(error = %e, %bundle_id, "bundle bytes could not be removed");
+    }
+
+    // Assignments changed, so every host's memoized state may have.
+    crate::config_api::bump_config_version(&state, who.tenant_id).await;
+
+    crate::audit::record(
+        &state,
+        who.tenant_id,
+        Some(who.user_id),
+        "bundle.deleted",
+        "bundle",
+        &bundle_id,
+        Some(&serde_json::json!({ "name": row.name, "version": row.version })),
+    )
+    .await;
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn list(State(state): State<AppState>, who: AuthedUser) -> Response {
@@ -933,21 +1094,30 @@ pub async fn set_bundle_key(
     .into_response()
 }
 
-async fn sign_with_tenant_key(state: &AppState, tenant_id: i64, payload: &[u8]) -> Result<String> {
+/// Sign a bundle's descriptor with the tenant's Ed25519 key.
+///
+/// The descriptor, not the bytes: a signature over the digest alone binds nothing about
+/// *which* bundle those bytes are, so an old signed blob could be re-advertised under a new
+/// name, version or id and still verify. See [`fleet_core::bundlesig`].
+pub(crate) async fn sign_with_tenant_key(
+    state: &AppState,
+    tenant_id: i64,
+    descriptor: &fleet_core::bundlesig::BundleDescriptor<'_>,
+) -> Result<String> {
     let secrets = TenantSecretsRepo::new(&state.db)
         .get_by_tenant(tenant_id)
         .await?
         .ok_or_else(|| anyhow!("tenant secrets missing for {tenant_id}"))?;
-    let key_bytes = state
-        .config
-        .master_key
-        .decrypt(&secrets.bundle_signing_key_encrypted)?;
+    let key_bytes = state.config.master_key.decrypt(
+        fleet_core::aead::Purpose::TenantBundleSigningKey { tenant_id },
+        &secrets.bundle_signing_key_encrypted,
+    )?;
     let key_pem = std::str::from_utf8(&key_bytes).context("bundle key utf8")?;
     let signing_key =
         SigningKey::from_pkcs8_pem(key_pem).map_err(|e| anyhow!("ed25519 key parse: {e}"))?;
-    // Sign sha256(payload). The agent verifies sig over the same digest.
-    let digest = Sha256::digest(payload);
-    let signature = signing_key.sign(&digest);
+    // Ed25519 hashes internally, so the descriptor is signed directly rather than digested
+    // first — one fewer step for an agent implementation to get wrong.
+    let signature = signing_key.sign(&descriptor.to_signing_bytes());
     Ok(STANDARD.encode(signature.to_bytes()))
 }
 
@@ -958,4 +1128,93 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         s.push_str(&format!("{b:02x}"));
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn zip_of(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut cursor);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for (name, data) in entries {
+                w.start_file(*name, opts).unwrap();
+                w.write_all(data).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        cursor.into_inner()
+    }
+
+    #[test]
+    fn inflation_is_capped_across_all_entries_together() {
+        // Four megabytes of zeros deflate to a few kilobytes. A per-entry cap would let a
+        // thousand of these add up to the same attack, so the budget is shared.
+        let blob = zip_of(&[
+            ("a.bin", vec![0u8; 4 * 1024 * 1024]),
+            ("b.bin", vec![0u8; 4 * 1024 * 1024]),
+        ]);
+        assert!(blob.len() < 64 * 1024, "the crafted input is small");
+
+        // Either entry fits on its own; together they do not.
+        read_zip_entries_within(&blob, 6 * 1024 * 1024)
+            .expect_err("two 4 MiB entries must not pass a 6 MiB budget");
+        let ok = read_zip_entries_within(&blob, 16 * 1024 * 1024).expect("within budget");
+        assert_eq!(ok.len(), 2);
+    }
+
+    #[test]
+    fn a_declared_size_never_becomes_an_allocation() {
+        // The output buffer used to be pre-sized from the zip header. A crafted entry
+        // declaring a terabyte was therefore an allocation failure, and an allocation
+        // failure aborts the process — a remote kill through the config-read endpoint.
+        // We cannot assert "did not abort" directly, so assert the behaviour that replaced
+        // it: the refusal is by bytes actually read, and it is an error, not a panic.
+        let blob = zip_of(&[("pad.bin", vec![7u8; 1024 * 1024])]);
+        let err = read_zip_entries_within(&blob, 1024).unwrap_err();
+        assert!(
+            err.to_string().contains("expands past"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn entries_that_escape_the_archive_are_refused() {
+        for name in ["../../etc/cron.d/pwn", "/etc/shadow", "a/../../b"] {
+            let blob = zip_of(&[(name, b"x".to_vec())]);
+            let err = read_zip_entries_within(&blob, 1024 * 1024)
+                .unwrap_err_or_ok_names()
+                .unwrap_or_else(|| panic!("{name} should be refused"));
+            assert!(err.contains("escapes the archive"), "{name}: {err}");
+        }
+    }
+
+    /// Small helper so the loop above reads as "this must be refused" rather than as
+    /// unwrapping in two directions.
+    trait RefusalExt {
+        fn unwrap_err_or_ok_names(self) -> Option<String>;
+    }
+    impl RefusalExt for Result<Vec<(String, Vec<u8>)>> {
+        fn unwrap_err_or_ok_names(self) -> Option<String> {
+            match self {
+                Ok(_) => None,
+                Err(e) => Some(e.to_string()),
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_entries_survive_normalisation() {
+        let blob = zip_of(&[
+            ("config.json", b"{}".to_vec()),
+            ("scripts/check_disk.ps1", b"Write-Output 'ok'".to_vec()),
+        ]);
+        let entries = read_zip_entries_within(&blob, 1024 * 1024).unwrap();
+        let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["config.json", "scripts/check_disk.ps1"]);
+    }
 }

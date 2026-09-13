@@ -13,12 +13,18 @@
 # The release publishes SHA256SUMS, so the download is verified against it by default;
 # FLEET_SKIP_VERIFY=true is the escape hatch for a release that predates it.
 
+# Pinned by digest, not by tag. `alpine:3.20` moves as patch releases land, so two builds
+# of the same FLEET_VERSION were not the same image — and a tag is a mutable pointer in a
+# registry, which is the same class of thing as an unpinned workflow action. Dependabot
+# bumps this the way it bumps everything else; the tag is kept alongside so a reader can
+# tell what the digest is.
 ARG ALPINE_VERSION=3.20
+ARG ALPINE_DIGEST=sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 
 # ---------------------------------------------------------------------------
 # Fetch and verify in a throwaway stage, so curl never reaches the runtime image.
 # ---------------------------------------------------------------------------
-FROM alpine:${ALPINE_VERSION} AS fetch
+FROM alpine:${ALPINE_VERSION}@${ALPINE_DIGEST} AS fetch
 
 ARG FLEET_VERSION
 ARG FLEET_BINARY_URL=""
@@ -63,7 +69,7 @@ RUN set -eu; \
 # ---------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------
-FROM alpine:${ALPINE_VERSION}
+FROM alpine:${ALPINE_VERSION}@${ALPINE_DIGEST}
 
 ARG FLEET_VERSION
 
@@ -107,6 +113,14 @@ VOLUME ["/data"]
 # to dial, so any mapping works as long as BASE_URL matches it.
 USER fleet:fleet
 EXPOSE 9443
+
+# /healthz answers only once the database is reachable, so this is a real liveness answer
+# rather than "the process exists". `--no-check-certificate` because the default certificate
+# is the self-signed one the container generates on first start; the check is talking to
+# itself over loopback, so there is nothing for certificate validation to establish here.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD wget -q -O /dev/null --no-check-certificate \
+        "https://127.0.0.1:${LISTEN_HTTPS##*:}/healthz" || exit 1
 
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 CMD ["serve"]

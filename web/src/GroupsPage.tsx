@@ -31,6 +31,7 @@ import {
   KnownTags,
   knownTagsFromHosts,
   SelectorEditor,
+  selectorIsHostControlled,
 } from "./SelectorBuilder";
 import { RefreshButton } from "./RefreshButton";
 
@@ -184,6 +185,12 @@ function GroupCard({
         >
           {describeSelector(group.selector)}
         </Typography>
+        {selectorIsHostControlled(group.selector) && (
+          <Alert severity="warning" sx={{ my: 1 }}>
+            Hosts can join this group by reporting the tag themselves, and will then be served
+            its bundles.
+          </Alert>
+        )}
         {editing && (
           <GroupEditor
             known={known}

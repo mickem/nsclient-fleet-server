@@ -22,6 +22,12 @@ impl Drop for TestServer {
 }
 
 async fn start() -> TestServer {
+    start_with(|_| {}).await
+}
+
+/// As [`start`], with a chance to adjust the config first — for the handful of behaviours
+/// that only exist under a particular setting.
+async fn start_with(adjust: impl FnOnce(&mut fleet_server::config::Config)) -> TestServer {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
 
@@ -29,7 +35,9 @@ async fn start() -> TestServer {
     let db = fleet_storage::open(&db_path).await.unwrap();
     fleet_storage::run_migrations(&db.write).await.unwrap();
 
-    let cfg = test_config(db_path);
+    let mut cfg = test_config(db_path);
+    adjust(&mut cfg);
+    let cfg = cfg;
     let (mtls_cert_pem, mtls_key_pem) =
         fleet_server::mtls::generate_self_signed_server("127.0.0.1").unwrap();
     let email = fleet_server::auth::email::EmailSender::from_config(cfg.smtp.as_ref()).unwrap();
@@ -103,9 +111,11 @@ fn test_config(db_path: PathBuf) -> fleet_server::config::Config {
         on_prem: false,
         on_prem_admin_email: None,
         on_prem_admin_password: None,
+        on_prem_admin_password_hash: None,
         platform_admin_emails: Vec::new(),
         magic_link_ttl_secs: 900,
         session_ttl_secs: 3600,
+        session_idle_ttl_secs: 3600,
         bootstrap_ttl_secs: 3600,
         host_lost_after_secs: 172_800,
         client_cert_lifetime_days: 90,
@@ -113,6 +123,7 @@ fn test_config(db_path: PathBuf) -> fleet_server::config::Config {
         daily_email_budget: 1_000_000,
         smtp: None,
         turnstile_secret: None,
+        turnstile_site_key: None,
         master_key,
         bootstrap_jwt_secret,
     }
@@ -162,6 +173,145 @@ fn hash_token(token: &str) -> String {
     d.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Every response carries the headers, including the SPA fallback — which is served by
+/// `Router::fallback` and so sits outside the layers registered before it. That is the one
+/// route where getting the layering order wrong is invisible until an injected script has
+/// already read the tenant's bundle key out of `sessionStorage`.
+#[tokio::test]
+async fn security_headers_are_set_on_api_and_on_the_spa() {
+    let s = start().await;
+    let c = reqwest::Client::new();
+
+    for path in ["/api/public-config", "/", "/hosts", "/healthz"] {
+        let r = c
+            .get(format!("{}{}", s.base_url, path))
+            .send()
+            .await
+            .unwrap();
+        let h = r.headers();
+        assert_eq!(
+            h.get("x-content-type-options").map(|v| v.to_str().unwrap()),
+            Some("nosniff"),
+            "{path}"
+        );
+        assert_eq!(
+            h.get("x-frame-options").map(|v| v.to_str().unwrap()),
+            Some("DENY"),
+            "{path}"
+        );
+        assert_eq!(
+            h.get("referrer-policy").map(|v| v.to_str().unwrap()),
+            Some("strict-origin-when-cross-origin"),
+            "{path}"
+        );
+        let csp = h
+            .get("content-security-policy")
+            .unwrap_or_else(|| panic!("no CSP on {path}"))
+            .to_str()
+            .unwrap();
+        assert!(csp.contains("default-src 'self'"), "{path}: {csp}");
+        assert!(csp.contains("frame-ancestors 'none'"), "{path}: {csp}");
+        assert!(csp.contains("object-src 'none'"), "{path}: {csp}");
+        // No Turnstile configured in the fixture, so the policy admits no third party at
+        // all — a deployment that does not use the widget should not be told to trust it.
+        assert!(
+            csp.contains("script-src 'self';") || csp.ends_with("script-src 'self'"),
+            "{path}: {csp}"
+        );
+        assert!(!csp.contains("cloudflare"), "{path}: {csp}");
+    }
+}
+
+/// HSTS is gated on actually terminating TLS: promising a browser that this origin is
+/// HTTPS-only when it is served over plain HTTP locks the operator out for a year.
+#[tokio::test]
+async fn hsts_is_not_sent_when_we_are_not_the_tls_terminator() {
+    let s = start().await;
+    let r = reqwest::Client::new()
+        .get(format!("{}/healthz", s.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.headers().get("strict-transport-security").is_none());
+}
+
+/// The flag follows a proven address, not a created row.
+///
+/// Granting at row creation let a tenant admin invite a listed address into their own
+/// tenant and have the flag land on a row they controlled. Nobody gained a privilege they
+/// should not have — but the real operator's later signup was then refused as a duplicate,
+/// and signing in put them in the attacker's tenant as a view-only member.
+#[tokio::test]
+async fn the_platform_admin_flag_waits_for_a_proven_sign_in() {
+    let s = start_with(|cfg| {
+        cfg.platform_admin_emails = vec!["ops@vendor.example".to_string()];
+    })
+    .await;
+
+    let flag = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT is_platform_admin FROM users WHERE email = 'ops@vendor.example'",
+        )
+        .fetch_one(&s.db.read)
+        .await
+        .unwrap()
+    };
+
+    // Someone else creates the row first — an invitation into their tenant, modelled here
+    // as the row creation that invitation performs.
+    let t = TenantRepo::new(&s.db)
+        .create("attacker", "Attacker", "free", None)
+        .await
+        .unwrap();
+    let u = UserRepo::new(&s.db)
+        .create(t.id, "ops@vendor.example", fleet_core::user::Role::ViewOnly)
+        .await
+        .unwrap();
+    assert_eq!(flag().await, 0, "creating the row must not grant the flag");
+
+    // Proving the address does grant it.
+    let c = client();
+    let token = "test-token-abcdefghij";
+    MagicLinkRepo::new(&s.db)
+        .create(
+            &hash_token(token),
+            t.id,
+            u.id,
+            fleet_core::time::now_unix() + 600,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        complete_exchange(&c, &s.base_url, token).await.status(),
+        303
+    );
+    assert_eq!(flag().await, 1, "a proven sign-in grants the flag");
+}
+
+/// The application check for a duplicate address is not tenant-scoped, but the schema's
+/// UNIQUE was — so the two disagreed, and closing that gap is what makes the check above a
+/// guarantee rather than a convention.
+#[tokio::test]
+async fn the_same_address_cannot_exist_in_two_tenants() {
+    let s = start().await;
+    let tenants = TenantRepo::new(&s.db);
+    let users = UserRepo::new(&s.db);
+    let a = tenants.create("a", "A", "free", None).await.unwrap();
+    let b = tenants.create("b", "B", "free", None).await.unwrap();
+
+    users
+        .create(a.id, "ops@vendor.example", fleet_core::user::Role::Owner)
+        .await
+        .unwrap();
+    assert!(
+        users
+            .create(b.id, "ops@vendor.example", fleet_core::user::Role::Owner)
+            .await
+            .is_err(),
+        "the database must refuse the same address in a second tenant"
+    );
+}
+
 #[tokio::test]
 async fn signup_creates_tenant_user_and_magic_link() {
     let s = start().await;
@@ -195,6 +345,147 @@ async fn signup_creates_tenant_user_and_magic_link() {
     assert_eq!(tenants_count, 1);
     assert_eq!(users_count, 1);
     assert_eq!(links_count, 1);
+}
+
+/// Signup used to only trim and lowercase the slug while the strict validator lived in the
+/// platform console with a comment saying it was not applied here. The slug becomes a CA
+/// subject, and the mTLS issuer map used to match on a whitespace-stripped printed DN — so
+/// `ac me` collided with an existing `acme` and could take that tenant's fleet offline.
+/// Signup used to answer "email already registered" to an anonymous caller, while
+/// `send-link` next door is carefully uniform about exactly that. With a free slug, anyone
+/// could test any address.
+/// SameSite=Lax treats a sibling subdomain of the same registrable domain as same-site and
+/// sends the cookie, so `evil.example.com` posting multipart to the bundle upload was the
+/// one shape Lax did not cover. `Sec-Fetch-Site` is the browser's own account of where a
+/// request came from, and a page cannot forge it.
+#[tokio::test]
+async fn a_mutating_request_from_another_site_is_refused() {
+    let s = start().await;
+    let c = reqwest::Client::new();
+    let url = format!("{}/api/hosts", s.base_url);
+
+    for site in ["cross-site", "same-site"] {
+        let r = c
+            .post(&url)
+            .header("sec-fetch-site", site)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "{site} must be refused");
+    }
+
+    // Same-origin, and a request with no such header at all (curl, the agent, a script),
+    // both get through the check — they fail later on authentication instead, which is the
+    // 401 below rather than the 403 above.
+    for headers in [Some("same-origin"), Some("none"), None] {
+        let mut req = c.post(&url).json(&serde_json::json!({}));
+        if let Some(h) = headers {
+            req = req.header("sec-fetch-site", h);
+        }
+        let status = req.send().await.unwrap().status();
+        assert_ne!(
+            status, 403,
+            "{headers:?} must not be refused as cross-origin"
+        );
+    }
+
+    // A safe method is out of scope: the magic-link GET is a top-level navigation.
+    let r = c
+        .get(format!("{}/healthz", s.base_url))
+        .header("sec-fetch-site", "cross-site")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+}
+
+#[tokio::test]
+async fn signup_does_not_reveal_whether_an_address_has_an_account() {
+    let s = start().await;
+    let c = reqwest::Client::new();
+
+    let t = TenantRepo::new(&s.db)
+        .create("acme", "Acme", "free", None)
+        .await
+        .unwrap();
+    UserRepo::new(&s.db)
+        .create(t.id, "alice@example.com", fleet_core::user::Role::Owner)
+        .await
+        .unwrap();
+
+    let signup = |email: &'static str, slug: &'static str| {
+        let c = c.clone();
+        let base = s.base_url.clone();
+        async move {
+            c.post(format!("{base}/api/auth/signup"))
+                .json(&serde_json::json!({
+                    "email": email, "tenant_slug": slug, "tenant_name": "X",
+                }))
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+
+    assert_eq!(signup("alice@example.com", "one").await, 204);
+    assert_eq!(signup("nobody@example.com", "two").await, 204);
+
+    // ...and the registered address did not get a second tenant out of it.
+    let tenants: Vec<String> = sqlx::query_scalar("SELECT slug FROM tenants ORDER BY slug")
+        .fetch_all(&s.db.read)
+        .await
+        .unwrap();
+    assert_eq!(tenants, ["acme", "two"]);
+
+    // A taken slug is still reported — it is the field the person has to change, and a
+    // workspace name is not a secret.
+    assert_eq!(signup("someone@example.com", "acme").await, 409);
+}
+
+#[tokio::test]
+async fn signup_refuses_a_slug_the_console_would_refuse() {
+    let s = start().await;
+    let c = reqwest::Client::new();
+
+    // "Acme" is deliberately absent: both paths lowercase before validating, so it is a
+    // valid request for the tenant `acme` rather than a refusal.
+    for bad in ["ac me", "acme.corp", "-acme", "acme-", &"a".repeat(64)] {
+        let r = c
+            .post(format!("{}/api/auth/signup", s.base_url))
+            .json(&serde_json::json!({
+                "email": format!("{}@example.com", bad.len()),
+                "tenant_slug": bad,
+                "tenant_name": "Acme",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400, "slug {bad:?} should be refused");
+    }
+
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tenants")
+        .fetch_one(&s.db.read)
+        .await
+        .unwrap();
+    assert_eq!(n, 0, "no tenant should have been created");
+}
+
+/// The schema backstop, for a path that forgets the application check.
+#[tokio::test]
+async fn the_database_refuses_a_malformed_slug_outright() {
+    let s = start().await;
+    let err = sqlx::query(
+        "INSERT INTO tenants (slug, name, tier, created_at) VALUES ('ac me','X','free',0)",
+    )
+    .execute(&s.db.write)
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("slug must be"),
+        "unexpected error: {err}"
+    );
 }
 
 #[tokio::test]

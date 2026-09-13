@@ -16,13 +16,24 @@ pub struct Config {
     pub base_url: String,
     pub on_prem: bool,
     pub on_prem_admin_email: Option<String>,
+    /// Plaintext admin password, from `ON_PREM_ADMIN_PASSWORD`. Kept for the installs that
+    /// already use it; [`Config::on_prem_admin_password_hash`] is the better one.
     pub on_prem_admin_password: Option<String>,
+    /// An argon2 PHC string, from `ON_PREM_ADMIN_PASSWORD_HASH`. Preferred: the env file is
+    /// mode 640 and read by a service account, but it is also what lands in a backup, a
+    /// config-management repository and anything that dumps the process environment.
+    pub on_prem_admin_password_hash: Option<String>,
     /// Addresses that are granted the platform-admin flag at startup (and when they sign up).
     /// This is the bootstrap only: the flag lives in the database and is granted and revoked
     /// from the console after that. Lowercased on load so comparisons match stored addresses.
     pub platform_admin_emails: Vec<String>,
     pub magic_link_ttl_secs: i64,
+    /// Absolute session lifetime: how long a session lives no matter how much it is used.
     pub session_ttl_secs: i64,
+    /// Idle session lifetime, from `SESSION_IDLE_HOURS`. An absolute lifetime alone means a
+    /// session taken on day one is still good on day six whether or not anyone touched it;
+    /// this is the bound that matters for a console left open on an unattended machine.
+    pub session_idle_ttl_secs: i64,
     pub bootstrap_ttl_secs: i64,
     /// Silence after which an enrolled host reads `lost` rather than `offline`, from
     /// `HOST_LOST_AFTER_HOURS`. Purely a reporting threshold — nothing is disabled, revoked
@@ -30,10 +41,20 @@ pub struct Config {
     /// [`fleet_core::host::StatusThresholds`].
     pub host_lost_after_secs: i64,
     pub client_cert_lifetime_days: i64,
+    /// `Secure` on the session cookie. Defaults to whether this process terminates TLS —
+    /// see [`Config::terminates_tls`] — rather than to false, so the one deployment shape
+    /// that gets this wrong is the one that explicitly asks for it.
     pub cookie_secure: bool,
     pub daily_email_budget: u32,
     pub smtp: Option<SmtpConfig>,
+    /// Turnstile siteverify secret. Set together with [`Config::turnstile_site_key`] —
+    /// a secret with no site key gives the browser no widget to produce a token with, so
+    /// every signup would fail; a site key with no secret renders a widget whose answer
+    /// nothing checks. Startup refuses either half on its own.
     pub turnstile_secret: Option<String>,
+    /// Turnstile site key, handed to the browser by `/api/public-config`. Public by
+    /// design — it identifies the widget, it is not a credential.
+    pub turnstile_site_key: Option<String>,
     pub master_key: MasterKey,
     pub bootstrap_jwt_secret: Vec<u8>,
     pub acme: Option<AcmeConfig>,
@@ -75,7 +96,7 @@ pub struct AcmeConfig {
     pub production: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SmtpConfig {
     pub host: String,
     pub port: u16,
@@ -84,28 +105,112 @@ pub struct SmtpConfig {
     pub from: String,
 }
 
+/// Hand-written so the password cannot be printed. Nothing logs this today, but a derived
+/// `Debug` means the next `?cfg` in a tracing call is a relay credential in the journal —
+/// and that is exactly the kind of thing that gets added without anyone noticing.
+impl std::fmt::Debug for SmtpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SmtpConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("password", &"<redacted>")
+            .field("from", &self.from)
+            .finish()
+    }
+}
+
 impl Config {
+    /// True when this process is the TLS terminator, from either certificate source.
+    /// What `cookie_secure` defaults to and what HSTS is gated on.
+    pub fn terminates_tls(&self) -> bool {
+        self.acme.is_some() || self.tls.is_some()
+    }
+
     pub fn from_env() -> anyhow::Result<Self> {
         let on_prem = bool_env("ON_PREM", false);
 
-        let smtp = match (
-            std::env::var("SMTP_HOST").ok(),
-            std::env::var("SMTP_USER").ok(),
-            std::env::var("SMTP_PASSWORD").ok(),
-            std::env::var("SMTP_FROM").ok(),
-        ) {
-            (Some(host), Some(user), Some(password), Some(from)) => Some(SmtpConfig {
-                host,
+        // All four, or none. A partial configuration used to fall back to the journal
+        // silently: every sign-in link for every tenant logged in full at info level while
+        // the API still answered 204, so anyone who could read the journal — a log shipper,
+        // the deploy script that tails it — held valid sign-in links. One typo'd variable
+        // name did that, and nothing said so.
+        let smtp_parts = [
+            (
+                "SMTP_HOST",
+                std::env::var("SMTP_HOST").ok().filter(|v| !v.is_empty()),
+            ),
+            (
+                "SMTP_USER",
+                std::env::var("SMTP_USER").ok().filter(|v| !v.is_empty()),
+            ),
+            (
+                "SMTP_PASSWORD",
+                std::env::var("SMTP_PASSWORD")
+                    .ok()
+                    .filter(|v| !v.is_empty()),
+            ),
+            (
+                "SMTP_FROM",
+                std::env::var("SMTP_FROM").ok().filter(|v| !v.is_empty()),
+            ),
+        ];
+        let missing: Vec<&str> = smtp_parts
+            .iter()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| *k)
+            .collect();
+        let smtp = match missing.len() {
+            0 => Some(SmtpConfig {
+                host: smtp_parts[0].1.clone().expect("checked above"),
                 port: std::env::var("SMTP_PORT")
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(587),
-                user,
-                password,
-                from,
+                user: smtp_parts[1].1.clone().expect("checked above"),
+                password: smtp_parts[2].1.clone().expect("checked above"),
+                from: smtp_parts[3].1.clone().expect("checked above"),
             }),
-            _ => None,
+            4 => None,
+            _ => anyhow::bail!(
+                "SMTP is half-configured: {} {} not set. Set all four of SMTP_HOST, \
+                 SMTP_USER, SMTP_PASSWORD and SMTP_FROM, or none of them — a partial \
+                 configuration would log every sign-in link to the journal instead of \
+                 mailing it, while still reporting success.",
+                missing.join(", "),
+                if missing.len() == 1 { "is" } else { "are" },
+            ),
         };
+
+        let on_prem_admin_password = std::env::var("ON_PREM_ADMIN_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let on_prem_admin_password_hash = std::env::var("ON_PREM_ADMIN_PASSWORD_HASH")
+            .ok()
+            .filter(|s| !s.is_empty());
+        if on_prem_admin_password.is_some() && on_prem_admin_password_hash.is_some() {
+            anyhow::bail!(
+                "ON_PREM_ADMIN_PASSWORD and ON_PREM_ADMIN_PASSWORD_HASH are both set. Pick \
+                 one — having two answers to 'what is the admin password' means one of them \
+                 is stale and nobody can tell which."
+            );
+        }
+
+        let turnstile_secret = std::env::var("TURNSTILE_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let turnstile_site_key = std::env::var("TURNSTILE_SITE_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
+        match (&turnstile_secret, &turnstile_site_key) {
+            (Some(_), None) => anyhow::bail!(
+                "TURNSTILE_SECRET is set but TURNSTILE_SITE_KEY is not. The browser needs the                  site key to render the widget that produces the token the secret verifies —                  without it every signup is refused. Set both, or neither."
+            ),
+            (None, Some(_)) => anyhow::bail!(
+                "TURNSTILE_SITE_KEY is set but TURNSTILE_SECRET is not. The signup form would                  render a challenge whose answer nothing verifies, which is worse than no                  challenge because it looks protected. Set both, or neither."
+            ),
+            _ => {}
+        }
 
         let master_key = MasterKey::from_env().map_err(|e| anyhow::anyhow!(
             "MASTER_KEY required (32 bytes, base64-encoded). \
@@ -120,16 +225,15 @@ impl Config {
                     .decode(s)
                     .map_err(|e| anyhow::anyhow!("BOOTSTRAP_JWT_SECRET base64: {e}"))?
             }
-            // Reuse master key bytes for JWT signing if no separate secret is configured.
-            // Same key, same trust boundary; we still get integrity + expiry checking.
-            Err(_) => MasterKey::from_env()
-                .map_err(|e| anyhow::anyhow!("MASTER_KEY: {e}"))
-                .and_then(|_| {
-                    use base64::{engine::general_purpose::STANDARD, Engine as _};
-                    STANDARD
-                        .decode(std::env::var("MASTER_KEY").unwrap())
-                        .map_err(|e| anyhow::anyhow!("master key base64: {e}"))
-                })?,
+            // Derived from MASTER_KEY rather than being MASTER_KEY. The raw bytes used to
+            // serve as both the HMAC-SHA256 key for enrollment tokens and the
+            // ChaCha20-Poly1305 key for every stored secret; no known attack crosses those
+            // primitives, but a weakness or a leak on the token path would then have been a
+            // leak of the key that decrypts the database. An HKDF subkey reveals nothing
+            // about the key it came from.
+            Err(_) => master_key
+                .derive_subkey(fleet_enrollment::BOOTSTRAP_JWT_INFO)
+                .to_vec(),
         };
 
         let acme = match (
@@ -186,6 +290,41 @@ impl Config {
         let agent_mtls_url = std::env::var("MTLS_URL")
             .unwrap_or_else(|_| derive_agent_mtls_url(&base_url, &listen_https, &listen_mtls));
 
+        // Derived, not defaulted to false. A hand-written env file that simply omits
+        // COOKIE_SECURE used to leave the session cookie willing to travel in clear on a
+        // server that terminates TLS; the bootstrap template and the container entrypoint
+        // set it, so the gap was exactly the deployment nobody generated. Explicitly
+        // setting it still wins — including setting it false, which is occasionally right
+        // behind a terminating proxy on a private network, and which now says so out loud.
+        let cookie_secure = match std::env::var("COOKIE_SECURE") {
+            Ok(v) => {
+                let want = matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+                if !want && terminates_tls {
+                    tracing::warn!(
+                        "COOKIE_SECURE is explicitly false while this server terminates TLS — \
+                         the session cookie will be sent over plain HTTP if a browser is ever \
+                         pointed at one. Unset it to take the safe default."
+                    );
+                }
+                want
+            }
+            Err(_) => terminates_tls,
+        };
+
+        // A server terminating TLS is a server people sign in to over the internet, and
+        // "every sign-in link is in the journal" is not something to discover from a log.
+        // On-prem has no magic links at all, so it is exempt; MAGIC_LINKS_TO_LOG is the
+        // explicit way to say "yes, I am testing".
+        if smtp.is_none() && terminates_tls && !on_prem && !bool_env("MAGIC_LINKS_TO_LOG", false) {
+            anyhow::bail!(
+                "no SMTP configuration, but this server terminates TLS. Every sign-in link \
+                 would be written to the journal in full while the API reported success, and \
+                 anyone who can read the journal would hold them. Configure SMTP_HOST, \
+                 SMTP_USER, SMTP_PASSWORD and SMTP_FROM — or set MAGIC_LINKS_TO_LOG=true if \
+                 that really is what you want."
+            );
+        }
+
         Ok(Self {
             listen: std::env::var("LISTEN").unwrap_or_else(|_| "0.0.0.0:3000".into()),
             listen_https,
@@ -197,20 +336,31 @@ impl Config {
             base_url,
             on_prem,
             on_prem_admin_email: std::env::var("ON_PREM_ADMIN_EMAIL").ok(),
-            on_prem_admin_password: std::env::var("ON_PREM_ADMIN_PASSWORD").ok(),
+            on_prem_admin_password: on_prem_admin_password.clone(),
+            on_prem_admin_password_hash: on_prem_admin_password_hash.clone(),
             platform_admin_emails: csv_env("PLATFORM_ADMIN_EMAILS"),
             magic_link_ttl_secs: 900,
             session_ttl_secs: 604_800,
+            session_idle_ttl_secs: std::env::var("SESSION_IDLE_HOURS")
+                .ok()
+                .and_then(|v| v.parse::<i64>().ok())
+                .filter(|h| *h > 0)
+                .map(|h| h * 3_600)
+                // Three days: long enough that an operator who checks the fleet a couple of
+                // times a week is not re-authenticating by email on every visit, short
+                // enough that an abandoned session is not a week-long standing credential.
+                .unwrap_or(3 * 86_400),
             bootstrap_ttl_secs: 3600,
             host_lost_after_secs: host_lost_after_secs(),
             client_cert_lifetime_days: 90,
-            cookie_secure: bool_env("COOKIE_SECURE", false),
+            cookie_secure,
             daily_email_budget: std::env::var("DAILY_EMAIL_BUDGET")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5000),
             smtp,
-            turnstile_secret: std::env::var("TURNSTILE_SECRET").ok(),
+            turnstile_secret,
+            turnstile_site_key,
             master_key,
             bootstrap_jwt_secret,
             acme,

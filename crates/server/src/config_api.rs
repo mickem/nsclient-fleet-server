@@ -32,8 +32,13 @@ pub async fn put_tag(
     if !host_belongs_to(&state, who.tenant_id, &host_id).await {
         return (StatusCode::NOT_FOUND, "host not found").into_response();
     }
-    if key.trim().is_empty() || key.len() > 128 {
+    // The selector's own limits: a key or value longer than a selector can compare could
+    // never be matched, so accepting one stores what cannot be used.
+    if key.trim().is_empty() || key.len() > fleet_core::selector::MAX_KEY_LEN {
         return (StatusCode::BAD_REQUEST, "invalid key").into_response();
+    }
+    if body.value.len() > fleet_core::selector::MAX_VALUE_LEN {
+        return (StatusCode::BAD_REQUEST, "value too long").into_response();
     }
     let tags = HostTagsRepo::new(&state.db);
     let changed = match tags
@@ -47,7 +52,22 @@ pub async fn put_tag(
         }
     };
     if changed {
-        bump_config_version(&state, who.tenant_id).await;
+        // One host's tags decide one host's group membership, so only that host's memoized
+        // state can be wrong. Bumping the tenant's config version invalidated every other
+        // host's entry as well, for nothing.
+        state
+            .desired_state_cache
+            .invalidate_host(who.tenant_id, &host_id);
+        crate::audit::record(
+            &state,
+            who.tenant_id,
+            Some(who.user_id),
+            "host.tag_set",
+            "host",
+            &host_id,
+            Some(&serde_json::json!({ "key": key })),
+        )
+        .await;
     }
     StatusCode::NO_CONTENT.into_response()
 }
@@ -66,7 +86,19 @@ pub async fn delete_tag(
     let tags = HostTagsRepo::new(&state.db);
     match tags.delete_manual_tag(who.tenant_id, &host_id, &key).await {
         Ok(true) => {
-            bump_config_version(&state, who.tenant_id).await;
+            state
+                .desired_state_cache
+                .invalidate_host(who.tenant_id, &host_id);
+            crate::audit::record(
+                &state,
+                who.tenant_id,
+                Some(who.user_id),
+                "host.tag_removed",
+                "host",
+                &host_id,
+                Some(&serde_json::json!({ "key": key })),
+            )
+            .await;
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => StatusCode::NOT_FOUND.into_response(),
@@ -337,7 +369,13 @@ pub async fn put_override(
         Ok(s) => s,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid patch").into_response(),
     };
-    let encrypted = state.config.master_key.encrypt(patch_str.as_bytes());
+    let encrypted = state.config.master_key.encrypt(
+        fleet_core::aead::Purpose::HostOverride {
+            tenant_id: who.tenant_id,
+            host_id: &host_id,
+        },
+        patch_str.as_bytes(),
+    );
     let priority = body.priority.unwrap_or(1000);
 
     let repo = HostOverridesRepo::new(&state.db);

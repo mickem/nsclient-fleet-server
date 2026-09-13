@@ -1,6 +1,7 @@
 use anyhow::Result;
 use fleet_core::api_key::ApiKey;
 use fleet_core::host::{new_host_id, Host};
+use fleet_core::selector::{HostTags, TagSource, TagValue};
 use fleet_core::session::Session;
 use fleet_core::tenant::Tenant;
 use fleet_core::time::now_unix;
@@ -345,16 +346,57 @@ impl<'a> HostRepo<'a> {
 
     /// Atomic state transition: pending → enrolled. Returns true iff a matching pending
     /// host was found and updated. Burns the nonce in the same statement.
-    pub async fn mark_enrolled_if_pending(
+    /// Is this host still waiting for exactly this bootstrap nonce?
+    ///
+    /// A read, so it can run *before* the CA-key decrypt and the ECDSA signature that
+    /// enrollment otherwise pays for unconditionally. It is not the authority — the atomic
+    /// burn in [`Self::enroll`] is, and it re-checks every one of these conditions in the
+    /// same statement that clears them. This only stops a replayed-but-unexpired token
+    /// costing a signature before being refused.
+    pub async fn bootstrap_pending(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        nonce_hash: &str,
+    ) -> Result<bool> {
+        let row = sqlx::query(
+            "SELECT 1 AS x FROM hosts
+             WHERE tenant_id = ? AND id = ? AND bootstrap_nonce_hash = ?
+               AND enrolled_at IS NULL AND bootstrap_expires_at > ?",
+        )
+        .bind(tenant_id)
+        .bind(host_id)
+        .bind(nonce_hash)
+        .bind(now_unix())
+        .fetch_optional(&self.db.read)
+        .await?;
+        Ok(row.is_some())
+    }
+
+    /// Burn the one-time bootstrap nonce and record the issued certificate together.
+    ///
+    /// One transaction because the two used to be separate statements: if recording the
+    /// certificate failed after the burn, the host was marked enrolled with no certificate
+    /// and could never enrol again — the token was spent — so the only way back was to
+    /// delete and recreate it. Either both land or neither does.
+    ///
+    /// Returns false when the burn matched nothing: an already-used nonce, an expired one,
+    /// a host that is already enrolled, or a wrong nonce. The condition lives in the UPDATE
+    /// so two simultaneous enrollments cannot both succeed.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn enroll(
         &self,
         tenant_id: i64,
         host_id: &str,
         nonce_hash: &str,
         hostname: Option<&str>,
         os: Option<&str>,
+        cert: EnrolledCert<'_>,
     ) -> Result<bool> {
         let now = now_unix();
-        let res = sqlx::query(
+        let mut tx = self.db.write.begin().await?;
+
+        let burned = sqlx::query(
             "UPDATE hosts
              SET enrolled_at = ?,
                  hostname = COALESCE(?, hostname),
@@ -374,14 +416,36 @@ impl<'a> HostRepo<'a> {
         .bind(host_id)
         .bind(nonce_hash)
         .bind(now)
-        .execute(&self.db.write)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+        if burned != 1 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
+        sqlx::query(
+            "INSERT INTO host_certs
+             (tenant_id, host_id, serial, fingerprint_sha256, issued_at, expires_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(tenant_id)
+        .bind(host_id)
+        .bind(cert.serial)
+        .bind(cert.fingerprint_sha256)
+        .bind(cert.issued_at)
+        .bind(cert.expires_at)
+        .execute(&mut *tx)
         .await?;
-        Ok(res.rows_affected() == 1)
+
+        tx.commit().await?;
+        Ok(true)
     }
 
     /// Delete a host and everything hanging off it (tags, overrides, certs, metrics) in
     /// one transaction. Removing the cert rows is what cuts the agent off: the mTLS
-    /// heartbeat's `is_active(serial)` lookup no longer matches, so a live agent gets 403
+    /// heartbeat's `standing(serial)` lookup no longer matches, so a live agent gets 403
     /// on its next call. Returns true iff the host row existed.
     pub async fn delete(&self, tenant_id: i64, host_id: &str) -> Result<bool> {
         let mut tx = self.db.write.begin().await?;
@@ -411,6 +475,59 @@ impl<'a> HostRepo<'a> {
             .execute(&self.db.write)
             .await?;
         Ok(())
+    }
+
+    /// Cut a host off and hand it a way back, in one transaction.
+    ///
+    /// Revoking alone would strand the host: its certificates stop working and enrollment
+    /// refuses a host that is already enrolled, so the only remaining move would be to
+    /// delete it and lose its tags, groups and overrides. Resetting it to pending in the
+    /// same transaction keeps the host's identity and everything hanging off it, and
+    /// makes this the operation an operator actually wants when a key is believed stolen.
+    ///
+    /// Returns the number of certificates revoked, or `None` if no such host.
+    pub async fn revoke_certs_and_reset_to_pending(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        nonce_hash: &str,
+        bootstrap_expires_at: i64,
+    ) -> Result<Option<u64>> {
+        let now = now_unix();
+        let mut tx = self.db.write.begin().await?;
+
+        let revoked = sqlx::query(
+            "UPDATE host_certs SET revoked_at = ?
+             WHERE tenant_id = ? AND host_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(tenant_id)
+        .bind(host_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+        let reset = sqlx::query(
+            "UPDATE hosts
+             SET enrolled_at = NULL,
+                 bootstrap_nonce_hash = ?,
+                 bootstrap_expires_at = ?
+             WHERE tenant_id = ? AND id = ?",
+        )
+        .bind(nonce_hash)
+        .bind(bootstrap_expires_at)
+        .bind(tenant_id)
+        .bind(host_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+        if reset == 0 {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        tx.commit().await?;
+        Ok(Some(revoked))
     }
 
     /// Refresh `last_seen_at`, but only once it is older than `stale_after_secs`.
@@ -495,9 +612,19 @@ impl<'a> HostTagsRepo<'a> {
         Self { db }
     }
 
-    /// Upsert agent-reported tags. Returns true iff at least one tag's value changed
-    /// (so callers know whether to bump config_version).
-    pub async fn upsert_agent_tags(
+    /// Replace a host's agent-reported tags with exactly `tags`.
+    ///
+    /// Replace, not merge: the report carries the host's full view of itself, so a key it
+    /// has stopped reporting has stopped being true. Merging left those keys in place
+    /// forever — an agent that reported `role=sql_server` once kept satisfying selectors
+    /// over it after the role was gone, and nothing but deleting the host removed them.
+    ///
+    /// Manual tags are untouched. They live under the same keys with `source = 'manual'`
+    /// and belong to the operator.
+    ///
+    /// Returns true iff the stored set actually changed, so callers know whether anything
+    /// downstream needs invalidating.
+    pub async fn replace_agent_tags(
         &self,
         tenant_id: i64,
         host_id: &str,
@@ -506,6 +633,28 @@ impl<'a> HostTagsRepo<'a> {
         let now = now_unix();
         let mut changed = false;
         let mut tx = self.db.write.begin().await?;
+
+        let stale: Vec<String> = sqlx::query_scalar(
+            "SELECT key FROM host_tags
+             WHERE tenant_id = ? AND host_id = ? AND source = 'agent'",
+        )
+        .bind(tenant_id)
+        .bind(host_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        for key in stale.iter().filter(|k| !tags.contains_key(*k)) {
+            sqlx::query(
+                "DELETE FROM host_tags
+                 WHERE tenant_id = ? AND host_id = ? AND key = ? AND source = 'agent'",
+            )
+            .bind(tenant_id)
+            .bind(host_id)
+            .bind(key)
+            .execute(&mut *tx)
+            .await?;
+            changed = true;
+        }
+
         for (key, value) in tags {
             let existing: Option<String> = sqlx::query_scalar(
                 "SELECT value FROM host_tags
@@ -639,27 +788,39 @@ impl<'a> HostTagsRepo<'a> {
         Ok(res.rows_affected() > 0)
     }
 
-    /// Returns tags as map<key, list<value>> (multi-source: a key can have manual + agent values).
-    pub async fn map_for_host(
-        &self,
-        tenant_id: i64,
-        host_id: &str,
-    ) -> Result<std::collections::HashMap<String, Vec<String>>> {
-        let rows =
-            sqlx::query("SELECT key, value FROM host_tags WHERE tenant_id = ? AND host_id = ?")
-                .bind(tenant_id)
-                .bind(host_id)
-                .fetch_all(&self.db.read)
-                .await?;
-        let mut out: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
+    /// Every tag on a host, keyed by tag key, with each value carrying its source.
+    ///
+    /// The source is part of the result and not an afterthought: selector evaluation needs
+    /// it to tell an operator's assertion from a claim the host made about itself. This
+    /// used to return bare strings, which is what let a host tag its way into any group.
+    pub async fn map_for_host(&self, tenant_id: i64, host_id: &str) -> Result<HostTags> {
+        let rows = sqlx::query(
+            "SELECT key, value, source FROM host_tags WHERE tenant_id = ? AND host_id = ?",
+        )
+        .bind(tenant_id)
+        .bind(host_id)
+        .fetch_all(&self.db.read)
+        .await?;
+        let mut out: HostTags = std::collections::HashMap::new();
         for r in rows {
             let k: String = r.get("key");
-            let v: String = r.get("value");
-            out.entry(k).or_default().push(v);
+            out.entry(k).or_default().push(TagValue {
+                value: r.get("value"),
+                source: TagSource::from_db(&r.get::<String, _>("source")),
+            });
         }
         Ok(out)
     }
+}
+
+/// The certificate fields [`HostRepo::enroll`] records, grouped so the call reads as
+/// "enrol this host with this certificate" rather than as nine positional arguments.
+#[derive(Debug, Clone, Copy)]
+pub struct EnrolledCert<'a> {
+    pub serial: &'a str,
+    pub fingerprint_sha256: &'a str,
+    pub issued_at: i64,
+    pub expires_at: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -800,8 +961,16 @@ impl<'a> BundlesRepo<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Insert a bundle under an id the caller has already chosen.
+    ///
+    /// The id used to be generated here, which meant the signature could not cover it — it
+    /// did not exist until after the row did. A signature that says nothing about which
+    /// bundle it is for is most of the reason v1 signatures were worth so little; see
+    /// [`fleet_core::bundlesig`].
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
+        id: &str,
         tenant_id: i64,
         name: &str,
         version: &str,
@@ -811,8 +980,7 @@ impl<'a> BundlesRepo<'a> {
         format: &str,
         key_fingerprint: Option<&str>,
     ) -> Result<BundleRow> {
-        use ulid::Ulid;
-        let id = Ulid::new().to_string();
+        let id = id.to_string();
         let now = now_unix();
         sqlx::query(
             "INSERT INTO bundles (id, tenant_id, name, version, sha256, size_bytes, signature, uploaded_at, format, key_fingerprint)
@@ -854,6 +1022,60 @@ impl<'a> BundlesRepo<'a> {
         .fetch_optional(&self.db.read)
         .await?;
         Ok(row.map(map_bundle))
+    }
+
+    pub async fn count(&self, tenant_id: i64) -> Result<i64> {
+        Ok(
+            sqlx::query_scalar("SELECT COUNT(*) FROM bundles WHERE tenant_id = ?")
+                .bind(tenant_id)
+                .fetch_one(&self.db.read)
+                .await?,
+        )
+    }
+
+    /// Delete a bundle and every assignment referencing it, in one transaction.
+    ///
+    /// The assignments have to go with it or a group keeps pointing at a bundle that is not
+    /// there, and the next desired-state computation for every host in that group fails.
+    /// The stored bytes are the caller's to remove — this layer does not know where they
+    /// live — and are deleted after this returns true.
+    pub async fn delete(&self, tenant_id: i64, id: &str) -> Result<bool> {
+        let mut tx = self.db.write.begin().await?;
+        sqlx::query("DELETE FROM bundle_assignments WHERE tenant_id = ? AND bundle_id = ?")
+            .bind(tenant_id)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        let res = sqlx::query("DELETE FROM bundles WHERE tenant_id = ? AND id = ?")
+            .bind(tenant_id)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Every bundle in the database, across tenants. For the startup re-sign only.
+    pub async fn list_all(&self) -> Result<Vec<BundleRow>> {
+        let rows = sqlx::query(
+            "SELECT id, tenant_id, name, version, sha256, size_bytes, signature, uploaded_at,
+                    format, key_fingerprint
+             FROM bundles",
+        )
+        .fetch_all(&self.db.read)
+        .await?;
+        Ok(rows.into_iter().map(map_bundle).collect())
+    }
+
+    /// Replace a bundle's signature. Startup re-sign only — bundles are otherwise immutable.
+    pub async fn replace_signature(&self, tenant_id: i64, id: &str, signature: &str) -> Result<()> {
+        sqlx::query("UPDATE bundles SET signature = ? WHERE tenant_id = ? AND id = ?")
+            .bind(signature)
+            .bind(tenant_id)
+            .bind(id)
+            .execute(&self.db.write)
+            .await?;
+        Ok(())
     }
 
     pub async fn list(&self, tenant_id: i64) -> Result<Vec<BundleRow>> {
@@ -1143,6 +1365,43 @@ impl<'a> HostOverridesRepo<'a> {
         Ok(res.rows_affected() > 0)
     }
 
+    /// Every override in the database, as `(tenant_id, host_id, ciphertext)`. For the
+    /// startup rewrite only — request paths read one host's override, scoped to its tenant.
+    pub async fn list_all(&self) -> Result<Vec<(i64, String, Vec<u8>)>> {
+        let rows = sqlx::query("SELECT tenant_id, host_id, patch_encrypted FROM host_overrides")
+            .fetch_all(&self.db.read)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                (
+                    r.get::<i64, _>("tenant_id"),
+                    r.get::<String, _>("host_id"),
+                    r.get::<Vec<u8>, _>("patch_encrypted"),
+                )
+            })
+            .collect())
+    }
+
+    /// Replace just the ciphertext, leaving priority and authorship alone. Startup rewrite
+    /// only — a real edit goes through [`Self::upsert`].
+    pub async fn replace_ciphertext(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        patch_encrypted: &[u8],
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE host_overrides SET patch_encrypted = ? WHERE tenant_id = ? AND host_id = ?",
+        )
+        .bind(patch_encrypted)
+        .bind(tenant_id)
+        .bind(host_id)
+        .execute(&self.db.write)
+        .await?;
+        Ok(())
+    }
+
     pub async fn get(&self, tenant_id: i64, host_id: &str) -> Result<Option<StoredHostOverride>> {
         let row = sqlx::query(
             "SELECT host_id, patch_encrypted, priority FROM host_overrides
@@ -1247,6 +1506,27 @@ impl<'a> TenantSecretsRepo<'a> {
             bundle_signing_pub_pem: r.get("bundle_signing_pub_pem"),
             bundle_signing_key_encrypted: r.get("bundle_signing_key_encrypted"),
         }))
+    }
+
+    /// Replace both encrypted columns for one tenant. Only the startup rewrite that binds
+    /// legacy ciphertexts to their purpose has any reason to call this.
+    pub async fn replace_encrypted_keys(
+        &self,
+        tenant_id: i64,
+        ca_key_encrypted: &[u8],
+        bundle_signing_key_encrypted: &[u8],
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE tenant_secrets
+             SET ca_key_encrypted = ?, bundle_signing_key_encrypted = ?
+             WHERE tenant_id = ?",
+        )
+        .bind(ca_key_encrypted)
+        .bind(bundle_signing_key_encrypted)
+        .bind(tenant_id)
+        .execute(&self.db.write)
+        .await?;
+        Ok(())
     }
 
     pub async fn list_all_cas(&self) -> Result<Vec<CaSummary>> {
@@ -1365,15 +1645,114 @@ impl<'a> HostCertRepo<'a> {
         Ok(())
     }
 
-    pub async fn is_active(&self, serial: &str) -> Result<bool> {
-        let row = sqlx::query(
-            "SELECT 1 AS x FROM host_certs WHERE serial = ? AND revoked_at IS NULL LIMIT 1",
+    /// What a presented client certificate is worth right now.
+    ///
+    /// Keyed on tenant and host as well as serial, and on the stored expiry, so the answer
+    /// is "this certificate, issued to this host in this tenant, is live" rather than
+    /// "some row somewhere has this serial and is not flagged". The tenant and host come
+    /// from the verified chain, so a mismatch should be impossible — which is the reason
+    /// to check it here rather than the reason not to.
+    pub async fn standing(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        serial: &str,
+    ) -> Result<CertStanding> {
+        // A host holds a handful of live certs at most, so one read for all of them beats
+        // two aggregate subqueries over the same rows.
+        //
+        // Ordering is by rowid, not `issued_at`. `issued_at` comes from the certificate's
+        // notBefore and has one-second granularity, so a renewal in the same second as the
+        // certificate it replaces would tie and neither would ever be retired. Within one
+        // host's rows rowid is insertion order exactly, and it cannot tie.
+        let rows = sqlx::query(
+            "SELECT rowid AS rid, serial FROM host_certs
+             WHERE tenant_id = ? AND host_id = ? AND revoked_at IS NULL AND expires_at > ?",
         )
-        .bind(serial)
-        .fetch_optional(&self.db.read)
+        .bind(tenant_id)
+        .bind(host_id)
+        .bind(now_unix())
+        .fetch_all(&self.db.read)
         .await?;
-        Ok(row.is_some())
+
+        let mine = rows
+            .iter()
+            .find(|r| r.get::<String, _>("serial") == serial)
+            .map(|r| r.get::<i64, _>("rid"));
+        let Some(rid) = mine else {
+            return Ok(CertStanding {
+                active: false,
+                superseded: 0,
+            });
+        };
+        let superseded = rows.iter().filter(|r| r.get::<i64, _>("rid") < rid).count();
+        Ok(CertStanding {
+            active: true,
+            superseded,
+        })
     }
+
+    /// Revoke every live certificate this host holds that was issued before `serial`.
+    ///
+    /// Called when the host presents `serial`, which is the point at which we know it
+    /// actually received that certificate — a renewal whose response never arrived
+    /// therefore costs the host nothing, and no grace window has to be guessed at.
+    ///
+    /// Strictly *older*, never "every other", because the caller is authenticated by the
+    /// certificate it presents: if a thief replayed a stolen older key, "every other"
+    /// would have it revoke the legitimate new one. Older means earlier rowid — see
+    /// [`Self::standing`] for why not `issued_at`.
+    pub async fn retire_superseded(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        serial: &str,
+    ) -> Result<u64> {
+        let now = now_unix();
+        let res = sqlx::query(
+            "UPDATE host_certs SET revoked_at = ?
+             WHERE tenant_id = ? AND host_id = ? AND revoked_at IS NULL AND expires_at > ?
+               AND rowid < (SELECT rowid FROM host_certs
+                            WHERE tenant_id = ? AND host_id = ? AND serial = ?)",
+        )
+        .bind(now)
+        .bind(tenant_id)
+        .bind(host_id)
+        .bind(now)
+        .bind(tenant_id)
+        .bind(host_id)
+        .bind(serial)
+        .execute(&self.db.write)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Revoke every live certificate a host holds. The operator-facing lever, for a host
+    /// whose key is believed stolen; pair it with resetting the host to pending so it has
+    /// a way back. See [`HostRepo::revoke_certs_and_reset_to_pending`].
+    pub async fn revoke_all_for_host(&self, tenant_id: i64, host_id: &str) -> Result<u64> {
+        let now = now_unix();
+        let res = sqlx::query(
+            "UPDATE host_certs SET revoked_at = ?
+             WHERE tenant_id = ? AND host_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(tenant_id)
+        .bind(host_id)
+        .execute(&self.db.write)
+        .await?;
+        Ok(res.rows_affected())
+    }
+}
+
+/// The answer to "may this certificate act, and did it leave others behind?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CertStanding {
+    /// This serial is a live, unexpired, unrevoked certificate for this host.
+    pub active: bool,
+    /// Live certificates recorded for the same host before this one — what a renewal
+    /// leaves behind. Non-zero means [`HostCertRepo::retire_superseded`] has work to do.
+    pub superseded: usize,
 }
 
 pub struct UserRepo<'a> {
@@ -1716,6 +2095,7 @@ impl<'a> ApiKeyRepo<'a> {
 
     /// Store a key. `token_hash` must already be hashed by the caller — the plaintext never
     /// reaches this layer.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
         tenant_id: i64,
@@ -1723,12 +2103,14 @@ impl<'a> ApiKeyRepo<'a> {
         name: &str,
         token_hash: &str,
         token_prefix: &str,
+        expires_at: Option<i64>,
     ) -> Result<ApiKey> {
         let id = ulid::Ulid::new().to_string();
         let now = now_unix();
         sqlx::query(
-            "INSERT INTO api_keys (id, tenant_id, user_id, name, token_hash, token_prefix, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO api_keys
+             (id, tenant_id, user_id, name, token_hash, token_prefix, created_at, expires_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(tenant_id)
@@ -1737,6 +2119,7 @@ impl<'a> ApiKeyRepo<'a> {
         .bind(token_hash)
         .bind(token_prefix)
         .bind(now)
+        .bind(expires_at)
         .execute(&self.db.write)
         .await?;
 
@@ -1748,12 +2131,14 @@ impl<'a> ApiKeyRepo<'a> {
             token_prefix: token_prefix.to_owned(),
             created_at: now,
             last_used_at: None,
+            expires_at,
         })
     }
 
     pub async fn list_for_user(&self, tenant_id: i64, user_id: i64) -> Result<Vec<ApiKey>> {
         let rows = sqlx::query(
-            "SELECT id, tenant_id, user_id, name, token_prefix, created_at, last_used_at
+            "SELECT id, tenant_id, user_id, name, token_prefix, created_at, last_used_at,
+                    expires_at
              FROM api_keys WHERE tenant_id = ? AND user_id = ? ORDER BY created_at DESC",
         )
         .bind(tenant_id)
@@ -1769,10 +2154,12 @@ impl<'a> ApiKeyRepo<'a> {
     /// Looked up by hash — a leaked database yields no usable tokens.
     pub async fn find_by_hash(&self, token_hash: &str) -> Result<Option<ApiKey>> {
         let row = sqlx::query(
-            "SELECT id, tenant_id, user_id, name, token_prefix, created_at, last_used_at
-             FROM api_keys WHERE token_hash = ?",
+            "SELECT id, tenant_id, user_id, name, token_prefix, created_at, last_used_at,
+                    expires_at
+             FROM api_keys WHERE token_hash = ? AND (expires_at IS NULL OR expires_at > ?)",
         )
         .bind(token_hash)
+        .bind(now_unix())
         .fetch_optional(&self.db.read)
         .await?;
         Ok(row.map(map_api_key))
@@ -1809,6 +2196,7 @@ fn map_api_key(r: sqlx::sqlite::SqliteRow) -> ApiKey {
         token_prefix: r.get("token_prefix"),
         created_at: r.get("created_at"),
         last_used_at: r.get("last_used_at"),
+        expires_at: r.get("expires_at"),
     }
 }
 
@@ -1853,18 +2241,26 @@ impl<'a> SessionRepo<'a> {
         })
     }
 
-    /// Fetch a session by token hash, refreshing `last_used_at`. Returns None if missing or expired.
-    pub async fn touch(&self, id_hash: &str) -> Result<Option<Session>> {
+    /// Fetch a session by token hash, refreshing `last_used_at`.
+    ///
+    /// Returns None if missing, past its absolute lifetime, or idle for longer than
+    /// `idle_ttl_seconds`. The idle bound is the one that matters for a console left open
+    /// on an unattended machine: an absolute lifetime alone means a session taken on day
+    /// one is still good on day six regardless of whether anyone has touched it. Both
+    /// conditions are in the statement that refreshes the timestamp, so there is no window
+    /// between checking and extending.
+    pub async fn touch(&self, id_hash: &str, idle_ttl_seconds: i64) -> Result<Option<Session>> {
         let now = now_unix();
         let row = sqlx::query(
             "UPDATE sessions
              SET last_used_at = ?
-             WHERE id = ? AND expires_at > ?
+             WHERE id = ? AND expires_at > ? AND last_used_at > ?
              RETURNING id, tenant_id, user_id, expires_at, last_used_at, created_at",
         )
         .bind(now)
         .bind(id_hash)
         .bind(now)
+        .bind(now - idle_ttl_seconds)
         .fetch_optional(&self.db.write)
         .await?;
         Ok(row.map(|r| Session {
@@ -1885,10 +2281,30 @@ impl<'a> SessionRepo<'a> {
         Ok(())
     }
 
-    pub async fn delete_expired(&self) -> Result<u64> {
+    /// Sign a user out of every session, including the one making the request.
+    ///
+    /// Backs "sign out everywhere", which is what someone reaches for when they think a
+    /// session has been taken — and until now the only way to get it was for an admin to
+    /// block or delete the account.
+    pub async fn delete_for_user(&self, tenant_id: i64, user_id: i64) -> Result<u64> {
+        let res = sqlx::query("DELETE FROM sessions WHERE tenant_id = ? AND user_id = ?")
+            .bind(tenant_id)
+            .bind(user_id)
+            .execute(&self.db.write)
+            .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Drop rows past their absolute lifetime, or idle past `idle_ttl_seconds`.
+    ///
+    /// Neither is required for correctness — `touch` refuses both — but a row that can
+    /// never authenticate anything again is a stored credential hash with no purpose, and
+    /// this table only ever grew.
+    pub async fn delete_expired(&self, idle_ttl_seconds: i64) -> Result<u64> {
         let now = now_unix();
-        let res = sqlx::query("DELETE FROM sessions WHERE expires_at < ?")
+        let res = sqlx::query("DELETE FROM sessions WHERE expires_at < ? OR last_used_at < ?")
             .bind(now)
+            .bind(now - idle_ttl_seconds)
             .execute(&self.db.write)
             .await?;
         Ok(res.rows_affected())
@@ -2023,10 +2439,21 @@ mod tests {
             .unwrap();
         assert!(s.expires_at > now_unix());
 
-        let touched = sessions.touch("session_hash").await.unwrap().unwrap();
+        let touched = sessions.touch("session_hash", 3600).await.unwrap().unwrap();
         assert_eq!(touched.user_id, u.id);
 
+        // Idle for longer than the allowance is as good as gone, even though the absolute
+        // lifetime has not run out.
+        assert!(
+            sessions.touch("session_hash", 0).await.unwrap().is_none(),
+            "an idle session must not authenticate"
+        );
+
         sessions.delete("session_hash").await.unwrap();
-        assert!(sessions.touch("session_hash").await.unwrap().is_none());
+        assert!(sessions
+            .touch("session_hash", 3600)
+            .await
+            .unwrap()
+            .is_none());
     }
 }

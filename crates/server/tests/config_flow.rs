@@ -61,9 +61,11 @@ async fn start() -> TestServer {
         on_prem: false,
         on_prem_admin_email: None,
         on_prem_admin_password: None,
+        on_prem_admin_password_hash: None,
         platform_admin_emails: Vec::new(),
         magic_link_ttl_secs: 900,
         session_ttl_secs: 3600,
+        session_idle_ttl_secs: 3600,
         bootstrap_ttl_secs: 3600,
         host_lost_after_secs: 172_800,
         client_cert_lifetime_days: 90,
@@ -71,6 +73,7 @@ async fn start() -> TestServer {
         daily_email_budget: 1_000_000,
         smtp: None,
         turnstile_secret: None,
+        turnstile_site_key: None,
         master_key,
         bootstrap_jwt_secret,
     };
@@ -254,36 +257,302 @@ async fn end_to_end_tag_group_bundle_assign_and_fetch() {
     let ds = agent.fetch_desired_state(None).await.unwrap().unwrap();
     assert_eq!(ds.bundles.len(), 0, "no role tag → no matching bundle");
 
-    // 5. Agent reports `role=sql_server` via state-report → tag added
+    // 5. Agent claims `role=sql_server` about itself. The tag is stored, but the selector
+    //    above did not ask for agent-reported values, so this must not move the host into
+    //    the group. This is the whole point of the source filter: otherwise any host that
+    //    can talk to us helps itself to the SQL group's bundles.
     let mut tags = BTreeMap::new();
     tags.insert("role".into(), "sql_server".into());
     agent.report_state(None, tags).await.unwrap();
 
-    // 6. Next poll → bundle now matches
     s.agent_limits.forget_last_poll(&host_id);
     let ds2 = agent.fetch_desired_state(None).await.unwrap().unwrap();
-    assert_eq!(ds2.bundles.len(), 1, "role match should pull in bundle");
+    assert_eq!(
+        ds2.bundles.len(),
+        0,
+        "a host claiming a tag must not put itself in a group selecting on operator tags"
+    );
+
+    // ...and the download endpoint agrees, rather than relying on the poll alone to keep
+    // the host away from the bytes.
+    let claimed = fleet_core::bundlesig::BundleDescriptor {
+        tenant_id: ds2.tenant_id,
+        bundle_id: &bundle_id,
+        name: "sql-monitoring",
+        version: "1.2.0",
+        format: "plain",
+        sha256_hex: &expected_sha,
+    };
+    let forbidden = agent.fetch_bundle_verified(claimed, &signature).await;
+    assert!(
+        forbidden.is_err(),
+        "download must refuse a bundle the host is not actually assigned"
+    );
+
+    // 6. The operator sets the same tag. Now it is an operator's assertion, and the host
+    //    joins the group.
+    let r = s
+        .cookie_jar
+        .put(format!("{}/api/hosts/{}/tags/role", s.base_url, host_id))
+        .json(&serde_json::json!({"value": "sql_server"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+
+    s.agent_limits.forget_last_poll(&host_id);
+    let ds3 = agent.fetch_desired_state(None).await.unwrap().unwrap();
+    assert_eq!(ds3.bundles.len(), 1, "operator tag should pull in bundle");
 
     // 7. Agent downloads the bundle and verifies sha256 + signature
     let downloaded = agent
-        .fetch_bundle(&bundle_id, &expected_sha, &signature)
+        .fetch_bundle_verified(ds3.descriptor(&ds3.bundles[0]).unwrap(), &signature)
         .await
         .unwrap();
     assert_eq!(downloaded, bundle_bytes);
 }
 
+/// The opt-in half: an operator who writes `"source": "agent"` is saying hosts may place
+/// themselves in this group, and that is exactly what happens.
 #[tokio::test]
-async fn manual_tag_endpoint_bumps_config_version() {
+async fn a_selector_that_opts_into_agent_tags_matches_what_the_host_reports() {
+    let s = start().await;
+    signup_login(&s, "delta", "dave@example.com").await;
+    let (agent, host_id) = enroll_a_host(&s).await;
+
+    let g = s
+        .cookie_jar
+        .post(format!("{}/api/groups", s.base_url))
+        .json(&serde_json::json!({
+            "name": "linux-hosts",
+            "selector": { "clauses": [
+                {"op": "eq", "key": "os", "value": "linux", "source": "agent"}
+            ] }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(g.status(), 201);
+    let group: serde_json::Value = g.json().await.unwrap();
+    let group_id = group["id"].as_str().unwrap().to_string();
+
+    let form = reqwest::multipart::Form::new()
+        .text("name", "linux-checks")
+        .text("version", "1.0.0")
+        .part(
+            "bundle",
+            reqwest::multipart::Part::bytes(b"linux-bundle".to_vec())
+                .file_name("bundle.zip")
+                .mime_str("application/zip")
+                .unwrap(),
+        );
+    let bres = s
+        .cookie_jar
+        .post(format!("{}/api/bundles", s.base_url))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bres.status(), 200);
+    let bundle: serde_json::Value = bres.json().await.unwrap();
+    let bundle_id = bundle["id"].as_str().unwrap().to_string();
+
+    let a = s
+        .cookie_jar
+        .post(format!("{}/api/groups/{}/bundles", s.base_url, group_id))
+        .json(&serde_json::json!({"bundle_id": bundle_id, "priority": 10}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(a.status(), 204);
+
+    s.agent_limits.forget_last_poll(&host_id);
+    assert_eq!(
+        agent
+            .fetch_desired_state(None)
+            .await
+            .unwrap()
+            .unwrap()
+            .bundles
+            .len(),
+        0
+    );
+
+    let mut tags = BTreeMap::new();
+    tags.insert("os".into(), "linux".into());
+    agent.report_state(None, tags).await.unwrap();
+
+    s.agent_limits.forget_last_poll(&host_id);
+    assert_eq!(
+        agent
+            .fetch_desired_state(None)
+            .await
+            .unwrap()
+            .unwrap()
+            .bundles
+            .len(),
+        1,
+        "an agent-sourced selector is satisfied by what the agent reports"
+    );
+}
+
+/// A manual tag and an agent tag can sit on the same key with different values. The agent's
+/// cannot be used to satisfy a manual clause the operator's value does not satisfy — a
+/// supplement is not an overwrite, but before the source filter it worked like one.
+#[tokio::test]
+async fn an_agent_tag_cannot_supplement_a_manual_one_into_matching() {
+    let s = start().await;
+    signup_login(&s, "epsilon", "erin@example.com").await;
+    let (agent, host_id) = enroll_a_host(&s).await;
+
+    let g = s
+        .cookie_jar
+        .post(format!("{}/api/groups", s.base_url))
+        .json(&serde_json::json!({
+            "name": "prod",
+            "selector": { "clauses": [{"op": "eq", "key": "env", "value": "prod"}] }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(g.status(), 201);
+    let group_id = g.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let form = reqwest::multipart::Form::new()
+        .text("name", "prod-secrets")
+        .text("version", "1.0.0")
+        .part(
+            "bundle",
+            reqwest::multipart::Part::bytes(b"prod-bundle".to_vec())
+                .file_name("bundle.zip")
+                .mime_str("application/zip")
+                .unwrap(),
+        );
+    let bundle_id = s
+        .cookie_jar
+        .post(format!("{}/api/bundles", s.base_url))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    s.cookie_jar
+        .post(format!("{}/api/groups/{}/bundles", s.base_url, group_id))
+        .json(&serde_json::json!({"bundle_id": bundle_id, "priority": 1}))
+        .send()
+        .await
+        .unwrap();
+
+    // The operator says this host is dev.
+    let r = s
+        .cookie_jar
+        .put(format!("{}/api/hosts/{}/tags/env", s.base_url, host_id))
+        .json(&serde_json::json!({"value": "dev"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+
+    // The host says it is prod.
+    let mut tags = BTreeMap::new();
+    tags.insert("env".into(), "prod".into());
+    agent.report_state(None, tags).await.unwrap();
+
+    s.agent_limits.forget_last_poll(&host_id);
+    assert_eq!(
+        agent
+            .fetch_desired_state(None)
+            .await
+            .unwrap()
+            .unwrap()
+            .bundles
+            .len(),
+        0,
+        "the operator's answer is the one that counts"
+    );
+}
+
+/// A host's tags decide that host's group membership and nothing else, so a tag write must
+/// not disturb what every other host in the tenant has cached. It used to bump the tenant's
+/// config_version, which invalidated all of them — one host toggling a value at its allowed
+/// request rate kept the whole tenant recomputing, on every poll and every hosts-page load.
+#[tokio::test]
+async fn a_manual_tag_write_changes_that_host_and_leaves_the_tenant_alone() {
     let s = start().await;
     signup_login(&s, "beta", "bob@example.com").await;
-    let (_agent, host_id) = enroll_a_host(&s).await;
+    let (agent, host_id) = enroll_a_host(&s).await;
 
-    let v_before: i64 =
-        sqlx::query_scalar("SELECT config_version FROM tenants WHERE slug = 'beta'")
+    let config_version = || async {
+        sqlx::query_scalar::<_, i64>("SELECT config_version FROM tenants WHERE slug = 'beta'")
             .fetch_one(&s.db.read)
             .await
-            .unwrap();
+            .unwrap()
+    };
 
+    // A group only this host will join, so the tag write has something to change.
+    let g = s
+        .cookie_jar
+        .post(format!("{}/api/groups", s.base_url))
+        .json(&serde_json::json!({
+            "name": "prod",
+            "selector": { "clauses": [{"op": "eq", "key": "env", "value": "prod"}] }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let group_id = g.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let form = reqwest::multipart::Form::new()
+        .text("name", "prod-bundle")
+        .text("version", "1.0.0")
+        .part(
+            "bundle",
+            reqwest::multipart::Part::bytes(b"prod".to_vec()).file_name("b.zip"),
+        );
+    let bundle_id = s
+        .cookie_jar
+        .post(format!("{}/api/bundles", s.base_url))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    s.cookie_jar
+        .post(format!("{}/api/groups/{}/bundles", s.base_url, group_id))
+        .json(&serde_json::json!({"bundle_id": bundle_id, "priority": 1}))
+        .send()
+        .await
+        .unwrap();
+
+    // Warm the cache for this host.
+    s.agent_limits.forget_last_poll(&host_id);
+    assert_eq!(
+        agent
+            .fetch_desired_state(None)
+            .await
+            .unwrap()
+            .unwrap()
+            .bundles
+            .len(),
+        0
+    );
+
+    let v_before = config_version().await;
     let r = s
         .cookie_jar
         .put(format!("{}/api/hosts/{}/tags/env", s.base_url, host_id))
@@ -293,16 +562,27 @@ async fn manual_tag_endpoint_bumps_config_version() {
         .unwrap();
     assert_eq!(r.status(), 204);
 
-    let v_after: i64 = sqlx::query_scalar("SELECT config_version FROM tenants WHERE slug = 'beta'")
-        .fetch_one(&s.db.read)
-        .await
-        .unwrap();
-    assert!(
-        v_after > v_before,
-        "manual tag PUT must bump config_version"
+    assert_eq!(
+        config_version().await,
+        v_before,
+        "a tag write must not invalidate every other host in the tenant"
     );
 
-    // Re-PUT with same value: changed=false, no bump
+    // ...and the writing host's own cached state is gone, so the new tag takes effect.
+    s.agent_limits.forget_last_poll(&host_id);
+    assert_eq!(
+        agent
+            .fetch_desired_state(None)
+            .await
+            .unwrap()
+            .unwrap()
+            .bundles
+            .len(),
+        1,
+        "the tagged host must see its new group on the next poll"
+    );
+
+    // A no-op write changes nothing and invalidates nothing.
     let r2 = s
         .cookie_jar
         .put(format!("{}/api/hosts/{}/tags/env", s.base_url, host_id))
@@ -311,52 +591,120 @@ async fn manual_tag_endpoint_bumps_config_version() {
         .await
         .unwrap();
     assert_eq!(r2.status(), 204);
-    let v_after2: i64 =
-        sqlx::query_scalar("SELECT config_version FROM tenants WHERE slug = 'beta'")
-            .fetch_one(&s.db.read)
+    assert_eq!(config_version().await, v_before);
+}
+
+/// A host's report is its full view of itself, so a key it has stopped reporting has stopped
+/// being true. Merging left those keys in place forever: an agent that once reported
+/// `role=sql_server` kept satisfying selectors over it, and nothing but deleting the host
+/// removed them.
+#[tokio::test]
+async fn an_agent_report_replaces_its_tags_rather_than_accumulating_them() {
+    let s = start().await;
+    signup_login(&s, "replace", "rep@example.com").await;
+    let (agent, host_id) = enroll_a_host(&s).await;
+
+    let agent_tags = || async {
+        sqlx::query_scalar::<_, String>(
+            "SELECT key FROM host_tags WHERE host_id = ? AND source = 'agent' ORDER BY key",
+        )
+        .bind(&host_id)
+        .fetch_all(&s.db.read)
+        .await
+        .unwrap()
+    };
+
+    let mut first = BTreeMap::new();
+    first.insert("role".to_string(), "sql_server".to_string());
+    first.insert("os".to_string(), "linux".to_string());
+    agent.report_state(None, first).await.unwrap();
+    assert_eq!(agent_tags().await, ["os", "role"]);
+
+    // The role is gone. So is the tag.
+    let mut second = BTreeMap::new();
+    second.insert("os".to_string(), "linux".to_string());
+    agent.report_state(None, second).await.unwrap();
+    assert_eq!(agent_tags().await, ["os"]);
+
+    // An operator tag under the same key belongs to the operator and is untouched.
+    let r = s
+        .cookie_jar
+        .put(format!("{}/api/hosts/{}/tags/os", s.base_url, host_id))
+        .json(&serde_json::json!({"value": "windows"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+    agent.report_state(None, BTreeMap::new()).await.unwrap();
+    assert!(agent_tags().await.is_empty(), "agent tags cleared");
+    let manual: Vec<String> =
+        sqlx::query_scalar("SELECT value FROM host_tags WHERE host_id = ? AND source = 'manual'")
+            .bind(&host_id)
+            .fetch_all(&s.db.read)
             .await
             .unwrap();
-    assert_eq!(v_after2, v_after, "no-op tag PUT must not bump");
+    assert_eq!(manual, ["windows"], "the operator's tag survives");
 }
 
 #[tokio::test]
-async fn host_override_is_encrypted_at_rest() {
+async fn an_override_ciphertext_moved_to_another_host_is_refused() {
     let s = start().await;
-    signup_login(&s, "gamma", "carol@example.com").await;
-    let (_agent, host_id) = enroll_a_host(&s).await;
+    signup_login(&s, "zeta", "zoe@example.com").await;
+    let (_a1, host_a) = enroll_a_host(&s).await;
+    let (_a2, host_b) = enroll_a_host(&s).await;
 
-    let secret = "super-secret-db-password-123";
     let r = s
         .cookie_jar
-        .put(format!("{}/api/hosts/{}/override", s.base_url, host_id))
-        .json(&serde_json::json!({
-            "patch": { "db": { "password": secret } },
-            "priority": 1500
-        }))
+        .put(format!("{}/api/hosts/{}/override", s.base_url, host_a))
+        .json(&serde_json::json!({"patch": {"db": {"password": "a-secret"}}}))
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), 204);
 
-    // The raw blob in the DB must NOT contain the secret in plaintext.
-    let raw: Vec<u8> =
+    let blob: Vec<u8> =
         sqlx::query_scalar("SELECT patch_encrypted FROM host_overrides WHERE host_id = ?")
-            .bind(&host_id)
+            .bind(&host_a)
             .fetch_one(&s.db.read)
             .await
             .unwrap();
-    let needle = secret.as_bytes();
-    let leaks = raw.windows(needle.len()).any(|w| w == needle);
-    assert!(!leaks, "secret leaked into encrypted blob");
 
-    // After delete, override row gone.
-    let d = s
+    // Stand in for someone with write access to the database, and nothing else.
+    sqlx::query(
+        "INSERT INTO host_overrides
+         (tenant_id, host_id, patch_encrypted, priority, updated_at, updated_by_user)
+         SELECT tenant_id, ?, ?, 1000, 0, NULL FROM hosts WHERE id = ?",
+    )
+    .bind(&host_b)
+    .bind(&blob)
+    .bind(&host_b)
+    .execute(&s.db.write)
+    .await
+    .unwrap();
+
+    // Host A is unaffected.
+    let a = s
         .cookie_jar
-        .delete(format!("{}/api/hosts/{}/override", s.base_url, host_id))
+        .get(format!("{}/api/hosts/{}/desired", s.base_url, host_a))
         .send()
         .await
         .unwrap();
-    assert_eq!(d.status(), 204);
+    assert_eq!(a.status(), 200);
+
+    // Host B's desired state cannot be computed rather than being computed from someone
+    // else's secret. Failing closed is the point: serving it would be the bug.
+    let b = s
+        .cookie_jar
+        .get(format!("{}/api/hosts/{}/desired", s.base_url, host_b))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        b.status(),
+        500,
+        "a transplanted override must not decrypt: {:?}",
+        b.text().await
+    );
 }
 
 #[tokio::test]
@@ -397,6 +745,227 @@ async fn bad_selector_rejected() {
         .await
         .unwrap();
     assert_eq!(r.status(), 400);
+}
+
+/// The server never extracts, so traversal is an agent-side risk — but a hand-crafted base
+/// bundle used to carry `../../` entries straight through compose into output we sign.
+/// Bundles are immutable and there was no way to delete one, so uploading was a one-way
+/// ratchet on disk with nothing to reclaim it.
+/// A signature over the digest alone said only "this tenant's server saw these bytes once",
+/// so an old signed blob re-advertised under a different name, version or id still verified.
+/// The signature now covers the bundle's identity, so a changed claim is a failed check.
+#[tokio::test]
+async fn a_bundle_signature_does_not_transfer_to_another_identity() {
+    let s = start().await;
+    signup_login(&s, "sig", "sig@example.com").await;
+
+    let form = reqwest::multipart::Form::new()
+        .text("name", "checks")
+        .text("version", "1.0.0")
+        .part(
+            "bundle",
+            reqwest::multipart::Part::bytes(b"the same bytes".to_vec()).file_name("b.zip"),
+        );
+    let created: serde_json::Value = s
+        .cookie_jar
+        .post(format!("{}/api/bundles", s.base_url))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let id = created["id"].as_str().unwrap().to_string();
+    let sha = created["sha256"].as_str().unwrap().to_string();
+    let signature = created["signature"].as_str().unwrap().to_string();
+
+    let pub_pem: String =
+        sqlx::query_scalar("SELECT bundle_signing_pub_pem FROM tenant_secrets WHERE tenant_id = 1")
+            .fetch_one(&s.db.read)
+            .await
+            .unwrap();
+
+    let verify = |d: fleet_core::bundlesig::BundleDescriptor<'_>| -> bool {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use ed25519_dalek::pkcs8::DecodePublicKey;
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+        let vk = VerifyingKey::from_public_key_pem(&pub_pem).unwrap();
+        let sig = Signature::from_slice(&STANDARD.decode(&signature).unwrap()).unwrap();
+        vk.verify(&d.to_signing_bytes(), &sig).is_ok()
+    };
+
+    let real = fleet_core::bundlesig::BundleDescriptor {
+        tenant_id: 1,
+        bundle_id: &id,
+        name: "checks",
+        version: "1.0.0",
+        format: "plain",
+        sha256_hex: &sha,
+    };
+    assert!(
+        verify(real),
+        "the signature must verify for what was signed"
+    );
+
+    // Same bytes, same signature, a different claim about what they are.
+    for forged in [
+        fleet_core::bundlesig::BundleDescriptor {
+            name: "secrets",
+            ..real
+        },
+        fleet_core::bundlesig::BundleDescriptor {
+            version: "9.9.9",
+            ..real
+        },
+        fleet_core::bundlesig::BundleDescriptor {
+            bundle_id: "01JSOMETHINGELSE",
+            ..real
+        },
+        fleet_core::bundlesig::BundleDescriptor {
+            format: "enc-v1",
+            ..real
+        },
+        fleet_core::bundlesig::BundleDescriptor {
+            tenant_id: 2,
+            ..real
+        },
+    ] {
+        assert!(!verify(forged), "{forged:?} must not verify");
+    }
+}
+
+#[tokio::test]
+async fn deleting_a_bundle_takes_its_assignments_and_bytes_with_it() {
+    let s = start().await;
+    signup_login(&s, "reclaim", "rec@example.com").await;
+
+    let form = reqwest::multipart::Form::new()
+        .text("name", "doomed")
+        .text("version", "1.0.0")
+        .part(
+            "bundle",
+            reqwest::multipart::Part::bytes(b"bytes".to_vec()).file_name("b.zip"),
+        );
+    let bundle_id = s
+        .cookie_jar
+        .post(format!("{}/api/bundles", s.base_url))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let group_id = s
+        .cookie_jar
+        .post(format!("{}/api/groups", s.base_url))
+        .json(&serde_json::json!({"name": "g", "selector": {"clauses": []}}))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    s.cookie_jar
+        .post(format!("{}/api/groups/{}/bundles", s.base_url, group_id))
+        .json(&serde_json::json!({"bundle_id": bundle_id, "priority": 1}))
+        .send()
+        .await
+        .unwrap();
+
+    let stored = s
+        ._tempdir
+        .path()
+        .join("bundles")
+        .join("1")
+        .join(format!("{bundle_id}.zip"));
+    assert!(stored.exists());
+
+    let r = s
+        .cookie_jar
+        .delete(format!("{}/api/bundles/{}", s.base_url, bundle_id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+
+    // The row, the bytes, and — the part that would otherwise break desired state for every
+    // host in that group — the assignment.
+    assert!(!stored.exists(), "the stored bytes must be reclaimed");
+    let assignments: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM bundle_assignments WHERE bundle_id = ?")
+            .bind(&bundle_id)
+            .fetch_one(&s.db.read)
+            .await
+            .unwrap();
+    assert_eq!(assignments, 0);
+
+    assert_eq!(
+        s.cookie_jar
+            .delete(format!("{}/api/bundles/{}", s.base_url, bundle_id))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+}
+
+#[tokio::test]
+async fn a_zip_entry_that_escapes_the_archive_is_refused() {
+    let s = start().await;
+    signup_login(&s, "escape", "escape@example.com").await;
+
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        use std::io::Write;
+        let mut w = zip::ZipWriter::new(&mut cursor);
+        let opts = zip::write::SimpleFileOptions::default();
+        w.start_file("config.json", opts).unwrap();
+        w.write_all(b"{}").unwrap();
+        w.start_file("../../etc/cron.d/pwn", opts).unwrap();
+        w.write_all(b"* * * * * root sh -c :").unwrap();
+        w.finish().unwrap();
+    }
+
+    let form = reqwest::multipart::Form::new()
+        .text("name", "escapee")
+        .text("version", "1.0.0")
+        .part(
+            "bundle",
+            reqwest::multipart::Part::bytes(cursor.into_inner()).file_name("escapee.zip"),
+        );
+    let id = s
+        .cookie_jar
+        .post(format!("{}/api/bundles", s.base_url))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let r = s
+        .cookie_jar
+        .get(format!("{}/api/bundles/{}/config", s.base_url, id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 409);
+    assert!(r.text().await.unwrap().contains("escapes the archive"));
 }
 
 #[tokio::test]
@@ -681,8 +1250,11 @@ async fn bulk_tags_and_bulk_delete() {
     let body: serde_json::Value = r.json().await.unwrap();
     assert_eq!(body["updated"], 2);
     assert_eq!(body["not_found"], serde_json::json!(["no-such-host"]));
-    let v_after = config_version().await;
-    assert!(v_after > v_before, "bulk tag set must bump config_version");
+    assert_eq!(
+        config_version().await,
+        v_before,
+        "a bulk tag write invalidates the hosts it touched, not the whole tenant"
+    );
 
     // 2. The host list carries the tags (the UI filters on them).
     let hosts: serde_json::Value = s

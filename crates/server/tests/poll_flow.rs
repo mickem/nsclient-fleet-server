@@ -8,6 +8,10 @@ use fleet_storage::Db;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+/// A well-formed applied_state_hash. The server requires 64 hex characters — it is a
+/// SHA-256 and nothing else is meaningful — so tests cannot use a readable placeholder.
+const TEST_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
 struct TestServer {
     base_url: String,
     _tempdir: TempDir,
@@ -59,9 +63,11 @@ async fn start() -> TestServer {
         on_prem: false,
         on_prem_admin_email: None,
         on_prem_admin_password: None,
+        on_prem_admin_password_hash: None,
         platform_admin_emails: Vec::new(),
         magic_link_ttl_secs: 900,
         session_ttl_secs: 3600,
+        session_idle_ttl_secs: 3600,
         bootstrap_ttl_secs: 3600,
         host_lost_after_secs: 172_800,
         client_cert_lifetime_days: 90,
@@ -69,6 +75,7 @@ async fn start() -> TestServer {
         daily_email_budget: 1_000_000,
         smtp: None,
         turnstile_secret: None,
+        turnstile_site_key: None,
         master_key,
         bootstrap_jwt_secret,
     };
@@ -294,8 +301,12 @@ async fn a_304_poll_counts_as_contact() {
     );
 }
 
+/// The report stores the host's tags — and does *not* touch the tenant's config version.
+/// A host's own tags change only its own group membership, so bumping the version
+/// invalidated every other host's memoized state for nothing; one host toggling a value at
+/// its allowed request rate kept the whole tenant recomputing.
 #[tokio::test]
-async fn state_report_records_tags_and_bumps_config_version() {
+async fn state_report_records_tags_without_disturbing_the_tenant() {
     let s = start().await;
     signup_login(&s, "beta", "bob@example.com").await;
     let agent = enroll_a_host(&s).await;
@@ -309,16 +320,16 @@ async fn state_report_records_tags_and_bumps_config_version() {
     let mut tags = BTreeMap::new();
     tags.insert("os".into(), "linux".into());
     tags.insert("sql_server_present".into(), "true".into());
-    agent
-        .report_state(Some("phase4-test-hash"), tags)
-        .await
-        .unwrap();
+    agent.report_state(Some(TEST_HASH), tags).await.unwrap();
 
     let v_after: i64 = sqlx::query_scalar("SELECT config_version FROM tenants WHERE slug = 'beta'")
         .fetch_one(&s.db.read)
         .await
         .unwrap();
-    assert!(v_after > v_before, "config_version must bump on tag change");
+    assert_eq!(
+        v_after, v_before,
+        "a host's own tags must not invalidate the rest of the tenant"
+    );
 
     let row_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM host_tags WHERE source = 'agent'")
@@ -344,7 +355,7 @@ async fn state_report_records_tags_and_bumps_config_version() {
             .fetch_one(&s.db.read)
             .await
             .unwrap();
-    assert_eq!(stored_hash.as_deref(), Some("phase4-test-hash"));
+    assert_eq!(stored_hash.as_deref(), Some(TEST_HASH));
 }
 
 /// The agent reports *whether* the host carries configuration of its own that outranks what
@@ -385,14 +396,14 @@ async fn a_host_reports_whether_local_configuration_outranks_the_fleet() {
 
     // An agent that predates the field: silence changes nothing.
     agent
-        .report_state(Some("h1"), BTreeMap::new())
+        .report_state(Some(TEST_HASH), BTreeMap::new())
         .await
         .unwrap();
     assert_eq!(stored().await, None, "an omitted field is not an answer");
 
     // Reported clean.
     agent
-        .report_state_with_local_config(Some("h1"), BTreeMap::new(), false)
+        .report_state_with_local_config(Some(TEST_HASH), BTreeMap::new(), false)
         .await
         .unwrap();
     assert_eq!(stored().await, Some(0));
@@ -400,7 +411,7 @@ async fn a_host_reports_whether_local_configuration_outranks_the_fleet() {
 
     // Someone edits nsclient.ini on the box.
     agent
-        .report_state_with_local_config(Some("h1"), BTreeMap::new(), true)
+        .report_state_with_local_config(Some(TEST_HASH), BTreeMap::new(), true)
         .await
         .unwrap();
     assert_eq!(stored().await, Some(1));
@@ -408,7 +419,7 @@ async fn a_host_reports_whether_local_configuration_outranks_the_fleet() {
 
     // A report that omits the field must not silently clear what we were told.
     agent
-        .report_state(Some("h1"), BTreeMap::new())
+        .report_state(Some(TEST_HASH), BTreeMap::new())
         .await
         .unwrap();
     assert_eq!(
@@ -419,7 +430,7 @@ async fn a_host_reports_whether_local_configuration_outranks_the_fleet() {
 
     // And it comes back down when the local configuration is removed.
     agent
-        .report_state_with_local_config(Some("h1"), BTreeMap::new(), false)
+        .report_state_with_local_config(Some(TEST_HASH), BTreeMap::new(), false)
         .await
         .unwrap();
     assert_eq!(stored().await, Some(0));
@@ -434,28 +445,35 @@ async fn a_host_reports_whether_local_configuration_outranks_the_fleet() {
 }
 
 #[tokio::test]
-async fn renew_issues_new_cert_and_old_session_keeps_working() {
+async fn renew_issues_a_new_cert_and_retires_the_old_one_once_it_is_in_use() {
     let s = start().await;
     signup_login(&s, "gamma", "carol@example.com").await;
     let mut agent = enroll_a_host(&s).await;
     let original_cert = agent.cert_pem.clone();
+
+    let live = || async {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM host_certs WHERE revoked_at IS NULL")
+            .fetch_one(&s.db.read)
+            .await
+            .unwrap()
+    };
 
     agent.renew().await.unwrap();
     assert_ne!(
         agent.cert_pem, original_cert,
         "cert must change after renew"
     );
+    // Both live for now: the server has no way to know the agent received the response
+    // until the agent uses what it was sent, and revoking a certificate the agent never
+    // got would strand the host.
+    assert_eq!(live().await, 2);
 
-    // Heartbeat with the new identity must succeed
+    // Heartbeat with the new identity must succeed...
     let _ = agent.heartbeat().await.unwrap();
 
-    // Server should now have two cert rows for this host (old + new), both active
-    let cert_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM host_certs WHERE revoked_at IS NULL")
-            .fetch_one(&s.db.read)
-            .await
-            .unwrap();
-    assert_eq!(cert_count, 2);
+    // ...and that is the proof that retires the old one. Leaving it live until its own
+    // expiry is what kept a key stolen from the host usable for the rest of its 90 days.
+    assert_eq!(live().await, 1);
 }
 
 #[tokio::test]

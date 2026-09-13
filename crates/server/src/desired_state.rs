@@ -18,7 +18,6 @@ use fleet_storage::{
     BundleAssignmentsRepo, GroupsRepo, HostOverridesRepo, HostTagsRepo, TenantRepo,
 };
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::AppState;
 
@@ -197,6 +196,10 @@ pub async fn compute_desired_state_at(
     Ok(computed)
 }
 
+/// HKDF label for the `state_hash` MAC key. Changing it invalidates every stored hash,
+/// which costs one extra sync per host and nothing else.
+const STATE_HASH_INFO: &str = "desired-state-hash/v1";
+
 /// The actual walk. Kept separate so tests and benchmarks can measure it without the cache.
 pub async fn compute_uncached(
     state: &AppState,
@@ -249,7 +252,10 @@ pub async fn compute_uncached(
             let plaintext = state
                 .config
                 .master_key
-                .decrypt(&o.patch_encrypted)
+                .decrypt(
+                    fleet_core::aead::Purpose::HostOverride { tenant_id, host_id },
+                    &o.patch_encrypted,
+                )
                 .map_err(|e| anyhow!("override decrypt: {e}"))?;
             let s = std::str::from_utf8(&plaintext).map_err(|_| anyhow!("override utf8"))?;
             let v: Value = serde_json::from_str(s).map_err(|e| anyhow!("override json: {e}"))?;
@@ -275,20 +281,28 @@ pub async fn compute_uncached(
         })
         .collect();
 
-    // 7. Hash. The state_hash covers (sorted bundle list digest) + (canonicalized merged config).
+    // 7. The state_hash covers the canonicalized merged config and the sorted bundle list.
     //    Either changing requires a fresh sync.
-    let mut hasher = Sha256::new();
-    hasher.update(canonical_string(&merged).as_bytes());
+    //
+    //    Keyed, not a plain digest. The merged config contains the host override in
+    //    plaintext, overrides are where credentials live, and this value is served to every
+    //    role through the hosts API as well as to the agent. A bare SHA-256 of it is an
+    //    offline guessing oracle: the bundle half is visible through the same endpoint, so
+    //    anyone who can read the hash can try candidate passwords against it until one
+    //    matches. Under HMAC with a key derived from MASTER_KEY the value still changes
+    //    exactly when the content does, and tells a reader nothing about what is in it.
+    let mut msg = Vec::new();
+    msg.extend_from_slice(canonical_string(&merged).as_bytes());
     for b in &bundles {
-        hasher.update(b"|");
-        hasher.update(b.id.as_bytes());
-        hasher.update(b"|");
-        hasher.update(b.sha256.as_bytes());
-        hasher.update(b"|");
-        hasher.update(b.priority.to_le_bytes());
+        msg.extend_from_slice(b"|");
+        msg.extend_from_slice(b.id.as_bytes());
+        msg.extend_from_slice(b"|");
+        msg.extend_from_slice(b.sha256.as_bytes());
+        msg.extend_from_slice(b"|");
+        msg.extend_from_slice(&b.priority.to_le_bytes());
     }
-    let digest = hasher.finalize();
-    let state_hash = digest.iter().map(|b| format!("{b:02x}")).collect();
+    let tag = state.config.master_key.mac(STATE_HASH_INFO, &msg);
+    let state_hash = tag.iter().map(|b| format!("{b:02x}")).collect();
 
     Ok(DesiredState {
         state_hash,

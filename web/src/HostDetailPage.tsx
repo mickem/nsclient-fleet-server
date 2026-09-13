@@ -20,6 +20,7 @@ import {
 } from "@mui/material";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import DeleteIcon from "@mui/icons-material/Delete";
+import KeyOffIcon from "@mui/icons-material/KeyOff";
 import { ConfirmDeleteHostDialog } from "./ConfirmDeleteHostDialog";
 import { HostStatusChip, LocalConfigChip } from "./HostStatusChip";
 import { RefreshButton } from "./RefreshButton";
@@ -32,6 +33,7 @@ import {
   fmtTime,
   HostDetail,
   Me,
+  RevokeHostResponse,
 } from "./api";
 
 type Props = { me: Me };
@@ -65,6 +67,8 @@ export function HostDetailPage({ me }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [revoked, setRevoked] = useState<RevokeHostResponse | null>(null);
+  const [revoking, setRevoking] = useState(false);
 
   // Returns void, not the promise: `useEffect` below takes this directly, and a returned
   // promise would be mistaken for a cleanup function.
@@ -121,6 +125,32 @@ export function HostDetailPage({ me }: Props) {
         <RefreshButton refreshing={refreshing} onClick={refresh} />
         {canWriteConfig(me.role) && (
           <Button
+            color="warning"
+            variant="outlined"
+            startIcon={<KeyOffIcon />}
+            disabled={revoking}
+            onClick={async () => {
+              setRevoking(true);
+              try {
+                setRevoked(
+                  await apiSend<RevokeHostResponse>(
+                    "POST",
+                    `/api/hosts/${host.id}/revoke-certs`,
+                  ),
+                );
+                refresh();
+              } catch (e) {
+                setError((e as Error).message);
+              } finally {
+                setRevoking(false);
+              }
+            }}
+          >
+            {revoking ? "Revoking…" : "Revoke certificates"}
+          </Button>
+        )}
+        {canWriteConfig(me.role) && (
+          <Button
             color="error"
             variant="outlined"
             startIcon={<DeleteIcon />}
@@ -135,6 +165,16 @@ export function HostDetailPage({ me }: Props) {
         onClose={() => setConfirmDelete(false)}
         onDeleted={onBack}
       />
+      {revoked && (
+        <Alert severity="success" sx={{ mb: 2 }} onClose={() => setRevoked(null)}>
+          Revoked {revoked.revoked_certs} certificate
+          {revoked.revoked_certs === 1 ? "" : "s"}. The host keeps its tags, groups and
+          overrides, and comes back with this — it is shown once:
+          <Box component="pre" sx={{ mt: 1, mb: 0, overflowX: "auto", fontSize: "0.8rem" }}>
+            {revoked.install_command}
+          </Box>
+        </Alert>
+      )}
       {error && (
         <Alert severity="warning" sx={{ mb: 2 }} onClose={() => setError(null)}>
           Refresh failed — showing the last loaded state. {error}
