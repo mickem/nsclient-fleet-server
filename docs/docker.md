@@ -299,7 +299,7 @@ docker cp nsclient-fleet:/data/web-server.crt ./fleet-ca.pem
 nscp enroll --server https://fleet.example.internal:9443 --token <token> --ca fleet-ca.pem
 ```
 
-[Central management with NSClient Fleet](https://docs.nsclient.org/setup/fleet/) walks the
+[Central management with NSClient Fleet](https://nsclient.org/docs/setup/fleet/) walks the
 whole thing from the agent's side.
 
 ## Troubleshooting

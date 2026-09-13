@@ -321,7 +321,7 @@ nscp enroll --server https://fleet.example.internal:9443 --token <bootstrap-toke
 ```
 
 Run that on the machine you are adding. NSClient++ is a separate product;
-[Central management with NSClient Fleet](https://docs.nsclient.org/setup/fleet/) is the
+[Central management with NSClient Fleet](https://nsclient.org/docs/setup/fleet/) is the
 walkthrough from its side — enrolling, trusting this server's certificate, and what changes
 on the agent afterwards. What matters on this side:
 

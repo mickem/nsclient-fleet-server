@@ -98,7 +98,7 @@ forge bundles, and rotating one doesn't invalidate the other).
   compromise of the pin, and the only recovery today is re-enrolling the whole fleet by
   hand. Until it exists, treat that key as needing the same custody as `MASTER_KEY` — and
   note that the two must not live in the same backup, for the reason
-  [deployment.md](deployment.md#backups) gives.
+  [deployment.md](deployment.md#9-backups-and-restore) gives.
 
   `POST /api/hosts/:id/revoke-certs` is the per-host version of that recovery: it revokes
   every certificate a host holds and returns it to pending with a fresh bootstrap token,
