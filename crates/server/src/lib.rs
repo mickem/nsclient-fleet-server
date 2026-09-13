@@ -1,3 +1,4 @@
+pub mod admin_password;
 pub mod agent_api;
 pub mod agent_limits;
 pub mod api_keys;
@@ -9,6 +10,7 @@ pub mod config_api;
 pub mod conn;
 pub mod csrf;
 pub mod desired_state;
+pub mod env_file;
 pub mod hosts;
 pub mod housekeeping;
 pub mod https;
@@ -16,6 +18,7 @@ pub mod mtls;
 pub mod mux;
 pub mod platform;
 pub mod security_headers;
+pub mod shutdown;
 pub mod tenant_setup;
 pub mod trial_expiry;
 pub mod users;
@@ -125,8 +128,13 @@ pub async fn ensure_on_prem_admin(db: &Db, cfg: &Config) -> anyhow::Result<()> {
             return Ok(());
         }
     };
-    if cfg.on_prem_admin_password.is_none() {
-        tracing::warn!("ON_PREM=true but ON_PREM_ADMIN_PASSWORD unset — login will fail");
+    // The hash is the preferred of the two and startup refuses both at once, so checking
+    // only the plaintext meant every install that did the recommended thing was told at
+    // every start that its working login would fail.
+    if cfg.on_prem_admin_password.is_none() && cfg.on_prem_admin_password_hash.is_none() {
+        tracing::warn!(
+            "ON_PREM=true but neither ON_PREM_ADMIN_PASSWORD nor ON_PREM_ADMIN_PASSWORD_HASH              is set — login will fail. Produce a hash with `nsclient-fleet --hash-password`."
+        );
     }
 
     let tenants = TenantRepo::new(db);

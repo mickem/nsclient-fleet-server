@@ -35,6 +35,12 @@ zip.workspace = true
 
 axum-extra = { version = "0.9", features = ["cookie"] }
 argon2 = "0.5"
+# Reading the on-prem admin password for --hash-password without echoing it, and without
+# it landing in shell history the way an argument would.
+rpassword = "7"
+# LOG_FILE. A Windows service has nowhere to write stdout, so without a file there is no
+# record of why one failed to start; daily rotation keeps that from growing without bound.
+tracing-appender = "0.2"
 governor = "0.6"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "cookies", "multipart"] }
@@ -53,6 +59,11 @@ futures-util.workspace = true
 tower = { version = "0.5", features = ["util"] }
 async-trait = "0.1"
 rustls-acme.workspace = true
+
+# Serving under the Windows service control manager. See crates/server/src/service.rs for
+# why a console binary registered with `sc.exe create` cannot work without this.
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
 
 [dev-dependencies]
 fleet-core = { path = "../core" }

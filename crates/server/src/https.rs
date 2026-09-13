@@ -29,13 +29,14 @@ use rustls_acme::{caches::DirCache, AcmeConfig};
 use crate::config::{AcmeConfig as Cfg, StaticTlsConfig};
 use crate::mtls::MtlsContext;
 use crate::mux::{self, MuxTls};
+use crate::shutdown::Shutdown;
 
 /// ALPN offered on the browser branch, in preference order. rustls-acme sets this for us on
 /// the ACME path; the static path has to say it, or every browser falls back to HTTP/1.1.
 const WEB_ALPN: [&[u8]; 2] = [b"h2", b"http/1.1"];
 
-/// Run the shared HTTPS/mTLS listener forever, terminating TLS for `cfg.domains` via
-/// Let's Encrypt and routing agent connections to `agent_router`.
+/// Run the shared HTTPS/mTLS listener until `shutdown` fires, terminating TLS for
+/// `cfg.domains` via Let's Encrypt and routing agent connections to `agent_router`.
 pub async fn serve_acme(
     addr: &str,
     cfg: Cfg,
@@ -43,6 +44,7 @@ pub async fn serve_acme(
     agent_router: Router,
     mtls_ctx: MtlsContext,
     agent_sni: Option<String>,
+    shutdown: Shutdown,
 ) -> Result<()> {
     tokio::fs::create_dir_all(&cfg.cache_dir)
         .await
@@ -85,7 +87,7 @@ pub async fn serve_acme(
     });
 
     tracing::info!(addr = %addr, domains = ?cfg.domains, production = cfg.production, "HTTPS listening (acme)");
-    mux::serve(addr, tls, mtls_ctx, web_router, agent_router).await
+    mux::serve(addr, tls, mtls_ctx, web_router, agent_router, shutdown).await
 }
 
 /// Sentinel for callers that want to know whether to use ACME at startup.
@@ -93,7 +95,8 @@ pub fn enabled(state: &Arc<crate::AppState>) -> bool {
     state.config.acme.is_some()
 }
 
-/// Run the shared HTTPS/mTLS listener forever with a certificate read from disk.
+/// Run the shared HTTPS/mTLS listener with a certificate read from disk, until `shutdown`
+/// fires.
 ///
 /// The certificate is loaded once, at startup. Renewing it is a restart — the honest trade
 /// for having no issuance protocol to hang a reload off, and what an operator who has just
@@ -105,6 +108,7 @@ pub async fn serve_static(
     agent_router: Router,
     mtls_ctx: MtlsContext,
     agent_sni: Option<String>,
+    shutdown: Shutdown,
 ) -> Result<()> {
     if cfg.is_self_signed() {
         ensure_self_signed(&cfg)?;
@@ -124,7 +128,7 @@ pub async fn serve_static(
         self_signed = cfg.is_self_signed(),
         "HTTPS listening (certificate from disk)"
     );
-    mux::serve(addr, tls, mtls_ctx, web_router, agent_router).await
+    mux::serve(addr, tls, mtls_ctx, web_router, agent_router, shutdown).await
 }
 
 /// Generate and persist the web certificate if it is not already there and usable.

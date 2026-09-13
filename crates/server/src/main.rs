@@ -1,10 +1,14 @@
+mod cli;
+#[cfg(windows)]
+mod service;
+
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
 use fleet_server::{
     config::Config, ensure_on_prem_admin, ensure_platform_admins, mtls, mtls_router, router,
-    tenant_setup::backfill_all, AppState,
+    shutdown::Shutdown, tenant_setup::backfill_all, AppState,
 };
 
 use fleet_server::auth::{email::EmailSender, rate_limit::AuthRateLimits, turnstile::Turnstile};
@@ -21,43 +25,210 @@ const VERSION: &str = match option_env!("FLEET_BUILD_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 
-/// Handle the two flags that must work before anything else does. Answered before config
-/// is read or the filesystem is touched, so `--version` works on a fresh box with no
-/// `MASTER_KEY` set — which is exactly when you want to ask what build you just deployed.
-/// Returns true if the process should exit.
-fn handled_immediate_flag() -> bool {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("nsclient-fleet {VERSION}");
-        return true;
+/// Everything the process does before it is a server: answer a flag, print a hash, or
+/// register a service. See [`cli`] for the argument parsing itself.
+///
+/// Answered before config is read or the filesystem is touched, so `--version` works on a
+/// fresh box with no `MASTER_KEY` set — which is exactly when you want to ask what build
+/// you just deployed.
+fn handled_immediate_command(args: &cli::Args) -> anyhow::Result<bool> {
+    match args.command {
+        cli::Command::Version => {
+            println!("nsclient-fleet {VERSION}");
+            Ok(true)
+        }
+        cli::Command::Help => {
+            print!("{}", cli::help(VERSION));
+            Ok(true)
+        }
+        cli::Command::HashPassword => {
+            println!("{}", cli::hash_password_interactively()?);
+            Ok(true)
+        }
+        #[cfg(windows)]
+        cli::Command::ServiceInstall => {
+            service::install(args)?;
+            Ok(true)
+        }
+        #[cfg(windows)]
+        cli::Command::ServiceUninstall => {
+            service::uninstall()?;
+            Ok(true)
+        }
+        cli::Command::Serve => Ok(false),
     }
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!(
-            "nsclient-fleet {}\n\n\
-             NSClient Fleet — fleet management control plane for NSClient.\n\n\
-             Configuration is entirely through environment variables; there are no other\n\
-             flags. See docs/deployment.md for the full reference. MASTER_KEY is required.\n\n\
-             \x20   --version, -V    print the version and exit\n\
-             \x20   --help,    -h    print this message and exit",
-            VERSION
-        );
-        return true;
-    }
-    false
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    if handled_immediate_flag() {
+fn main() -> anyhow::Result<()> {
+    let args = cli::Args::parse(std::env::args().skip(1))?;
+    if handled_immediate_command(&args)? {
         return Ok(());
     }
 
+    // Before anything reads the environment. On Windows this is how a service gets its
+    // configuration at all — see `crate::service` and `fleet_server::env_file`.
+    let from_file = match &args.env_file {
+        Some(path) => fleet_server::env_file::load(path)?,
+        None => Vec::new(),
+    };
+
+    // Held for the rest of the process: dropping it stops the log file being written.
+    let _log_guard = init_tracing();
+
+    // Under the Windows service control manager this never returns until the service is
+    // stopped. Anywhere else — a console, a container, systemd — it reports that there is
+    // no SCM to talk to and we carry on as an ordinary foreground process.
+    #[cfg(windows)]
+    if service::run_if_started_by_scm(&from_file)? {
+        return Ok(());
+    }
+
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async move {
+        let (trigger, shutdown) = fleet_server::shutdown::channel();
+        tokio::spawn(async move {
+            wait_for_signal().await;
+            tracing::info!("shutdown signal received");
+            trigger.fire();
+        });
+        serve(shutdown, &from_file).await
+    })
+}
+
+/// Install the log subscriber. Called once, from `main`, before anything that logs.
+///
+/// Logs go to stdout, which is what journald, `docker logs` and a console all read. A
+/// Windows service has none of those — the service control manager starts the process with
+/// no console and discards stdout entirely — so `LOG_FILE` sends them to a file instead,
+/// rotated daily. That is the only way a service that fails at startup says why.
+///
+/// The returned guard flushes the file writer when it is dropped, so `main` has to hold it
+/// until the process is done; there is nothing to hold when logging to stdout.
+#[must_use = "dropping the guard stops the log file being written"]
+fn init_tracing() -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    let path = std::env::var("LOG_FILE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from);
+
+    let Some(path) = path else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+        return None;
+    };
+
+    // Nothing is logging yet, so a failure here has to say so on stderr and fall back —
+    // refusing to start because the log file is unwritable would be a worse trade than
+    // starting with the logs somewhere less convenient.
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
+    if let Some(dir) = dir {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!(
+                "could not create the LOG_FILE directory {}: {e}",
+                dir.display()
+            );
+            tracing_subscriber::fmt().with_env_filter(filter).init();
+            return None;
+        }
+        fleet_server::restrict_dir(dir);
+    }
+    let Some(name) = path.file_name() else {
+        eprintln!(
+            "LOG_FILE {} names no file; logging to stdout",
+            path.display()
+        );
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+        return None;
+    };
+
+    // `daily` appends the date to the name, so LOG_FILE names the series rather than one
+    // file: `fleet.log` becomes `fleet.log.2026-09-13`.
+    let appender = tracing_appender::rolling::daily(dir.unwrap_or(std::path::Path::new(".")), name);
+    let (writer, guard) = tracing_appender::non_blocking(appender);
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+        .with_env_filter(filter)
+        // A log file is read with a text editor, not a terminal: colour codes in it are
+        // noise at best.
+        .with_ansi(false)
+        .with_writer(writer)
         .init();
+    Some(guard)
+}
+
+/// Resolve on the first request to stop that the host platform can make.
+///
+/// Ctrl-C everywhere; SIGTERM as well on unix, which is what `systemctl stop` and a
+/// container runtime both send and what the unit's `TimeoutStopSec` is counting against.
+async fn wait_for_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not listen for SIGTERM; Ctrl-C only");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows;
+        // Ctrl-C is the one everybody thinks of, and on its own it leaves the two ways a
+        // console session actually ends unhandled: Ctrl-Break, and the window being
+        // closed. CTRL_CLOSE_EVENT is the interesting one — Windows gives a process a few
+        // seconds after it before killing the process tree, which is enough to drain, and
+        // without a handler the process is simply gone mid-request.
+        //
+        // A service never reaches any of this: the SCM's stop request arrives through the
+        // control handler in `crate::service`.
+        let mut break_ = match windows::ctrl_break() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not listen for Ctrl-Break");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        let mut close = match windows::ctrl_close() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not listen for the console closing");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = break_.recv() => {}
+            _ = close.recv() => {}
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Start every listener and run until `shutdown` fires.
+///
+/// `env_file_vars` is only for the startup log: which settings came from a file rather
+/// than the environment is the first thing to check when a service starts with the wrong
+/// configuration, and on Windows it is not visible any other way.
+async fn serve(shutdown: Shutdown, env_file_vars: &[String]) -> anyhow::Result<()> {
+    if !env_file_vars.is_empty() {
+        // Names only, never values — the whole point of the file is that it holds the ones
+        // that must not be logged. Which settings came from it is the first thing to check
+        // when a service starts with configuration nobody recognises.
+        tracing::info!(vars = ?env_file_vars, "loaded settings from --env-file");
+    }
 
     let cfg = Config::from_env()?;
     if let Some(parent) = Path::new(&cfg.database_path).parent() {
@@ -153,9 +324,11 @@ async fn main() -> anyhow::Result<()> {
     } else {
         let mtls_state = state.clone();
         let mtls_addr = cfg.listen_mtls.clone();
+        let mtls_shutdown = shutdown.clone();
         Some(tokio::spawn(async move {
             let r = mtls_router(mtls_state.clone());
-            if let Err(e) = mtls::serve(&mtls_addr, mtls_state.trust_store, r).await {
+            if let Err(e) = mtls::serve(&mtls_addr, mtls_state.trust_store, r, mtls_shutdown).await
+            {
                 tracing::error!(error = %e, "mTLS server exited");
             }
         }))
@@ -183,11 +356,9 @@ async fn main() -> anyhow::Result<()> {
             agent_app,
             trust_store_for_mux,
             agent_sni,
+            shutdown,
         );
-        match mtls_handle {
-            Some(h) => tokio::select! { r = serve => r?, _ = h => {} },
-            None => serve.await?,
-        }
+        run_until_stopped(serve, mtls_handle).await?
     } else if let Some(tls_cfg) = cfg.tls.clone() {
         // Same mux as the ACME branch, same single port — only the certificate's origin
         // differs. This is the path for a deployment Let's Encrypt cannot reach.
@@ -199,22 +370,68 @@ async fn main() -> anyhow::Result<()> {
             agent_app,
             trust_store_for_mux,
             agent_sni,
+            shutdown,
         );
-        match mtls_handle {
-            Some(h) => tokio::select! { r = serve => r?, _ = h => {} },
-            None => serve.await?,
-        }
+        run_until_stopped(serve, mtls_handle).await?
     } else {
         let listener = tokio::net::TcpListener::bind(&cfg.listen).await?;
         tracing::info!(addr = %cfg.listen, "HTTP listening (no ACME — set ACME_DOMAINS for production)");
+        // The one listener axum serves directly, so it is also the one place its own
+        // graceful shutdown applies; the TLS listeners are our accept loops and stop
+        // through the same signal in `crate::mux` and `crate::mtls`.
         let http = axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
-        );
-        match mtls_handle {
-            Some(h) => tokio::select! { r = http => r?, _ = h => {} },
-            None => http.await?,
+        )
+        .with_graceful_shutdown(shutdown.wait());
+        run_until_stopped(
+            async move { http.await.map_err(anyhow::Error::from) },
+            mtls_handle,
+        )
+        .await?
+    }
+    tracing::info!("stopped");
+    Ok(())
+}
+
+/// Run the web listener, and the dedicated agent listener when there is one, until either
+/// stops.
+///
+/// On a shutdown both stop, but not at the same instant — each drains whatever it was
+/// serving. Whichever finishes first, the other is given until its own drain deadline to
+/// finish too, so a stop does not cut short an agent's renewal just because the operator
+/// UI had nothing in flight. If the agent listener is the one that exited first, it failed
+/// and has already said so: there is no recovery for a listener that is gone, so the
+/// process stops rather than serving half a fleet in silence.
+async fn run_until_stopped(
+    serve: impl std::future::Future<Output = anyhow::Result<()>>,
+    mtls_handle: Option<tokio::task::JoinHandle<()>>,
+) -> anyhow::Result<()> {
+    let Some(handle) = mtls_handle else {
+        return serve.await;
+    };
+
+    tokio::pin!(serve);
+    tokio::pin!(handle);
+    // Which branch won has to be recorded rather than inferred: awaiting a `JoinHandle`
+    // that has already resolved panics, so the wait below must not happen in the case
+    // where the agent listener is what ended the select.
+    let mut agent_listener_finished = false;
+    let result = tokio::select! {
+        r = &mut serve => r,
+        _ = &mut handle => {
+            agent_listener_finished = true;
+            Ok(())
+        }
+    };
+
+    if !agent_listener_finished {
+        // A second of headroom over the drain itself, so the deadline that decides the
+        // outcome is the listener's own rather than this one.
+        let grace = fleet_server::shutdown::DRAIN_TIMEOUT + std::time::Duration::from_secs(1);
+        if tokio::time::timeout(grace, handle).await.is_err() {
+            tracing::warn!("agent listener did not finish draining; exiting anyway");
         }
     }
-    Ok(())
+    result
 }

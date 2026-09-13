@@ -96,6 +96,19 @@ impl ConnLimit {
             .await
             .expect("connection semaphore is never closed")
     }
+
+    /// Wait for every connection in flight to finish, or for `timeout` to pass.
+    ///
+    /// Called once the accept loop has stopped, so nothing new can take a permit while
+    /// this waits: holding every permit means every connection has ended. Returns whether
+    /// the drain completed rather than timed out, which is worth logging — a listener that
+    /// times out here is one where something was still mid-request when the process left.
+    pub async fn drain(&self, timeout: Duration) -> bool {
+        let all = self.capacity as u32;
+        tokio::time::timeout(timeout, self.sem.clone().acquire_many_owned(all))
+            .await
+            .is_ok()
+    }
 }
 
 #[cfg(test)]
@@ -120,5 +133,28 @@ mod tests {
         let _c = tokio::time::timeout(Duration::from_millis(50), limit.acquire())
             .await
             .expect("a released permit lets the next connection in");
+    }
+
+    #[tokio::test]
+    async fn drain_returns_once_every_connection_has_ended() {
+        let limit = ConnLimit::with_capacity("test", 4);
+        let held = limit.acquire().await;
+
+        assert!(
+            !limit.drain(Duration::from_millis(50)).await,
+            "drain should wait while a connection is still in flight"
+        );
+
+        drop(held);
+        assert!(
+            limit.drain(Duration::from_millis(50)).await,
+            "drain should return once the last permit is released"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_of_an_idle_listener_is_immediate() {
+        let limit = ConnLimit::with_capacity("test", 4);
+        assert!(limit.drain(Duration::from_millis(50)).await);
     }
 }

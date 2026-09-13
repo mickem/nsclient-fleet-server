@@ -262,6 +262,16 @@ jobs:
             exit 1
           fi
 
+          # --hash-password is what an on-prem install runs before it can log in at all,
+          # and it is the one code path that reads a terminal. Piping a password exercises
+          # the non-interactive branch; that it produces a PHC string proves argon2 linked
+          # and ran in the shipped binary rather than only in the test build.
+          hash=$(echo 'a test password' | ./dist/nsclient-fleet-${{ matrix.target }}${{ matrix.ext }} --hash-password 2>/dev/null)
+          case "$hash" in
+            '$argon2id$'*) echo "hash-password: ok" ;;
+            *) echo "hash-password produced no PHC string: '$hash'" >&2; exit 1 ;;
+          esac
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nsclient-fleet-${{ matrix.target }}

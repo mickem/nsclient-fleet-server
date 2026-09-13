@@ -116,7 +116,13 @@ async fn start() -> TestServer {
     let mtls_state = state.clone();
     let mtls_handle = tokio::spawn(async move {
         let r = fleet_server::mtls_router(mtls_state.clone());
-        let _ = fleet_server::mtls::serve_on(mtls_listener, mtls_state.trust_store, r).await;
+        let _ = fleet_server::mtls::serve_on(
+            mtls_listener,
+            mtls_state.trust_store,
+            r,
+            fleet_server::shutdown::Shutdown::never(),
+        )
+        .await;
     });
 
     let app = fleet_server::router(state);

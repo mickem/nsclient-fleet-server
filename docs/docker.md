@@ -40,10 +40,23 @@ start, signs you in by password, and serves the UI and agent mTLS on one port. O
 `https://fleet.example.internal:9443/` — your browser will warn about the certificate until
 you do [TLS](#tls) below.
 
-`ON_PREM_ADMIN_PASSWORD_HASH` takes an argon2 PHC string, which is what to use when you can
-produce one — `docker run` arguments land in the shell history, the process list and
-`docker inspect`. `ON_PREM_ADMIN_PASSWORD` takes the plaintext instead; setting both is a
-startup error. Either way the failed-login path is rate-limited, delayed and logged.
+`ON_PREM_ADMIN_PASSWORD_HASH` takes an argon2 PHC string, which is what to use here —
+`docker run` arguments land in the shell history, the process list and `docker inspect`.
+The image produces one for you:
+
+```bash
+# Interactively — prompts twice, without echoing:
+docker run --rm -it ghcr.io/mickem/nsclient-fleet:latest nsclient-fleet --hash-password
+
+# Or from a script or a secret store, one line on stdin:
+echo 'a strong password' | \
+  docker run --rm -i ghcr.io/mickem/nsclient-fleet:latest nsclient-fleet --hash-password
+```
+
+The binary's name is repeated on purpose: the entrypoint serves when given no arguments and
+runs anything else verbatim. The hash goes to stdout and the explanatory line to stderr, so
+a redirect captures the hash alone. `ON_PREM_ADMIN_PASSWORD` takes the plaintext instead; setting both
+is a startup error. Either way the failed-login path is rate-limited, delayed and logged.
 
 <!-- @formatter:off -->
 > The container refuses to start without `MASTER_KEY` rather than generating one into

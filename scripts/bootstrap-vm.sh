@@ -54,6 +54,13 @@ DATABASE_PATH=/opt/nsclient-fleet/data/fleet.db
 
 # Switch ACME to staging while testing the deploy (avoids LE rate limits)
 # ACME_STAGING=true
+
+# Single-tenant instead of hosted: no signup, no magic links, one administrator
+# authenticated by password. Produce the hash with:
+#     /opt/nsclient-fleet/nsclient-fleet --hash-password
+# ON_PREM=true
+# ON_PREM_ADMIN_EMAIL=admin@example.internal
+# ON_PREM_ADMIN_PASSWORD_HASH=...
 TEMPLATE
   chmod 640 /etc/nsclient-fleet/env
   chown root:nsclient-fleet /etc/nsclient-fleet/env

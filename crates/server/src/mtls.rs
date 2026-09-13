@@ -18,6 +18,7 @@ use tower::Service;
 use x509_parser::prelude::FromDer;
 
 use crate::conn::{http_builder, ConnLimit, HANDSHAKE_TIMEOUT};
+use crate::shutdown::Shutdown;
 use fleet_storage::{Db, TenantSecretsRepo};
 
 #[derive(Clone, Debug)]
@@ -231,10 +232,10 @@ fn parse_first_pkcs8_key_pem(pem: &str) -> Result<Vec<u8>> {
         .map_err(|e| anyhow!("no pkcs8 private key in PEM: {e:?}"))
 }
 
-pub async fn serve(addr: &str, ctx: MtlsContext, router: Router) -> Result<()> {
+pub async fn serve(addr: &str, ctx: MtlsContext, router: Router, shutdown: Shutdown) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(addr = %addr, "mTLS listening");
-    serve_on(listener, ctx, router).await
+    serve_on(listener, ctx, router, shutdown).await
 }
 
 /// As [`serve`], but on a listener the caller already bound.
@@ -244,18 +245,31 @@ pub async fn serve(addr: &str, ctx: MtlsContext, router: Router) -> Result<()> {
 /// pattern leaves a window in which anything else can take the port, and when the thief is
 /// another mTLS server the symptom is a TLS trust failure (`UnknownCA`, from a trust store
 /// belonging to someone else) rather than anything resembling a port collision.
-pub async fn serve_on(listener: TcpListener, ctx: MtlsContext, router: Router) -> Result<()> {
+pub async fn serve_on(
+    listener: TcpListener,
+    ctx: MtlsContext,
+    router: Router,
+    shutdown: Shutdown,
+) -> Result<()> {
     let limit = ConnLimit::new("agent-mtls");
+    let stopping = shutdown.wait();
+    tokio::pin!(stopping);
     loop {
         // Taken before `accept` — see `crate::conn::ConnLimit` for why the backpressure
         // belongs in the kernel backlog rather than in an accept-then-drop.
-        let permit = limit.acquire().await;
-        let (stream, peer_addr) = match listener.accept().await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, "accept failed");
-                continue;
-            }
+        let permit = tokio::select! {
+            p = limit.acquire() => p,
+            _ = &mut stopping => break,
+        };
+        let (stream, peer_addr) = tokio::select! {
+            r = listener.accept() => match r {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, "accept failed");
+                    continue;
+                }
+            },
+            _ = &mut stopping => break,
         };
         let snapshot = ctx.snapshot();
         let router = router.clone();
@@ -266,6 +280,14 @@ pub async fn serve_on(listener: TcpListener, ctx: MtlsContext, router: Router) -
             drop(permit);
         });
     }
+
+    // An agent whose poll is cut mid-flight retries on its own schedule, but a renewal
+    // that has issued a certificate and not yet delivered it costs that agent a manual
+    // re-enrollment — so this drain is worth more than the operator UI's.
+    tracing::info!("mTLS listener draining");
+    let drained = limit.drain(crate::shutdown::DRAIN_TIMEOUT).await;
+    tracing::info!(drained, "mTLS listener stopped");
+    Ok(())
 }
 
 /// Classify a TLS accept failure into an operator-actionable log line. These fire for
