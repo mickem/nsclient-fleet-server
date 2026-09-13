@@ -13,7 +13,7 @@ import {
 } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
 import AddIcon from "@mui/icons-material/Add";
-import { Expr, HostView, Selector, SourceFilter } from "./api";
+import { Expr, HostView, Selector, SourceFilter, TagView } from "./api";
 
 // Structured selector editor — every field is a discrete input; the selector is never
 // entered as raw text (locked design decision from PLAN.md).
@@ -22,21 +22,41 @@ import { Expr, HostView, Selector, SourceFilter } from "./api";
  *  the key and value pickers so an operator chooses from what exists (os, os_name,
  *  os_version, the service tags…) instead of guessing spellings. Free text still works —
  *  a group is often written before the first host that will match it enrolls. */
-export type KnownTags = Map<string, Map<string, number>>;
+/** What the fleet currently reports under one tag key: the values and their host counts,
+ *  and which sources those values came from. The sources matter because a clause reading a
+ *  key only ever reported by agents has to say so, or it silently matches nothing. */
+export type KnownTag = { values: Map<string, number>; sources: Set<TagView["source"]> };
+export type KnownTags = Map<string, KnownTag>;
 
 export function knownTagsFromHosts(hosts: HostView[]): KnownTags {
   const out: KnownTags = new Map();
   for (const h of hosts) {
     for (const t of h.tags) {
-      let values = out.get(t.key);
-      if (!values) {
-        values = new Map();
-        out.set(t.key, values);
+      let known = out.get(t.key);
+      if (!known) {
+        known = { values: new Map(), sources: new Set() };
+        out.set(t.key, known);
       }
-      values.set(t.value, (values.get(t.value) ?? 0) + 1);
+      known.values.set(t.value, (known.values.get(t.value) ?? 0) + 1);
+      known.sources.add(t.source);
     }
   }
   return out;
+}
+
+/** The source filter a clause on `key` should carry, given what the fleet reports.
+ *
+ *  A key the fleet only ever reports from agents — anything published by the service-tags
+ *  template, for instance — needs `agent`, because the default is operator-set tags and a
+ *  clause reading one of those would match nothing at all. Returns null when there is
+ *  nothing to say: an unknown key, or one operators do set, both keep the safe default.
+ *
+ *  This is the one place the safe default is relaxed automatically, and it is not silent:
+ *  the leaf's own dropdown shows "host-reported" and the editor shows the warning above. */
+export function suggestedSource(known: KnownTags | undefined, key: string): SourceFilter | null {
+  const sources = known?.get(key)?.sources;
+  if (!sources || sources.size !== 1) return null;
+  return sources.has("agent") ? "agent" : null;
 }
 
 const hostCount = (n: number) => `${n} host${n === 1 ? "" : "s"}`;
@@ -89,13 +109,13 @@ function TagAutocomplete({
 function keyOptions(known: KnownTags | undefined): [string, number][] {
   if (!known) return [];
   return [...known.entries()]
-    .map(([k, values]): [string, number] => [k, [...values.values()].reduce((a, b) => a + b, 0)])
+    .map(([k, t]): [string, number] => [k, [...t.values.values()].reduce((a, b) => a + b, 0)])
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
 }
 
 /** Values reported under `key`, most common first. */
 function valueOptions(known: KnownTags | undefined, key: string): [string, number][] {
-  const values = known?.get(key);
+  const values = known?.get(key)?.values;
   if (!values) return [];
   return [...values.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
 }
@@ -226,6 +246,16 @@ export function ExprEditor({ expr, onChange, onRemove, known }: ExprProps) {
     </IconButton>
   ) : null;
 
+  /** Set a leaf's key, adopting the source the fleet actually reports that key under.
+   *
+   *  Without this, picking a key the service-tags template publishes gives a clause that
+   *  matches nothing and says nothing about why — the kind of dead end people escape by
+   *  setting every clause to "either source". The dropdown beside it shows what was chosen. */
+  const withKey = <T extends Leaf>(leaf: T, key: string): T => {
+    const suggested = suggestedSource(known, key);
+    return suggested ? { ...leaf, key, source: suggested } : { ...leaf, key };
+  };
+
   const keyInput = (key: string, set: (k: string) => void) => (
     <TagAutocomplete
       value={key}
@@ -250,7 +280,7 @@ export function ExprEditor({ expr, onChange, onRemove, known }: ExprProps) {
       return (
         <Stack direction="row" spacing={1} alignItems="center" useFlexGap sx={{ flexWrap: "wrap" }}>
           {opSelect}
-          {keyInput(expr.key, (key) => onChange({ ...expr, key }))}
+          {keyInput(expr.key, (key) => onChange(withKey(expr, key)))}
           <Typography>=</Typography>
           {valueInput(expr.key, expr.value, (value) => onChange({ ...expr, value }), "value")}
           {sourceSelect(expr)}
@@ -261,7 +291,7 @@ export function ExprEditor({ expr, onChange, onRemove, known }: ExprProps) {
       return (
         <Stack direction="row" spacing={1} alignItems="center" useFlexGap sx={{ flexWrap: "wrap" }}>
           {opSelect}
-          {keyInput(expr.key, (key) => onChange({ ...expr, key }))}
+          {keyInput(expr.key, (key) => onChange(withKey(expr, key)))}
           <Typography>∈</Typography>
           {expr.values.map((v, i) => (
             <Box key={i}>
@@ -293,7 +323,7 @@ export function ExprEditor({ expr, onChange, onRemove, known }: ExprProps) {
       return (
         <Stack direction="row" spacing={1} alignItems="center" useFlexGap sx={{ flexWrap: "wrap" }}>
           {opSelect}
-          {keyInput(expr.key, (key) => onChange({ ...expr, key }))}
+          {keyInput(expr.key, (key) => onChange(withKey(expr, key)))}
           {sourceSelect(expr)}
           {removeBtn}
         </Stack>

@@ -529,7 +529,9 @@ alias_services = check_service "exclude=clr_optimization_v4.0.30319_32" "exclude
     description:
       "Publish a host tag for each service you care about (SQL Server, IIS, PostgreSQL, …) " +
       "so groups can select hosts by what runs on them. Assign this bundle broadly; the " +
-      "tags then drive which application bundles each host receives.",
+      "tags then drive which application bundles each host receives. These are tags the " +
+      "host reports about itself, so a group selecting on one is a group hosts can place " +
+      "themselves in — keep anything carrying scripts or secrets on operator-set tags.",
     fields: [
       {
         kind: "table",
@@ -584,7 +586,10 @@ alias_services = check_service "exclude=clr_optimization_v4.0.30319_32" "exclude
     ],
     ini: `; Turn "what runs here" into host tags. Each entry is service = tag; the agent
 ; publishes tag = enabled while the service is running and removes it otherwise, so a
-; group selector like sql-server = enabled follows reality without anyone editing tags.
+; group selector on sql-server = enabled follows reality without anyone editing tags.
+; That selector must read host-reported tags ("source": "agent"), which the group editor
+; picks for you when you choose one of these keys — a clause left on operator tags, the
+; default, will not match one of these.
 ; Windows hosts additionally report sqlserver = detected when SQL Server is installed.
 [/modules]
 CheckSystem = enabled
