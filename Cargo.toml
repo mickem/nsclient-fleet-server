@@ -35,7 +35,7 @@ base64 = "0.22"
 rcgen = { version = "0.13", features = ["x509-parser"] }
 ed25519-dalek = { version = "2", features = ["rand_core", "pem"] }
 chacha20poly1305 = "0.10"
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 jsonwebtoken = "9"
 rustls = "0.23"
 tokio-rustls = "0.26"
