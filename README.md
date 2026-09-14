@@ -17,8 +17,9 @@ just web-build    # produce web/dist
 just dev-server   # run the Rust server on http://localhost:3000
 ```
 
-Just want it running? [docs/docker.md](docs/docker.md) is one `docker run`, and
-[docs/linux-install.md](docs/linux-install.md) is the step-by-step for a Linux host.
+Just want it running? [docs/docker.md](docs/docker.md) is one `docker run`,
+[docs/linux-install.md](docs/linux-install.md) is the step-by-step for a Linux host, and
+[docs/windows-install.md](docs/windows-install.md) is the same for Windows.
 
 For frontend HMR during dev, run `just dev-web` (Vite on :5173, proxies `/api` and `/healthz` to :3000) in a second terminal alongside `just dev-server`.
 
@@ -47,6 +48,7 @@ Repo root is the Cargo workspace. Crates under `crates/`, frontend under `web/`.
 | Document | What it covers |
 | -------- | -------------- |
 | [docs/linux-install.md](docs/linux-install.md) | Step by step on a Linux host: install, configure, self-signed TLS the browser trusts, first host |
+| [docs/windows-install.md](docs/windows-install.md) | The same on Windows: the binary as a service under the SCM, ACLs, the env file, the admin password hash |
 | [docs/docker.md](docs/docker.md) | The same server as a container — a one-line `docker run`, volumes, TLS, upgrades |
 | [docs/deployment.md](docs/deployment.md) | Running it in production: ports, certificates, every environment variable, backups, troubleshooting |
 | [docs/agent-implementation.md](docs/agent-implementation.md) | Writing an agent: enrollment, the bootstrap-token → CSR → mTLS flow |
@@ -94,7 +96,7 @@ out immediately and leaves their audit entries in place, without attribution.
 Invitations are unavailable when `ON_PREM=true`: that mode disables magic links and
 authenticates a single administrator from `ON_PREM_ADMIN_EMAIL` plus either
 `ON_PREM_ADMIN_PASSWORD_HASH` (an argon2 PHC string, preferred) or
-`ON_PREM_ADMIN_PASSWORD`.
+`ON_PREM_ADMIN_PASSWORD`. `nsclient-fleet --hash-password` produces the hash.
 
 ## Platform console
 
@@ -186,7 +188,7 @@ All other env vars have working dev defaults. Useful overrides:
 | `ON_PREM`                                               | `false`                 | Disables signup + magic links; enables password admin login                                                                                               |
 | `ON_PREM_ADMIN_EMAIL`                                   |                         | Required when `ON_PREM=true`                                                                                                                              |
 | `ON_PREM_ADMIN_PASSWORD`                                |                         | Plaintext. One of this or the hash below is required when `ON_PREM=true`                                                                                  |
-| `ON_PREM_ADMIN_PASSWORD_HASH`                           |                         | An argon2 PHC string, preferred over the plaintext. Setting both is a startup error                                                                       |
+| `ON_PREM_ADMIN_PASSWORD_HASH`                           |                         | An argon2 PHC string from `--hash-password`, preferred over the plaintext. Setting both is a startup error                                                 |
 | `PLATFORM_ADMIN_EMAILS`                                 |                         | Comma-separated; grants the platform console at boot and at account creation                                                                              |
 | `HOST_LOST_AFTER_HOURS`                                 | `48`                    | Silence after which a host reads **lost** rather than **offline**. Reporting only — nothing is revoked or deleted                                          |
 | `COOKIE_SECURE`                                         | `false`                 | Set `true` in production (HTTPS only)                                                                                                                     |
@@ -226,8 +228,17 @@ systemctl enable --now nsclient-fleet
 VM_HOST=app.example.com VM_USER=deploy ./scripts/deploy.sh
 ```
 
-It also runs single-tenant on your own hardware, including on Windows — set `ON_PREM=true` and
-see [On-prem deployment](docs/deployment.md#12-on-prem-deployment).
+It also runs single-tenant on your own hardware, including on Windows, where it registers
+itself as a service:
+
+```powershell
+nsclient-fleet.exe --service-install --env-file C:\ProgramData\nsclient-fleet\env
+sc.exe start nsclient-fleet
+```
+
+Set `ON_PREM=true` and see [docs/windows-install.md](docs/windows-install.md) for the
+walkthrough, or [On-prem deployment](docs/deployment.md#12-on-prem-deployment) for the
+reference.
 
 Two things that cannot be recovered if lost, and are not stored together on purpose:
 `MASTER_KEY` (in `/etc/nsclient-fleet/env`) decrypts every tenant CA, and `data/mtls-server.key` is the

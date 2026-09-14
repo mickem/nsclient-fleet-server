@@ -212,11 +212,23 @@ impl Config {
             _ => {}
         }
 
-        let master_key = MasterKey::from_env().map_err(|e| anyhow::anyhow!(
-            "MASTER_KEY required (32 bytes, base64-encoded). \
-             Generate one with `openssl rand -base64 32` or via the `fleet_core::aead::MasterKey::generate_b64` helper. \
-             Underlying error: {e}"
-        ))?;
+        // The suggestion is platform-specific because openssl is not on a stock Windows
+        // host, and a message that names a command the reader does not have reads as "this
+        // software is not for you".
+        let generate_it = if cfg!(windows) {
+            "Generate one with: $b = New-Object byte[] 32; \
+             [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); \
+             [Convert]::ToBase64String($b)"
+        } else {
+            "Generate one with `openssl rand -base64 32`"
+        };
+        let master_key = MasterKey::from_env().map_err(|e| {
+            anyhow::anyhow!(
+                "MASTER_KEY required (32 bytes, base64-encoded). {generate_it}. \
+                 Keep a copy somewhere other than this machine: it encrypts every tenant CA \
+                 and host override, and cannot be recovered. Underlying error: {e}"
+            )
+        })?;
 
         let bootstrap_jwt_secret = match std::env::var("BOOTSTRAP_JWT_SECRET") {
             Ok(s) => {

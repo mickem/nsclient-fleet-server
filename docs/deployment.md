@@ -243,6 +243,13 @@ to trust it.
 | `SESSION_IDLE_HOURS`                                    | `72`    | Session ends after this much inactivity, independent of the 7-day absolute lifetime |
 | `PLATFORM_ADMIN_EMAILS`                                 | unset   | Comma-separated. Grants the platform console — see below |
 | `HOST_LOST_AFTER_HOURS`                                 | `48`    | Silence after which a host reads **lost** — see below  |
+| `LOG_FILE`                                              | unset   | Write logs to this file, rotated daily as `<name>.YYYY-MM-DD`, instead of stdout. Required on Windows as a service, which has nowhere to write stdout; on Linux leave it unset and let journald keep them |
+| `RUST_LOG`                                              | `info`  | Standard `tracing` filter, e.g. `info,fleet_server::mtls=debug` |
+
+Two things are not environment variables, because they have to work before configuration is
+read: `--env-file <path>` loads `KEY=VALUE` lines into the environment (the systemd unit uses
+`EnvironmentFile` instead; the Windows service uses this), and `--hash-password` produces the
+value for `ON_PREM_ADMIN_PASSWORD_HASH`. `--help` lists them.
 
 ### Host status thresholds
 
@@ -273,8 +280,20 @@ platform console, so it can be closed without a redeploy. See [§14](#14-the-pla
 | `ON_PREM`                | `false` | Disables signup + magic links; password login |
 | `ON_PREM_ADMIN_EMAIL`    | —       | Required when `ON_PREM=true`                 |
 | `ON_PREM_ADMIN_PASSWORD` | —       | Plaintext. One of this or the hash below is required when `ON_PREM=true` |
-| `ON_PREM_ADMIN_PASSWORD_HASH` | — | An argon2 PHC string. Preferred — the env file also lands in backups and config repos. Setting both is a startup error |
+| `ON_PREM_ADMIN_PASSWORD_HASH` | — | An argon2 PHC string, from `nsclient-fleet --hash-password`. Preferred — the env file also lands in backups and config repos. Setting both is a startup error |
 | `BOOTSTRAP_JWT_SECRET`   | derived from `MASTER_KEY` | Base64. Set only to use an unrelated key; the default is an HKDF subkey, not `MASTER_KEY` itself |
+
+Produce the hash with the binary itself — there is no ubiquitous argon2 command-line tool,
+and the one some distributions package defaults to parameters this server does not use:
+
+```bash
+nsclient-fleet --hash-password        # prompts twice, without echoing
+printf '%s' "$PASSWORD" | nsclient-fleet --hash-password   # or one line on stdin
+```
+
+The explanatory line goes to stderr and the hash to stdout, so a redirect captures the hash
+alone. Each run produces a different string — the salt is fresh every time, and travels
+inside the PHC string — and all of them verify.
 
 ---
 
@@ -602,20 +621,42 @@ address is actually reachable.
 
 Releases include Windows x64 and ARM64 binaries, which is often what an NSClient site wants
 — the control plane on the same platform as the fleet. Everything above applies except the
-Linux packaging: there is no systemd unit or `bootstrap-vm.sh`, so run it as a Windows
-service (`sc.exe create`, NSSM, or a scheduled task) with the same environment variables,
-and pick data paths that suit the host:
+Linux packaging: there is no systemd unit and no `bootstrap-vm.sh`, and the binary registers
+itself as a service instead.
+
+**[windows-install.md](windows-install.md) is the walkthrough.** The short version:
+
+```powershell
+nsclient-fleet.exe --service-install --env-file C:\ProgramData\nsclient-fleet\env
+sc.exe start nsclient-fleet
+```
+
+Three differences worth knowing before you plan a Windows deployment:
+
+- **Configuration comes from `--env-file`, not the environment.** The service control
+  manager hands a service the machine-wide environment, where `MASTER_KEY` would be readable
+  by every process on the host. The file is the same `KEY=VALUE` format systemd's
+  `EnvironmentFile` reads, and its ACL is what protects it.
+- **Set `LOG_FILE`.** A service has no console and no journal, so without it a service that
+  fails to start says so nowhere.
+- **The data directory's ACL is the whole protection.** `restrict_dir` and
+  `write_key_restricted` are `#[cfg(unix)]` and do nothing here, so break inheritance and
+  grant only SYSTEM and Administrators — before first start, since it is inherited by
+  everything written afterwards.
 
 ```
 DATABASE_PATH=C:\ProgramData\nsclient-fleet\data\fleet.db
 BUNDLE_DIR=C:\ProgramData\nsclient-fleet\data\bundles
 MTLS_STATE_DIR=C:\ProgramData\nsclient-fleet\data
+TLS_STATE_DIR=C:\ProgramData\nsclient-fleet\data
+LOG_FILE=C:\ProgramData\nsclient-fleet\logs\fleet.log
 ```
 
-The private-key hardening in `write_key_restricted` is `#[cfg(unix)]`, so on Windows the
-mTLS key inherits directory ACLs — put the data directory somewhere only the service
-account and administrators can read. The backup rules in §9 apply unchanged, and
-`mtls-server.key` is just as unrecoverable there.
+The backup rules in §9 apply unchanged, and `mtls-server.key` is just as unrecoverable
+there. Registering the binary with `sc.exe create` directly works too — it speaks the
+service protocol either way — but `--service-install` also sets the description and the
+restart-on-failure policy that the systemd unit's `Restart=on-failure` gives on the other
+platform.
 
 ---
 

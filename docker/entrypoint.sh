@@ -1,12 +1,14 @@
 #!/bin/sh
 # Container entrypoint for nsclient-fleet.
 #
-# The binary is configured entirely through environment variables and has no flags, so this
-# script does only what a container needs on top of that: pick a sensible TLS mode, refuse
-# to start on a configuration that would quietly lose data, and exec the server.
+# Serving is configured entirely through environment variables, so this script does only
+# what a container needs on top of that: pick a sensible TLS mode, refuse to start on a
+# configuration that would quietly lose data, and exec the server.
 #
-# `docker run <image>` serves. Any other argument is executed verbatim:
+# `docker run <image>` serves. Any other argument is executed verbatim, which is how the
+# binary's own flags are reached:
 #   docker run --rm <image> nsclient-fleet --version
+#   docker run --rm -it <image> nsclient-fleet --hash-password
 
 set -eu
 

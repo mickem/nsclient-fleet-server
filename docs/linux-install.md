@@ -138,7 +138,7 @@ LISTEN_HTTPS=0.0.0.0:9443
 # Disables signup and magic links; authenticates one administrator by password.
 ON_PREM=true
 ON_PREM_ADMIN_EMAIL=admin@example.internal
-ON_PREM_ADMIN_PASSWORD=<a strong password>
+ON_PREM_ADMIN_PASSWORD_HASH=<the argon2 string — see below>
 
 # --- storage --------------------------------------------------------------
 DATABASE_PATH=/opt/nsclient-fleet/data/fleet.db
@@ -149,6 +149,26 @@ EOF
 sudo chown root:nsclient-fleet /etc/nsclient-fleet/env
 sudo chmod 640 /etc/nsclient-fleet/env
 ```
+
+The administrator password goes in as a hash, not as itself — this file lands in backups
+and, often enough, in a configuration repository:
+
+```bash
+/opt/nsclient-fleet/nsclient-fleet --hash-password
+```
+
+```
+Password: ********
+Confirm:  ********
+
+Set ON_PREM_ADMIN_PASSWORD_HASH to the line below (quote it — it contains $):
+$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQAAAAAAAAAAA$RdescudvJCsgt3ub+b+dWRWJTmaaJObG
+```
+
+The prompt does not echo, so it stays out of the shell history; `printf '%s' "$PASSWORD" |
+nsclient-fleet --hash-password` does the same from a script. `ON_PREM_ADMIN_PASSWORD` still
+takes the plaintext for a deployment that cannot produce a hash, and setting both is a
+startup error.
 
 Port 9443 rather than 443 so the service does not need a privileged port, and rather than
 8443 because that is the NSClient++ web UI — an agent on the same machine would collide
@@ -310,8 +330,8 @@ SMTP relay.
 
 ## Step 8 — Sign in and enroll a host
 
-Open `https://fleet.example.internal:9443/` and sign in with `ON_PREM_ADMIN_EMAIL` and
-`ON_PREM_ADMIN_PASSWORD`.
+Open `https://fleet.example.internal:9443/` and sign in with `ON_PREM_ADMIN_EMAIL` and the
+password you hashed in Step 4.
 
 Then **Hosts → Add host**. The install command it returns carries a one-time bootstrap
 token, good for an hour:
@@ -321,7 +341,7 @@ nscp enroll --server https://fleet.example.internal:9443 --token <bootstrap-toke
 ```
 
 Run that on the machine you are adding. NSClient++ is a separate product;
-[Central management with NSClient Fleet](https://docs.nsclient.org/setup/fleet/) is the
+[Central management with NSClient Fleet](https://nsclient.org/docs/setup/fleet/) is the
 walkthrough from its side — enrolling, trusting this server's certificate, and what changes
 on the agent afterwards. What matters on this side:
 

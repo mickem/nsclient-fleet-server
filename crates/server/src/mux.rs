@@ -39,6 +39,7 @@ use tower::Service;
 
 use crate::conn::{http_builder, ConnLimit, HANDSHAKE_TIMEOUT};
 use crate::mtls::{self, MtlsContext, AGENT_ALPN};
+use crate::shutdown::Shutdown;
 
 const ACME_ALPN: &[u8] = b"acme-tls/1";
 
@@ -81,13 +82,14 @@ fn classify(alpn: &[Vec<u8>], server_name: Option<&str>, agent_sni: Option<&str>
     }
 }
 
-/// Accept forever on `addr`, dispatching each connection by its ClientHello.
+/// Accept on `addr` until `shutdown` fires, dispatching each connection by its ClientHello.
 pub async fn serve(
     addr: &str,
     tls: Arc<MuxTls>,
     mtls_ctx: MtlsContext,
     web_router: Router,
     agent_router: Router,
+    shutdown: Shutdown,
 ) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(
@@ -96,7 +98,7 @@ pub async fn serve(
         agent_sni = ?tls.agent_sni,
         "shared-port listener up (operator UI + agent mTLS + ACME)"
     );
-    serve_on(listener, tls, mtls_ctx, web_router, agent_router).await
+    serve_on(listener, tls, mtls_ctx, web_router, agent_router, shutdown).await
 }
 
 /// As [`serve`], on an already-bound listener — see [`crate::mtls::serve_on`] for why
@@ -107,18 +109,29 @@ pub async fn serve_on(
     mtls_ctx: MtlsContext,
     web_router: Router,
     agent_router: Router,
+    shutdown: Shutdown,
 ) -> Result<()> {
     let limit = ConnLimit::new("shared-port");
+    let stopping = shutdown.wait();
+    tokio::pin!(stopping);
     loop {
         // Before `accept`, not after: at capacity we leave the connection in the kernel
         // backlog rather than accepting it only to drop it.
-        let permit = limit.acquire().await;
-        let (stream, peer_addr) = match listener.accept().await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, "accept failed");
-                continue;
-            }
+        let permit = tokio::select! {
+            p = limit.acquire() => p,
+            // At capacity and asked to stop: nothing has been accepted, so there is
+            // nothing this branch has to hand back before leaving.
+            _ = &mut stopping => break,
+        };
+        let (stream, peer_addr) = tokio::select! {
+            r = listener.accept() => match r {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, "accept failed");
+                    continue;
+                }
+            },
+            _ = &mut stopping => break,
         };
         let tls = tls.clone();
         let snapshot = mtls_ctx.snapshot();
@@ -132,6 +145,13 @@ pub async fn serve_on(
             drop(permit);
         });
     }
+
+    // The loop is out, so no new connection can take a permit; what is left is whatever
+    // was already mid-request. See `crate::shutdown` for why this is worth waiting for.
+    tracing::info!("shared-port listener draining");
+    let drained = limit.drain(crate::shutdown::DRAIN_TIMEOUT).await;
+    tracing::info!(drained, "shared-port listener stopped");
+    Ok(())
 }
 
 async fn handle_conn(

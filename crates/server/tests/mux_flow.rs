@@ -151,6 +151,7 @@ async fn start() -> TestServer {
             mux_state.trust_store.clone(),
             web,
             agent,
+            fleet_server::shutdown::Shutdown::never(),
         )
         .await;
     });
