@@ -948,7 +948,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tracing",
  "ulid",
 ]
@@ -966,7 +966,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "time",
  "tracing",
 ]
@@ -1037,7 +1037,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "ulid",
