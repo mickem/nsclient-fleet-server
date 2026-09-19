@@ -1,6 +1,7 @@
 pub mod admin_password;
 pub mod agent_api;
 pub mod agent_limits;
+pub mod alerts;
 pub mod api_keys;
 pub mod audit;
 pub mod auth;
@@ -10,11 +11,13 @@ pub mod config_api;
 pub mod conn;
 pub mod csrf;
 pub mod desired_state;
+pub mod enrichment;
 pub mod env_file;
 pub mod facts;
 pub mod hosts;
 pub mod housekeeping;
 pub mod https;
+pub mod llm;
 pub mod mtls;
 pub mod mux;
 pub mod platform;
@@ -294,6 +297,18 @@ pub fn router(state: AppState) -> Router {
         .route("/api/bundles/:id/config", get(bundles::get_config))
         .route("/api/bundles/:id/download", get(bundles::ui_download))
         .route("/api/audit", get(audit::list))
+        // Alert contexts. `settings` is declared before `:id` so the literal path is not
+        // captured by the parameter route.
+        .route("/api/alerts", get(alerts::list))
+        .route(
+            "/api/alerts/settings",
+            get(alerts::get_settings).put(alerts::put_settings),
+        )
+        .route(
+            "/api/alerts/:id",
+            get(alerts::get).delete(alerts::delete_alert),
+        )
+        .route("/api/alerts/:id/describe", post(alerts::describe))
         .route("/api/keys", get(api_keys::list).post(api_keys::create))
         .route("/api/keys/:id", axum::routing::delete(api_keys::delete_key))
         .route("/api/users", get(users::list).post(users::invite))
@@ -357,6 +372,7 @@ pub fn mtls_router(state: AppState) -> Router {
         .route("/agent/v1/heartbeat", get(agent_heartbeat))
         .route("/agent/v1/desired-state", get(agent_api::desired_state))
         .route("/agent/v1/state-report", post(agent_api::state_report))
+        .route("/agent/v1/alert-context", post(alerts::ingest))
         .route("/agent/v1/renew", post(agent_api::renew))
         .route("/agent/v1/bundles/:id", get(bundles::download))
         // The handler reads the body itself, capped at `MAX_FACTS_BODY_BYTES`: the document

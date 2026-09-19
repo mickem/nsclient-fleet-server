@@ -1,7 +1,12 @@
+pub mod alerts;
 mod migrate;
 mod pool;
 pub mod repos;
 
+pub use alerts::{
+    utc_day, AlertContextRepo, AlertContextRow, LlmUsage, TenantLlmRepo, TenantLlmSettings,
+    UpsertOutcome,
+};
 pub use migrate::run_migrations;
 pub use pool::{open, Db};
 pub use repos::{
