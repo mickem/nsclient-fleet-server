@@ -13,11 +13,12 @@ server resolves `(tenant_id, host_id)` from the certificate on every request.
 
 ```
 loop:
-  GET /agent/v1/desired-state?current_hash=<h>
+  GET /agent/v1/desired-state?current_hash=<h>&facts_hash=<f>
     304 → sleep next_poll_in_seconds (+ jitter), continue
     200 → download missing bundles → verify → apply → render INI → restart NSClient
           POST /agent/v1/state-report { applied_state_hash, reported_tags, errors,
-                                        local_config_present }
+                                        local_config_present, facts_hash }
+  X-Facts-Hash on either answer ≠ <f> → POST /agent/v1/facts   (see §3)
   POST /agent/v1/renew   (when cert has < 14 days left)
 ```
 
@@ -245,7 +246,48 @@ pulling the SQL monitoring bundle. Values are strings; booleans by convention ar
 `"true"` / `"false"`. Report tags **early** (first report right after startup, before
 the first poll) so a fresh host lands in its groups before it asks for desired state.
 
-## 3. Certificate lifecycle
+## 3. Host facts (inventory)
+
+Facts are the agent's inventory of the machine: OS, hardware, network interfaces, volumes,
+installed software. They are opt-in on the agent — a fact set is switched on in the module
+that produces it, which operators do with a bundle made from the **Host inventory (facts)**
+template — and the server shows them on the host page, with a history of what changed.
+
+The document is up to a megabyte and changes rarely, so **only its hash travels routinely**:
+
+1. Every desired-state poll carries `facts_hash=<sha256 hex>` as a query parameter, and every
+   state report carries `"facts_hash"`. A host with nothing enabled sends the hash of `{}`,
+   `44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a`.
+2. Every answer to those — the `304` included, which is why it is a header — carries
+   `X-Facts-Hash`: the hash of the document the server holds for this host, or `none`.
+3. When that differs from the agent's own hash, the agent uploads:
+
+```
+POST {mtls_url}/agent/v1/facts
+{"collected_at":"2026-09-25T10:00:00Z","facts":{…},"facts_hash":"<sha256 hex>"}
+```
+
+`facts_hash` is the SHA-256 of the `facts` value **exactly as it appears in the body**. The
+server verifies it against those bytes and stores them verbatim, so the agent must splice
+the document in rather than re-encode it after hashing.
+
+| Response | Meaning | Agent behavior |
+|---|---|---|
+| `200` + `X-Facts-Hash: <hash>` | stored (or already held) | nothing more until the document changes |
+| `400` | not an object, malformed, or the hash does not match the bytes | a bug: log it |
+| `413` | body over the server's cap (4 MiB) | do not retry this document; tell the operator which sets are largest |
+
+`none` and the empty document's hash mean the same thing to the agent: a host with nothing
+enabled never uploads. A response **without** `X-Facts-Hash` means the server does not do
+facts (an older version, or it could not read the host) — never a reason to upload.
+
+The server stores the last hash the agent reported, only writing it when it moves, so the
+host page can say whether what it shows is current, whether a newer inventory is on its way,
+or whether the host has nothing enabled. Each stored document is compared with the previous
+one, matching list records by their `id`, and the differences are kept as a bounded history
+(the last 100 changes per host).
+
+## 4. Certificate lifecycle
 
 Client certs live 90 days. When the current cert is within **14 days** of expiry:
 
@@ -272,12 +314,14 @@ bootstrap token ("Add host") and the agent re-enrolls.
 refreshes `last_seen_at`, and returns `403` if the cert was revoked) — useful at
 startup before entering the loop.
 
-## 4. Error handling summary
+## 5. Error handling summary
 
 | Response | Meaning | Agent behavior |
 |---|---|---|
 | `304` on desired-state | up to date | sleep `next_poll_in_seconds` + jitter |
 | `429` + `Retry-After` | pacing/budget exceeded | wait exactly `Retry-After`, resume normal cadence |
+| no `X-Facts-Hash` header | server does not do facts | never upload facts |
+| `413` on facts upload | inventory too large | do not retry until the document changes |
 | `403` on bundle download | bundle no longer in effective set | abandon cycle, re-poll |
 | `403` on any agent route | certificate revoked or the host was deleted | stop; operator intervention (re-enroll) |
 | TLS handshake failure | cert expired/revoked, or server cert rotated | if before expiry: retry with backoff; if expired: re-enroll |

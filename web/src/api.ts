@@ -121,6 +121,54 @@ export type DesiredStateView = {
   bundles: DesiredBundleView[];
 };
 
+/** How a host's stored inventory relates to what its agent holds. Mirrors `FactsStatus` in
+ *  `crates/server/src/facts.rs`. */
+export type FactsStatus =
+  /** The agent never sent a facts hash: a build without facts, or it has not polled since. */
+  | "not_reported"
+  /** The agent has no fact set enabled. */
+  | "nothing_enabled"
+  /** What is shown is what the agent holds. */
+  | "current"
+  /** The agent has an inventory we have not received yet; it follows its next poll. */
+  | "pending"
+  /** The agent has a newer inventory than the one shown; same. */
+  | "outdated";
+
+export type FactChange = {
+  /** Dotted, list records addressed by id: `software.installed[bash].version`. */
+  path: string;
+  kind: "added" | "removed" | "changed";
+  /** Present when short enough to show: a scalar, or a short list of scalars. */
+  old?: unknown;
+  new?: unknown;
+};
+
+export type FactsChanges = {
+  at: number;
+  facts_hash: string;
+  /** The first inventory this host sent — nothing to compare it with. */
+  initial: boolean;
+  changes: FactChange[];
+  /** Changes beyond those listed. */
+  truncated: number;
+};
+
+export type HostFacts = {
+  status: FactsStatus;
+  /** The stored document; null when the host never sent one. */
+  facts: Record<string, unknown> | null;
+  facts_hash: string | null;
+  reported_hash: string | null;
+  /** When the agent collected it, by the agent's clock (ISO 8601). */
+  collected_at: string | null;
+  /** When the server received it. */
+  received_at: number | null;
+  size_bytes: number | null;
+  /** Newest first. */
+  changes: FactsChanges[];
+};
+
 export type CreateHostResponse = {
   host_id: string;
   bootstrap_token: string;

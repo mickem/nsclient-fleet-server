@@ -11,6 +11,7 @@ pub mod conn;
 pub mod csrf;
 pub mod desired_state;
 pub mod env_file;
+pub mod facts;
 pub mod hosts;
 pub mod housekeeping;
 pub mod https;
@@ -226,6 +227,7 @@ pub fn router(state: AppState) -> Router {
             get(hosts::detail).delete(hosts::delete_host),
         )
         .route("/api/hosts/:id/desired", get(hosts::desired))
+        .route("/api/hosts/:id/facts", get(facts::host_facts))
         .route(
             "/api/hosts/:id/revoke-certs",
             post(hosts::revoke_host_certs),
@@ -353,6 +355,15 @@ pub fn mtls_router(state: AppState) -> Router {
         .route("/agent/v1/state-report", post(agent_api::state_report))
         .route("/agent/v1/renew", post(agent_api::renew))
         .route("/agent/v1/bundles/:id", get(bundles::download))
+        // Its own body limit, like the bundle upload: the document can legitimately exceed
+        // axum's 2 MiB default, and raising that for every agent route would hand the same
+        // allowance to the small JSON calls.
+        .route(
+            "/agent/v1/facts",
+            post(facts::upload).layer(axum::extract::DefaultBodyLimit::max(
+                facts::MAX_FACTS_BODY_BYTES,
+            )),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             agent_limits::tier_layer,

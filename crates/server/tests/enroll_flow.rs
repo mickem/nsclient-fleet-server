@@ -604,7 +604,13 @@ async fn deleted_host_is_cut_off_and_gone() {
     );
 
     // No orphans left behind.
-    for table in ["host_tags", "host_overrides", "host_certs"] {
+    for table in [
+        "host_tags",
+        "host_overrides",
+        "host_facts",
+        "host_fact_changes",
+        "host_certs",
+    ] {
         let n: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE host_id = ?"))
             .bind(&host_id)
             .fetch_one(&s._db.read)

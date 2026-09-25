@@ -443,13 +443,19 @@ impl<'a> HostRepo<'a> {
         Ok(true)
     }
 
-    /// Delete a host and everything hanging off it (tags, overrides, certs, metrics) in
+    /// Delete a host and everything hanging off it (tags, overrides, facts, certs) in
     /// one transaction. Removing the cert rows is what cuts the agent off: the mTLS
     /// heartbeat's `standing(serial)` lookup no longer matches, so a live agent gets 403
     /// on its next call. Returns true iff the host row existed.
     pub async fn delete(&self, tenant_id: i64, host_id: &str) -> Result<bool> {
         let mut tx = self.db.write.begin().await?;
-        for table in ["host_tags", "host_overrides", "host_certs"] {
+        for table in [
+            "host_tags",
+            "host_overrides",
+            "host_facts",
+            "host_fact_changes",
+            "host_certs",
+        ] {
             sqlx::query(&format!(
                 "DELETE FROM {table} WHERE tenant_id = ? AND host_id = ?"
             ))
@@ -1416,6 +1422,239 @@ impl<'a> HostOverridesRepo<'a> {
             patch_encrypted: r.get("patch_encrypted"),
             priority: r.get("priority"),
         }))
+    }
+}
+
+/// A host's stored facts document, verbatim.
+pub struct StoredFacts {
+    pub facts_hash: String,
+    pub facts_json: String,
+    pub collected_at: Option<String>,
+    pub received_at: i64,
+    pub size_bytes: i64,
+}
+
+/// The two hashes that decide a facts exchange: what we hold, and what the agent last said
+/// it holds.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct FactsHashes {
+    pub held: Option<String>,
+    pub reported: Option<String>,
+}
+
+pub struct FactChangeRow {
+    pub id: i64,
+    pub at: i64,
+    pub facts_hash: String,
+    pub changes_json: String,
+}
+
+pub struct HostFactsRepo<'a> {
+    db: &'a Db,
+}
+
+impl<'a> HostFactsRepo<'a> {
+    pub fn new(db: &'a Db) -> Self {
+        Self { db }
+    }
+
+    /// Both hashes in one read. `None` when there is no such host.
+    ///
+    /// On the desired-state path, so it is one indexed lookup and never a write: every poll
+    /// from every host asks it.
+    pub async fn hashes(&self, tenant_id: i64, host_id: &str) -> Result<Option<FactsHashes>> {
+        let row = sqlx::query(
+            "SELECT h.facts_reported_hash AS reported, f.facts_hash AS held
+               FROM hosts h
+               LEFT JOIN host_facts f ON f.tenant_id = h.tenant_id AND f.host_id = h.id
+              WHERE h.tenant_id = ? AND h.id = ?",
+        )
+        .bind(tenant_id)
+        .bind(host_id)
+        .fetch_optional(&self.db.read)
+        .await?;
+        Ok(row.map(|r| FactsHashes {
+            held: r.get("held"),
+            reported: r.get("reported"),
+        }))
+    }
+
+    /// Record the hash the agent says it holds. Returns true iff that changed the stored
+    /// value. The comparison lives in the statement, so an unchanged hash — nearly every
+    /// report — writes nothing.
+    pub async fn set_reported_hash(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        hash: &str,
+    ) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE hosts SET facts_reported_hash = ?
+              WHERE tenant_id = ? AND id = ?
+                AND (facts_reported_hash IS NULL OR facts_reported_hash != ?)",
+        )
+        .bind(hash)
+        .bind(tenant_id)
+        .bind(host_id)
+        .bind(hash)
+        .execute(&self.db.write)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn get(&self, tenant_id: i64, host_id: &str) -> Result<Option<StoredFacts>> {
+        let row = sqlx::query(
+            "SELECT facts_hash, facts_json, collected_at, received_at, size_bytes
+               FROM host_facts WHERE tenant_id = ? AND host_id = ?",
+        )
+        .bind(tenant_id)
+        .bind(host_id)
+        .fetch_optional(&self.db.read)
+        .await?;
+        Ok(row.map(|r| StoredFacts {
+            facts_hash: r.get("facts_hash"),
+            facts_json: r.get("facts_json"),
+            collected_at: r.get("collected_at"),
+            received_at: r.get("received_at"),
+            size_bytes: r.get("size_bytes"),
+        }))
+    }
+
+    /// Store a new document for a host, and what changed since the previous one.
+    ///
+    /// `changes` is handed the previous document (`None` on a first upload) and returns the
+    /// history entry to record, if any. It runs inside the write transaction, so two uploads
+    /// racing each other cannot both diff against the same predecessor and leave a history
+    /// that skips a step. At most `keep_history` entries are kept per host.
+    ///
+    /// Returns false, writing nothing, when the host already holds a document with this
+    /// hash — a repeated upload is not a change — or when there is no such host.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn replace(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        facts_hash: &str,
+        facts_json: &str,
+        collected_at: Option<&str>,
+        keep_history: i64,
+        changes: impl FnOnce(Option<&str>) -> Option<String>,
+    ) -> Result<bool> {
+        let now = now_unix();
+        let mut tx = self.db.write.begin().await?;
+
+        let host_exists = sqlx::query("SELECT 1 AS x FROM hosts WHERE tenant_id = ? AND id = ?")
+            .bind(tenant_id)
+            .bind(host_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some();
+        if !host_exists {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
+        let previous = sqlx::query(
+            "SELECT facts_hash, facts_json FROM host_facts WHERE tenant_id = ? AND host_id = ?",
+        )
+        .bind(tenant_id)
+        .bind(host_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .map(|r| {
+            (
+                r.get::<String, _>("facts_hash"),
+                r.get::<String, _>("facts_json"),
+            )
+        });
+
+        if previous.as_ref().map(|(h, _)| h.as_str()) == Some(facts_hash) {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
+        let entry = changes(previous.as_ref().map(|(_, json)| json.as_str()));
+
+        sqlx::query(
+            "INSERT INTO host_facts
+               (tenant_id, host_id, facts_hash, facts_json, collected_at, received_at, size_bytes)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(host_id) DO UPDATE SET
+               facts_hash = excluded.facts_hash,
+               facts_json = excluded.facts_json,
+               collected_at = excluded.collected_at,
+               received_at = excluded.received_at,
+               size_bytes = excluded.size_bytes
+             WHERE host_facts.tenant_id = excluded.tenant_id",
+        )
+        .bind(tenant_id)
+        .bind(host_id)
+        .bind(facts_hash)
+        .bind(facts_json)
+        .bind(collected_at)
+        .bind(now)
+        .bind(facts_json.len() as i64)
+        .execute(&mut *tx)
+        .await?;
+
+        if let Some(entry) = entry {
+            sqlx::query(
+                "INSERT INTO host_fact_changes (tenant_id, host_id, at, facts_hash, changes_json)
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(tenant_id)
+            .bind(host_id)
+            .bind(now)
+            .bind(facts_hash)
+            .bind(&entry)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "DELETE FROM host_fact_changes
+                  WHERE tenant_id = ? AND host_id = ?
+                    AND id NOT IN (SELECT id FROM host_fact_changes
+                                    WHERE tenant_id = ? AND host_id = ?
+                                    ORDER BY id DESC LIMIT ?)",
+            )
+            .bind(tenant_id)
+            .bind(host_id)
+            .bind(tenant_id)
+            .bind(host_id)
+            .bind(keep_history)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// The most recent history entries for a host, newest first.
+    pub async fn list_changes(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        limit: i64,
+    ) -> Result<Vec<FactChangeRow>> {
+        let rows = sqlx::query(
+            "SELECT id, at, facts_hash, changes_json FROM host_fact_changes
+              WHERE tenant_id = ? AND host_id = ?
+              ORDER BY id DESC LIMIT ?",
+        )
+        .bind(tenant_id)
+        .bind(host_id)
+        .bind(limit)
+        .fetch_all(&self.db.read)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| FactChangeRow {
+                id: r.get("id"),
+                at: r.get("at"),
+                facts_hash: r.get("facts_hash"),
+                changes_json: r.get("changes_json"),
+            })
+            .collect())
     }
 }
 
