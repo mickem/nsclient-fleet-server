@@ -1451,6 +1451,19 @@ pub struct FactChangeRow {
     pub changes_json: String,
 }
 
+/// What [`HostFactsRepo::replace`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplaceOutcome {
+    /// The document was stored, and the history entry with it.
+    Stored,
+    /// The source already holds a document with this hash: nothing written.
+    Unchanged,
+    /// Another write replaced the document since the caller read it: nothing written.
+    Conflict,
+    /// There is no such host in this tenant: nothing written.
+    NoHost,
+}
+
 pub struct HostFactsRepo<'a> {
     db: &'a Db,
 }
@@ -1533,16 +1546,20 @@ impl<'a> HostFactsRepo<'a> {
         }))
     }
 
-    /// Store a new document for a host from one source, and what changed since that
-    /// source's previous one. Other sources' documents are untouched.
+    /// Store a new document for a host from one source. Other sources' documents are
+    /// untouched.
     ///
-    /// `changes` is handed the previous document (`None` on a first upload) and returns the
-    /// history entry to record, if any. It runs inside the write transaction, so two uploads
-    /// racing each other cannot both diff against the same predecessor and leave a history
-    /// that skips a step. At most `keep_history` entries are kept per host and source.
+    /// A compare-and-set against `expected_previous`, the hash of the document the caller
+    /// read and diffed against (`None`: it saw none). Diffing a megabyte document is not
+    /// work to do while holding the single write connection, so the caller does it first,
+    /// outside any transaction, and this only checks that nothing replaced the document in
+    /// between. On [`ReplaceOutcome::Conflict`] the caller re-reads and tries again; two
+    /// racing uploads therefore cannot both diff against the same predecessor and leave a
+    /// history that skips a step.
     ///
-    /// Returns false, writing nothing, when the source already holds a document with this
-    /// hash — a repeated upload is not a change — or when there is no such host.
+    /// `history` is the entry to record, if any. At most `keep_history` entries are kept
+    /// per host and source. The source name is checked here, at the one place any source
+    /// writes, so no path can store one [`fleet_core::facts::valid_source`] refuses.
     #[allow(clippy::too_many_arguments)]
     pub async fn replace(
         &self,
@@ -1552,9 +1569,14 @@ impl<'a> HostFactsRepo<'a> {
         facts_hash: &str,
         facts_json: &str,
         collected_at: Option<&str>,
+        expected_previous: Option<&str>,
+        history: Option<&str>,
         keep_history: i64,
-        changes: impl FnOnce(Option<&str>) -> Option<String>,
-    ) -> Result<bool> {
+    ) -> Result<ReplaceOutcome> {
+        anyhow::ensure!(
+            fleet_core::facts::valid_source(source),
+            "invalid facts source name {source:?}"
+        );
         let now = now_unix();
         let mut tx = self.db.write.begin().await?;
 
@@ -1566,31 +1588,26 @@ impl<'a> HostFactsRepo<'a> {
             .is_some();
         if !host_exists {
             tx.rollback().await?;
-            return Ok(false);
+            return Ok(ReplaceOutcome::NoHost);
         }
 
-        let previous = sqlx::query(
-            "SELECT facts_hash, facts_json FROM host_facts
+        let current: Option<String> = sqlx::query_scalar(
+            "SELECT facts_hash FROM host_facts
               WHERE tenant_id = ? AND host_id = ? AND source = ?",
         )
         .bind(tenant_id)
         .bind(host_id)
         .bind(source)
         .fetch_optional(&mut *tx)
-        .await?
-        .map(|r| {
-            (
-                r.get::<String, _>("facts_hash"),
-                r.get::<String, _>("facts_json"),
-            )
-        });
-
-        if previous.as_ref().map(|(h, _)| h.as_str()) == Some(facts_hash) {
+        .await?;
+        if current.as_deref() == Some(facts_hash) {
             tx.rollback().await?;
-            return Ok(false);
+            return Ok(ReplaceOutcome::Unchanged);
         }
-
-        let entry = changes(previous.as_ref().map(|(_, json)| json.as_str()));
+        if current.as_deref() != expected_previous {
+            tx.rollback().await?;
+            return Ok(ReplaceOutcome::Conflict);
+        }
 
         sqlx::query(
             "INSERT INTO host_facts
@@ -1616,7 +1633,7 @@ impl<'a> HostFactsRepo<'a> {
         .execute(&mut *tx)
         .await?;
 
-        if let Some(entry) = entry {
+        if let Some(entry) = history {
             sqlx::query(
                 "INSERT INTO host_fact_changes
                    (tenant_id, host_id, source, at, facts_hash, changes_json)
@@ -1627,7 +1644,7 @@ impl<'a> HostFactsRepo<'a> {
             .bind(source)
             .bind(now)
             .bind(facts_hash)
-            .bind(&entry)
+            .bind(entry)
             .execute(&mut *tx)
             .await?;
             sqlx::query(
@@ -1649,7 +1666,7 @@ impl<'a> HostFactsRepo<'a> {
         }
 
         tx.commit().await?;
-        Ok(true)
+        Ok(ReplaceOutcome::Stored)
     }
 
     /// The most recent history entries of one source for a host, newest first.

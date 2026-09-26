@@ -20,7 +20,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
+
+pub use crate::digest::sha256_hex;
 use std::collections::{BTreeSet, HashMap};
 
 /// Response header carrying the hash of the document the server holds for this host.
@@ -58,12 +59,6 @@ pub const EMPTY_FACTS_HASH: &str =
 
 /// Longest `collected_at` stored. It is an ISO 8601 timestamp; anything longer is not one.
 pub const MAX_COLLECTED_AT_LEN: usize = 64;
-
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    let mut h = Sha256::new();
-    h.update(bytes);
-    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
-}
 
 /// A facts hash as the agent may send it: 64 hex digits, returned lowercase so it compares
 /// directly against what we computed. Anything else is `None`.

@@ -1,209 +1,12 @@
 //! Host facts end to end: the hash exchange on polls and state reports, the upload on a
 //! miss, and what the operator API shows afterwards.
-//!
-//! The harness is poll_flow's.
 
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::Arc;
+mod common;
 
-use fleet_core::aead::MasterKey;
-use fleet_storage::Db;
-use sha2::{Digest, Sha256};
-use tempfile::TempDir;
-
-struct TestServer {
-    base_url: String,
-    _tempdir: TempDir,
-    handles: Vec<tokio::task::JoinHandle<()>>,
-    db: Db,
-    agent_limits: fleet_server::agent_limits::AgentRateLimits,
-    cookie_jar: reqwest::Client,
-}
-
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        for h in self.handles.drain(..) {
-            h.abort();
-        }
-    }
-}
-
-async fn start() -> TestServer {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("test.db");
-
-    let db = fleet_storage::open(&db_path).await.unwrap();
-    fleet_storage::run_migrations(&db.write).await.unwrap();
-
-    let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mtls_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let http_addr = http_listener.local_addr().unwrap();
-    let mtls_addr = mtls_listener.local_addr().unwrap();
-
-    let base_url = format!("http://{http_addr}");
-
-    let key_b64 = MasterKey::generate_b64();
-    std::env::set_var("MASTER_KEY", &key_b64);
-    let master_key = MasterKey::from_b64(&key_b64).unwrap();
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let bootstrap_jwt_secret = STANDARD.decode(&key_b64).unwrap();
-
-    let cfg = fleet_server::config::Config {
-        listen: format!("127.0.0.1:{}", http_addr.port()),
-        listen_https: "127.0.0.1:0".into(),
-        listen_mtls: format!("127.0.0.1:{}", mtls_addr.port()),
-        agent_mtls_url: format!("https://127.0.0.1:{}", mtls_addr.port()),
-        acme: None,
-        tls: None,
-        database_path: PathBuf::from(&db_path),
-        base_url: base_url.clone(),
-        on_prem: false,
-        on_prem_admin_email: None,
-        on_prem_admin_password: None,
-        on_prem_admin_password_hash: None,
-        platform_admin_emails: Vec::new(),
-        magic_link_ttl_secs: 900,
-        session_ttl_secs: 3600,
-        session_idle_ttl_secs: 3600,
-        bootstrap_ttl_secs: 3600,
-        host_lost_after_secs: 172_800,
-        client_cert_lifetime_days: 90,
-        cookie_secure: false,
-        daily_email_budget: 1_000_000,
-        smtp: None,
-        turnstile_secret: None,
-        turnstile_site_key: None,
-        master_key,
-        bootstrap_jwt_secret,
-    };
-
-    let (mtls_cert_pem, mtls_key_pem) =
-        fleet_server::mtls::generate_self_signed_server("127.0.0.1").unwrap();
-
-    let email = fleet_server::auth::email::EmailSender::from_config(cfg.smtp.as_ref()).unwrap();
-    let turnstile =
-        fleet_server::auth::turnstile::Turnstile::from_secret(cfg.turnstile_secret.clone());
-    let rate_limits = fleet_server::auth::rate_limit::AuthRateLimits::new(cfg.daily_email_budget);
-    let agent_limits = fleet_server::agent_limits::AgentRateLimits::new();
-    let trust_store =
-        fleet_server::mtls::MtlsContext::load(db.clone(), mtls_cert_pem.clone(), mtls_key_pem)
-            .await
-            .unwrap();
-
-    let agent_limits_handle = agent_limits.clone();
-    let state = fleet_server::AppState {
-        db: db.clone(),
-        config: cfg.clone(),
-        email,
-        turnstile,
-        rate_limits,
-        agent_limits,
-        enrollment_limits: fleet_server::agent_limits::EnrollmentLimits::default(),
-        trust_store: trust_store.clone(),
-        mtls_server_cert_pem: Arc::new(mtls_cert_pem),
-        bundle_store: Arc::new(fleet_server::bundles::LocalBundleStore::new(
-            dir.path().join("bundles"),
-        )),
-        desired_state_cache: Default::default(),
-    };
-
-    let mtls_state = state.clone();
-    let mtls_handle = tokio::spawn(async move {
-        let r = fleet_server::mtls_router(mtls_state.clone());
-        let _ = fleet_server::mtls::serve_on(
-            mtls_listener,
-            mtls_state.trust_store,
-            r,
-            fleet_server::shutdown::Shutdown::never(),
-        )
-        .await;
-    });
-
-    let app = fleet_server::router(state);
-    let http_handle = tokio::spawn(async move {
-        let _ = axum::serve(
-            http_listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await;
-    });
-
-    for _ in 0..50 {
-        if reqwest::get(format!("{base_url}/healthz")).await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-
-    TestServer {
-        base_url,
-        _tempdir: dir,
-        handles: vec![http_handle, mtls_handle],
-        db,
-        agent_limits: agent_limits_handle,
-        cookie_jar: reqwest::Client::builder()
-            .cookie_store(true)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap(),
-    }
-}
-
-async fn signup_login(s: &TestServer, slug: &str, email: &str) {
-    s.cookie_jar
-        .post(format!("{}/api/auth/signup", s.base_url))
-        .json(&serde_json::json!({
-            "email": email,
-            "tenant_slug": slug,
-            "tenant_name": slug.to_uppercase(),
-            "turnstile_token": "",
-        }))
-        .send()
-        .await
-        .unwrap();
-
-    let tenants = fleet_storage::TenantRepo::new(&s.db);
-    let users = fleet_storage::UserRepo::new(&s.db);
-    let links = fleet_storage::MagicLinkRepo::new(&s.db);
-    let t = tenants.get_by_slug(slug).await.unwrap().unwrap();
-    let u = users.find_by_email(email).await.unwrap().unwrap();
-    let token = format!("magic-{slug}-XXXXXXXX");
-    let mut h = Sha256::new();
-    h.update(token.as_bytes());
-    let hash: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
-    links
-        .create(&hash, t.id, u.id, fleet_core::time::now_unix() + 600)
-        .await
-        .unwrap();
-    let _ = complete_exchange(&s.cookie_jar, &s.base_url, &token).await;
-}
-
-async fn enroll_a_host(s: &TestServer) -> fleet_agent_sim::EnrolledAgent {
-    let r = s
-        .cookie_jar
-        .post(format!("{}/api/hosts", s.base_url))
-        .json(&serde_json::json!({}))
-        .send()
-        .await
-        .unwrap();
-    let body: serde_json::Value = r.json().await.unwrap();
-    let token = body["bootstrap_token"].as_str().unwrap().to_string();
-
-    // Trust store rebuild can lag; retry briefly
-    let mut last = String::new();
-    for _ in 0..20 {
-        match fleet_agent_sim::enroll(&s.base_url, &token, Some("alpha"), Some("linux")).await {
-            Ok(a) => return a,
-            Err(e) => last = format!("{e:?}"),
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    panic!("enroll never succeeded: {last}");
-}
-
+use common::{enroll_a_host, signup_login, start, TestServer};
 use fleet_agent_sim::facts_upload_body;
-use fleet_core::facts::{sha256_hex, EMPTY_FACTS_HASH};
+use fleet_core::facts::{sha256_hex, AGENT_SOURCE, EMPTY_FACTS_HASH};
+use fleet_storage::{HostFactsRepo, ReplaceOutcome};
 
 const OS_DOC: &str = r#"{"os":{"arch":"x86_64","family":"linux","name":"Ubuntu 24.04"},"storage":{"volumes":[{"device":"/dev/vda","id":"/","size_bytes":270553174016,"type":"fixed"}]}}"#;
 const OS_DOC_2: &str = r#"{"os":{"arch":"x86_64","family":"linux","name":"Ubuntu 24.04.1"},"storage":{"volumes":[{"device":"/dev/vda","id":"/","size_bytes":270553174016,"type":"fixed"},{"id":"/data","type":"fixed"}]}}"#;
@@ -442,26 +245,118 @@ async fn facts_of_an_unknown_host_are_not_found() {
     assert_eq!(r.status(), 404);
 }
 
-/// Store a document under a non-agent source, the way an import will.
-async fn store_imported(s: &TestServer, host_id: &str, doc: &str) -> bool {
-    let tenant_id: i64 = sqlx::query_scalar("SELECT tenant_id FROM hosts WHERE id = ?")
+async fn tenant_of(s: &TestServer, host_id: &str) -> i64 {
+    sqlx::query_scalar("SELECT tenant_id FROM hosts WHERE id = ?")
         .bind(host_id)
         .fetch_one(&s.db.read)
         .await
-        .unwrap();
-    fleet_storage::HostFactsRepo::new(&s.db)
+        .unwrap()
+}
+
+/// Store a document under a non-agent source, the way an import will.
+async fn store_imported(s: &TestServer, host_id: &str, doc: &str) -> bool {
+    let outcome = HostFactsRepo::new(&s.db)
         .replace(
-            tenant_id,
+            tenant_of(s, host_id).await,
             host_id,
             "import:cmdb",
             &sha256_hex(doc.as_bytes()),
             doc,
             None,
+            None,
+            Some(r#"{"initial":true,"changes":[],"truncated":0}"#),
             100,
-            |_| Some(r#"{"initial":true,"changes":[],"truncated":0}"#.into()),
         )
         .await
+        .unwrap();
+    outcome == ReplaceOutcome::Stored
+}
+
+#[tokio::test]
+async fn a_source_name_outside_the_charset_is_refused() {
+    let (s, _agent, host_id) = setup().await;
+    let tenant_id = tenant_of(&s, &host_id).await;
+    for bad in ["", "Import", "a b", "../x", &"a".repeat(65)] {
+        let r = HostFactsRepo::new(&s.db)
+            .replace(
+                tenant_id,
+                &host_id,
+                bad,
+                EMPTY_FACTS_HASH,
+                "{}",
+                None,
+                None,
+                None,
+                100,
+            )
+            .await;
+        assert!(r.is_err(), "{bad:?} must be refused");
+    }
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM host_facts")
+        .fetch_one(&s.db.read)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+}
+
+#[tokio::test]
+async fn a_write_that_raced_another_is_refused_as_a_conflict() {
+    let (s, agent, host_id) = setup().await;
+    agent
+        .upload_facts(facts_upload_body(OS_DOC, "t"))
+        .await
+        .unwrap();
+    // Diffed against "nothing stored", but a document is stored now.
+    let outcome = HostFactsRepo::new(&s.db)
+        .replace(
+            tenant_of(&s, &host_id).await,
+            &host_id,
+            AGENT_SOURCE,
+            &sha256_hex(OS_DOC_2.as_bytes()),
+            OS_DOC_2,
+            None,
+            None,
+            None,
+            100,
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, ReplaceOutcome::Conflict);
+    assert_eq!(
+        facts_view(&s, &host_id).await["facts_hash"],
+        sha256_hex(OS_DOC.as_bytes())
+    );
+}
+
+#[tokio::test]
+async fn switching_every_set_off_clears_the_inventory_without_an_upload() {
+    let (s, agent, host_id) = setup().await;
+    agent
+        .upload_facts(facts_upload_body(OS_DOC, "t"))
+        .await
+        .unwrap();
+
+    // The operator turned everything off: the agent now reports the empty document's hash.
+    // It has no reason to upload `{}`, and must not need to.
+    let (_, held) = agent.poll_with_facts(None, EMPTY_FACTS_HASH).await.unwrap();
+    assert_eq!(
+        held.as_deref(),
+        Some(EMPTY_FACTS_HASH),
+        "answered with the cleared document's hash, so the agent sees no miss"
+    );
+
+    let v = facts_view(&s, &host_id).await;
+    assert_eq!(v["status"], "nothing_enabled");
+    assert_eq!(v["facts"], serde_json::json!({}));
+    let latest = &v["changes"][0];
+    let removed: Vec<&str> = latest["changes"]
+        .as_array()
         .unwrap()
+        .iter()
+        .map(|c| c["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(removed, vec!["os", "storage"]);
+    assert_eq!(latest["changes"][0]["kind"], "removed");
 }
 
 #[tokio::test]
@@ -523,26 +418,4 @@ async fn deleting_a_host_deletes_its_facts() {
             .unwrap();
         assert_eq!(n, 0, "{table}");
     }
-}
-
-/// Complete a magic-link sign-in the browser way: GET renders the confirmation page and sets
-/// the `fleet_exchange` double-submit cookie, then the form POST redeems the token. The
-/// client must carry a cookie store so the cookie is resent on the POST.
-async fn complete_exchange(c: &reqwest::Client, base_url: &str, token: &str) -> reqwest::Response {
-    let page = c
-        .get(format!("{base_url}/api/auth/exchange?t={token}"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(page.status(), 200, "confirmation page must render on GET");
-    let html = page.text().await.unwrap();
-    let marker = "name=\"csrf\" value=\"";
-    let start = html.find(marker).expect("csrf field present") + marker.len();
-    let end = html[start..].find('"').expect("csrf value terminated");
-    let csrf = html[start..start + end].to_string();
-    c.post(format!("{base_url}/api/auth/exchange"))
-        .form(&[("t", token), ("csrf", csrf.as_str())])
-        .send()
-        .await
-        .unwrap()
 }

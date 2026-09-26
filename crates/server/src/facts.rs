@@ -26,7 +26,7 @@ use axum::{
 use fleet_core::facts::{
     self, FactChange, AGENT_SOURCE, EMPTY_FACTS_HASH, FACTS_HASH_HEADER, FACTS_HASH_NONE,
 };
-use fleet_storage::{FactsHashes, HostFactsRepo, HostRepo};
+use fleet_storage::{FactsHashes, HostFactsRepo, HostRepo, ReplaceOutcome};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -50,6 +50,9 @@ const MAX_CHANGES_PER_ENTRY: usize = 200;
 
 /// History entries returned with a host's facts.
 const CHANGES_SHOWN: i64 = 50;
+
+/// Attempts at storing a document when another write keeps replacing it underneath.
+const STORE_ATTEMPTS: usize = 3;
 
 fn header_name() -> HeaderName {
     HeaderName::from_static(FACTS_HASH_HEADER)
@@ -75,6 +78,7 @@ pub async fn advertise(
             return None;
         }
     };
+    let mut held = hashes.held;
     // Written only when it moved, so a steady-state poll stays a read. A malformed value is
     // ignored rather than refused: it is descriptive, and failing a poll over it would cost
     // the host its configuration.
@@ -84,8 +88,21 @@ pub async fn advertise(
                 tracing::error!(error = %e, "set_reported_hash failed");
             }
         }
+        // The operator switched every fact set off. The hash alone says what the document
+        // is — `{}` — so there is nothing to wait for: clear what we hold now, rather than
+        // keep showing the last inventory as merely "outdated" until an upload of an empty
+        // document that the agent has no reason to send.
+        if reported == EMPTY_FACTS_HASH && held.as_deref().is_some_and(|h| h != EMPTY_FACTS_HASH) {
+            match store(state, tenant_id, host_id, EMPTY_FACTS_HASH, "{}", None).await {
+                Ok(_) => {
+                    tracing::info!(%host_id, "host has no fact set enabled any more; cleared its inventory");
+                    held = Some(EMPTY_FACTS_HASH.to_owned());
+                }
+                Err(e) => tracing::error!(error = %e, "clearing host facts failed"),
+            }
+        }
     }
-    HeaderValue::from_str(hashes.held.as_deref().unwrap_or(FACTS_HASH_NONE)).ok()
+    HeaderValue::from_str(held.as_deref().unwrap_or(FACTS_HASH_NONE)).ok()
 }
 
 /// Attach the header to a response, if there is one to attach.
@@ -112,37 +129,46 @@ pub async fn upload(
             return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
         }
     };
-    // Already known to be valid JSON (it was parsed to find it); parsed again as a value
-    // only to diff against the previous document.
-    let document: Value = match serde_json::from_str(upload.facts) {
-        Ok(v) => v,
-        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-    };
-
     let repo = HostFactsRepo::new(&state.db);
-    let stored = repo
-        .replace(
+    // A retried upload of what we already hold is the common repeat: answer it from the
+    // hash alone, without walking the document or reading the stored one.
+    let already_held = match repo.hashes(ctx.tenant_id, &ctx.host_id).await {
+        Ok(h) => h.and_then(|h| h.held).as_deref() == Some(upload.facts_hash.as_str()),
+        Err(e) => {
+            tracing::error!(error = %e, "facts hash lookup failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+        }
+    };
+    if !already_held {
+        match store(
+            &state,
             ctx.tenant_id,
             &ctx.host_id,
-            AGENT_SOURCE,
             &upload.facts_hash,
             upload.facts,
             upload.collected_at.as_deref(),
-            KEEP_HISTORY,
-            |previous| history_entry(previous, &document),
         )
-        .await;
-    match stored {
-        Ok(true) => tracing::info!(
-            host_id = %ctx.host_id,
-            facts_hash = %upload.facts_hash,
-            size_bytes = upload.facts.len(),
-            "stored host facts"
-        ),
-        Ok(false) => { /* the document we already hold */ }
-        Err(e) => {
-            tracing::error!(error = %e, "storing host facts failed");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+        .await
+        {
+            Ok(ReplaceOutcome::Stored) => tracing::info!(
+                host_id = %ctx.host_id,
+                facts_hash = %upload.facts_hash,
+                size_bytes = upload.facts.len(),
+                "stored host facts"
+            ),
+            Ok(ReplaceOutcome::Unchanged) => { /* a concurrent upload of the same document */ }
+            Ok(ReplaceOutcome::Conflict) => {
+                // The agent retries on its next poll; a 503 is "try again", not a refusal.
+                tracing::warn!(host_id = %ctx.host_id, "facts upload kept racing another write");
+                return (StatusCode::SERVICE_UNAVAILABLE, "busy").into_response();
+            }
+            Ok(ReplaceOutcome::NoHost) => {
+                return (StatusCode::NOT_FOUND, "host not found").into_response()
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "storing host facts failed");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+            }
         }
     }
     // The agent obviously holds what it just sent.
@@ -155,6 +181,55 @@ pub async fn upload(
 
     let held = HeaderValue::from_str(&upload.facts_hash).ok();
     with_header(Json(serde_json::json!({})).into_response(), held)
+}
+
+/// Store `json` as the agent's document, and what changed since the previous one.
+///
+/// The previous document is read and diffed here, outside any transaction, and the write is
+/// a compare-and-set against its hash, so the single write connection is never held while a
+/// megabyte document is parsed. The new document is parsed at most once, and only when it
+/// actually differs from what is stored.
+async fn store(
+    state: &AppState,
+    tenant_id: i64,
+    host_id: &str,
+    hash: &str,
+    json: &str,
+    collected_at: Option<&str>,
+) -> anyhow::Result<ReplaceOutcome> {
+    let repo = HostFactsRepo::new(&state.db);
+    let mut document: Option<Value> = None;
+    for _ in 0..STORE_ATTEMPTS {
+        let previous = repo.get(tenant_id, host_id, AGENT_SOURCE).await?;
+        let previous_hash = previous.as_ref().map(|p| p.facts_hash.as_str());
+        if previous_hash == Some(hash) {
+            return Ok(ReplaceOutcome::Unchanged);
+        }
+        if document.is_none() {
+            document = Some(serde_json::from_str(json)?);
+        }
+        let entry = history_entry(
+            previous.as_ref().map(|p| p.facts_json.as_str()),
+            document.as_ref().expect("parsed above"),
+        );
+        let outcome = repo
+            .replace(
+                tenant_id,
+                host_id,
+                AGENT_SOURCE,
+                hash,
+                json,
+                collected_at,
+                previous_hash,
+                entry.as_deref(),
+                KEEP_HISTORY,
+            )
+            .await?;
+        if outcome != ReplaceOutcome::Conflict {
+            return Ok(outcome);
+        }
+    }
+    Ok(ReplaceOutcome::Conflict)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -306,30 +381,17 @@ pub async fn host_facts(
         })
         .collect();
 
-    let status = status(&hashes);
-    let view = match stored {
-        Some(s) => HostFactsView {
-            source: AGENT_SOURCE,
-            status,
-            facts: serde_json::from_str(&s.facts_json).ok(),
-            facts_hash: Some(s.facts_hash),
-            reported_hash: hashes.reported,
-            collected_at: s.collected_at,
-            received_at: Some(s.received_at),
-            size_bytes: Some(s.size_bytes),
-            changes,
-        },
-        None => HostFactsView {
-            source: AGENT_SOURCE,
-            status,
-            facts: None,
-            facts_hash: None,
-            reported_hash: hashes.reported,
-            collected_at: None,
-            received_at: None,
-            size_bytes: None,
-            changes,
-        },
+    let stored = stored.as_ref();
+    let view = HostFactsView {
+        source: AGENT_SOURCE,
+        status: status(&hashes),
+        facts: stored.and_then(|s| serde_json::from_str(&s.facts_json).ok()),
+        facts_hash: stored.map(|s| s.facts_hash.clone()),
+        reported_hash: hashes.reported,
+        collected_at: stored.and_then(|s| s.collected_at.clone()),
+        received_at: stored.map(|s| s.received_at),
+        size_bytes: stored.map(|s| s.size_bytes),
+        changes,
     };
     Json(view).into_response()
 }
@@ -358,7 +420,8 @@ mod tests {
             status(&h(Some(EMPTY_FACTS_HASH), Some(EMPTY_FACTS_HASH))),
             FactsStatus::NothingEnabled
         );
-        // Sets switched off after an inventory was stored: the old one is out of date.
+        // Only until the next poll or report: `advertise` clears a stored inventory as soon
+        // as the agent reports the empty document's hash.
         assert_eq!(
             status(&h(Some(&a), Some(EMPTY_FACTS_HASH))),
             FactsStatus::Outdated

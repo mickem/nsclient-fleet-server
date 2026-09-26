@@ -48,7 +48,7 @@ CREATE TABLE host_fact_changes (
 CREATE INDEX idx_host_fact_changes_tenant_host ON host_fact_changes(tenant_id, host_id, source, id);
 
 -- The hash the agent last said it holds for its `agent` document, from its polls and state
--- reports. Next to the stored document's hash this tells "up to date" from "the agent has a newer inventory we
--- have not received" and "nothing enabled on the host". NULL: the agent never sent one —
--- a build without facts support.
+-- reports. Next to the stored document's hash this tells "up to date" from "the agent has a
+-- newer inventory we have not received" and "nothing enabled on the host". NULL: the agent
+-- never sent one — a build without facts support.
 ALTER TABLE hosts ADD COLUMN facts_reported_hash TEXT;

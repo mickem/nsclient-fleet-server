@@ -8,6 +8,6 @@ pub use repos::{
     ApiKeyRepo, AuditRepo, AuditRow, BundleAssignmentsRepo, BundleRow, BundlesRepo, CaSummary,
     CertStanding, EnrolledCert, FactChangeRow, FactsHashes, GroupRow, GroupsRepo, HostCertRepo,
     HostFactsRepo, HostOverridesRepo, HostRepo, HostTagsRepo, MagicLinkRepo, PlatformSettingsRepo,
-    SessionRepo, StoredFacts, StoredHostOverride, StoredTenantSecrets, TenantBundleKeysRepo,
-    TenantRepo, TenantSecretsRepo, TenantSummary, UserRepo,
+    ReplaceOutcome, SessionRepo, StoredFacts, StoredHostOverride, StoredTenantSecrets,
+    TenantBundleKeysRepo, TenantRepo, TenantSecretsRepo, TenantSummary, UserRepo,
 };

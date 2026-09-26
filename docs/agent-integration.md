@@ -276,9 +276,13 @@ the document in rather than re-encode it after hashing.
 | `200` + `X-Facts-Hash: <hash>` | stored (or already held) | nothing more until the document changes |
 | `400` | not an object, malformed, or the hash does not match the bytes | a bug: log it |
 | `413` | body over the server's cap (4 MiB) | do not retry this document; tell the operator which sets are largest |
+| `503` | the document kept being replaced by concurrent writes | retry on the next poll |
 
-`none` and the empty document's hash mean the same thing to the agent: a host with nothing
-enabled never uploads. A response **without** `X-Facts-Hash` means the server does not do
+`none` and the empty document's hash mean the same thing to the agent, so a host with nothing
+enabled never uploads. When a host that had an inventory has every set switched off, the
+server does not wait for an upload of `{}`: the reported hash already says what the document
+is, so the server clears the stored inventory itself and answers with the empty document's
+hash in the same response. A response **without** `X-Facts-Hash` means the server does not do
 facts (an older version, or it could not read the host) — never a reason to upload.
 
 The server stores the last hash the agent reported, only writing it when it moves, so the

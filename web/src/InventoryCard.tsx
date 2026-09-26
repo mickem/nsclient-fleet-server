@@ -29,19 +29,34 @@ type Obj = Record<string, unknown>;
 
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
 
+// Ids should be unique within a list, but a Windows software inventory does produce
+// duplicates, so nothing here keys on the id alone.
 const isRecordList = (v: unknown): v is Obj[] =>
   Array.isArray(v) && v.length > 0 && v.every((x) => isObj(x) && typeof x.id === "string");
 
-const STATUS: Record<
-  FactsStatus,
-  { label: string; color: "success" | "info" | "warning" | "default" }
-> = {
+type StatusLook = { label: string; color: "success" | "info" | "warning" | "default" };
+
+const STATUS: Record<FactsStatus, StatusLook> = {
   current: { label: "Up to date", color: "success" },
   pending: { label: "Inventory on its way", color: "info" },
   outdated: { label: "Newer inventory pending", color: "warning" },
   nothing_enabled: { label: "No fact sets enabled", color: "default" },
   not_reported: { label: "Not reported", color: "default" },
 };
+
+/** A status this bundle does not know yet (a server newer than the web UI) is shown by its
+ *  name rather than breaking the page. */
+function statusLook(status: string): StatusLook {
+  return STATUS[status as FactsStatus] ?? { label: status.replace(/_/g, " "), color: "default" };
+}
+
+/** The key a change's value sits under, for its unit: `speed_bps` in
+ *  `network.interfaces[eth0.100].speed_bps`. A path ending in a record (`…[eth0.100]`) names
+ *  no key, and an id may itself contain dots, so this is not "whatever follows the last dot". */
+function leafKey(path: string): string {
+  const m = /(?:^|\.)([A-Za-z0-9_]+)$/.exec(path);
+  return m ? m[1] : "";
+}
 
 /** A value as text, using the unit a key carries (`size_bytes`, `speed_bps`). */
 function fmtValue(key: string, v: unknown): string {
@@ -151,8 +166,8 @@ function RecordsTable({ records }: { records: Obj[] }) {
             </TableRow>
           </TableHead>
           <TableBody>
-            {shown.map((r) => (
-              <TableRow key={String(r.id)}>
+            {shown.map((r, i) => (
+              <TableRow key={`${i}:${String(r.id)}`}>
                 {columns.map((c) => (
                   <TableCell key={c} sx={c === "id" ? { fontFamily: "monospace" } : undefined}>
                     {fmtValue(c, r[c])}
@@ -224,7 +239,7 @@ const CHANGE_COLOR: Record<FactChange["kind"], "success" | "error" | "info"> = {
 };
 
 function ChangeLine({ c }: { c: FactChange }) {
-  const leaf = c.path.slice(c.path.lastIndexOf(".") + 1);
+  const leaf = leafKey(c.path);
   const detail =
     c.kind === "changed" && (c.old !== undefined || c.new !== undefined)
       ? `${fmtValue(leaf, c.old) || "—"} → ${fmtValue(leaf, c.new) || "—"}`
@@ -317,8 +332,8 @@ export function InventoryCard({ facts }: { facts: HostFacts | null }) {
           </Typography>
           {facts && (
             <Chip
-              label={STATUS[facts.status].label}
-              color={STATUS[facts.status].color}
+              label={statusLook(facts.status).label}
+              color={statusLook(facts.status).color}
               size="small"
               variant={facts.status === "current" ? "filled" : "outlined"}
             />
