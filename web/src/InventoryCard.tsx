@@ -300,6 +300,8 @@ function ChangeEntry({ entry }: { entry: FactsChanges }) {
 function emptyExplanation(status: FactsStatus): string {
   switch (status) {
     case "pending":
+    case "outdated":
+      // `outdated` with an empty document: the sets were switched back on after a clear.
       return "The agent has an inventory for this host and sends it after its next poll.";
     case "not_reported":
       return (
@@ -362,9 +364,11 @@ export function InventoryCard({
             )}
             {sets.length === 0 ? (
               <Typography variant="body2" color="text.secondary">
-                {facts.facts
-                  ? "The host sent an empty inventory: no fact sets are enabled."
-                  : emptyExplanation(facts.status)}
+                {
+                  // By status, not by whether a document is stored: an empty one stored after
+                  // a clear stays until the agent's new inventory arrives.
+                  emptyExplanation(facts.status)
+                }
               </Typography>
             ) : (
               <Box>

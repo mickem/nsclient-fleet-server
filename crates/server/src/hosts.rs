@@ -448,7 +448,7 @@ pub async fn revoke_host_certs(
     // The host is no longer enrolled, so its desired state is no longer anyone's to serve.
     state
         .desired_state_cache
-        .invalidate_host(who.tenant_id, &host_id);
+        .forget_host(who.tenant_id, &host_id);
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -515,7 +515,7 @@ pub async fn delete_host(
             // config_version covers configuration changes, not a host ceasing to exist.
             state
                 .desired_state_cache
-                .invalidate_host(who.tenant_id, &host_id);
+                .forget_host(who.tenant_id, &host_id);
             crate::audit::record(
                 &state,
                 who.tenant_id,
@@ -593,7 +593,7 @@ pub async fn bulk_delete(
             Ok(true) => {
                 state
                     .desired_state_cache
-                    .invalidate_host(who.tenant_id, &host_id);
+                    .forget_host(who.tenant_id, &host_id);
                 crate::audit::record(
                     &state,
                     who.tenant_id,

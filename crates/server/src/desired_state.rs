@@ -189,9 +189,22 @@ impl DesiredStateCache {
         assert!(self.put_if_current(tenant_id, host_id, ticket, config_version, state));
     }
 
-    /// Drop a host's cached state. `config_version` covers every *configuration* change, but
-    /// not a change to the host's own inputs — its reported tags or facts — nor a host
-    /// disappearing. A compute already under way for this host will not store its result.
+    /// Forget a host that is gone — deleted, or cut off pending re-enrollment — entirely.
+    /// Not [`Self::invalidate_host`], whose tombstone would stay in the map for a host that
+    /// never polls again: a fleet that enrolls and deletes hosts all day would fill the map
+    /// with them. A compute still in flight for the host may store its result; nothing will
+    /// ever read it, and it is reclaimed as idle.
+    pub fn forget_host(&self, tenant_id: i64, host_id: &str) {
+        self.entries
+            .write()
+            .expect("desired-state cache lock")
+            .remove(&(tenant_id, host_id.to_string()));
+    }
+
+    /// Drop a host's cached state because one of its own inputs — its reported tags or
+    /// facts — changed, which `config_version` does not cover. A compute already under way
+    /// for this host will not store its result. For a host that is going away, use
+    /// [`Self::forget_host`].
     pub fn invalidate_host(&self, tenant_id: i64, host_id: &str) {
         let mut map = self.entries.write().expect("desired-state cache lock");
         let entry = map
@@ -471,6 +484,16 @@ mod tests {
         let ticket = c.ticket(1, "host-a");
         c.invalidate_host(1, "host-a");
         assert!(!c.put_if_current(1, "host-a", ticket, 1, &ds("stale")));
+    }
+
+    #[test]
+    fn a_forgotten_host_leaves_nothing_behind() {
+        let c = DesiredStateCache::new();
+        c.put(1, "host-a", 1, &ds("aaa"));
+        c.invalidate_host(1, "host-a");
+        c.forget_host(1, "host-a");
+        c.forget_host(1, "never-cached");
+        assert_eq!(c.len(), 0);
     }
 
     #[test]

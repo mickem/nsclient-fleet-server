@@ -1632,7 +1632,10 @@ impl<'a> HostFactsRepo<'a> {
             return Ok(ReplaceOutcome::Conflict);
         }
 
-        sqlx::query(
+        // No tenant guard on the update: the host was just found in this tenant inside the
+        // same transaction, and host ids are unique across tenants, so an existing row for
+        // this host is this tenant's. A guard could only ever make the write silently skip.
+        let written = sqlx::query(
             "INSERT INTO host_facts
                (tenant_id, host_id, source, facts_hash, facts_json, collected_at, received_at,
                 size_bytes)
@@ -1642,8 +1645,7 @@ impl<'a> HostFactsRepo<'a> {
                facts_json = excluded.facts_json,
                collected_at = excluded.collected_at,
                received_at = excluded.received_at,
-               size_bytes = excluded.size_bytes
-             WHERE host_facts.tenant_id = excluded.tenant_id",
+               size_bytes = excluded.size_bytes",
         )
         .bind(tenant_id)
         .bind(host_id)
@@ -1654,7 +1656,13 @@ impl<'a> HostFactsRepo<'a> {
         .bind(now)
         .bind(facts_json.len() as i64)
         .execute(&mut *tx)
-        .await?;
+        .await?
+        .rows_affected();
+        // Never report Stored, or write a history row, for a document that did not land.
+        if written != 1 {
+            tx.rollback().await?;
+            anyhow::bail!("facts write for host {host_id} affected {written} rows");
+        }
 
         if let Some(entry) = history {
             sqlx::query(
@@ -1750,29 +1758,9 @@ impl<'a> HostFactsRepo<'a> {
             .collect())
     }
 
-    /// Every host's document from one source in a tenant, as `(host_id, facts_json)`. For
-    /// the paths that evaluate a selector across the fleet (the group preview) or list what
-    /// the fleet reports (the selector editor's catalog).
+    /// A tenant's documents from one source, as `(host_id, json)`, at most `limit` of them,
+    /// in host id order. Bounded because a tenant's inventories together can be very large.
     pub async fn list_documents(
-        &self,
-        tenant_id: i64,
-        source: &str,
-    ) -> Result<Vec<(String, String)>> {
-        let rows = sqlx::query(
-            "SELECT host_id, facts_json FROM host_facts WHERE tenant_id = ? AND source = ?",
-        )
-        .bind(tenant_id)
-        .bind(source)
-        .fetch_all(&self.db.read)
-        .await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| (r.get("host_id"), r.get("facts_json")))
-            .collect())
-    }
-
-    /// As [`Self::list_documents`], at most `limit` of them, in host id order.
-    pub async fn list_documents_limited(
         &self,
         tenant_id: i64,
         source: &str,

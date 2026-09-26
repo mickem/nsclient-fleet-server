@@ -533,6 +533,32 @@ impl FactPath {
         &self.raw
     }
 
+    /// How to write the path to `key` under the path `parent` (`""` at the top), or `None`
+    /// when the grammar has no way to: the one place that knows how [`Self::parse`] reads a
+    /// key back.
+    ///
+    /// A plain key is joined with a dot. A key holding `.`, `[` or `]` is written `[key]`,
+    /// which needs a key before it and — being a pick — only reaches a map entry, never a
+    /// field of the records a list fans out to (`in_record`): there it would select the
+    /// record whose id is `key`. An empty key has no spelling at all, nor does one holding
+    /// `]`, and neither does a path longer than a selector may store.
+    pub fn child(parent: &str, key: &str, in_record: bool) -> Option<String> {
+        if key.is_empty() {
+            return None;
+        }
+        let path = if key.contains(['.', '[', ']']) {
+            if parent.is_empty() || in_record || key.contains(']') {
+                return None;
+            }
+            format!("{parent}[{key}]")
+        } else if parent.is_empty() {
+            key.to_owned()
+        } else {
+            format!("{parent}.{key}")
+        };
+        (path.len() <= MAX_FACT_PATH_LEN).then_some(path)
+    }
+
     /// Every value this path reaches in `doc`.
     pub fn resolve<'a>(&self, doc: &'a Value) -> Vec<&'a Value> {
         let mut current = vec![doc];
@@ -868,6 +894,37 @@ mod tests {
             let s = json!({ "clauses": [bad.clone()] });
             assert!(Selector::from_json(&s).is_err(), "{bad} must be refused");
         }
+    }
+
+    #[test]
+    fn a_spelled_child_path_reads_back_to_its_key() {
+        let doc = json!({
+            "os": {"family": "linux"},
+            "services": {"a.b": {"state": "x"}},
+            "software": {"installed": [{"id": "bash", "version": "5.2", "x.y": 1}]},
+        });
+        let resolve = |p: &str| FactPath::parse(p).unwrap().resolve(&doc);
+        let os = FactPath::child("", "os", false).unwrap();
+        let family = FactPath::child(&os, "family", false).unwrap();
+        assert_eq!(resolve(&family), vec![&json!("linux")]);
+        let dotted = FactPath::child("services", "a.b", false).unwrap();
+        assert_eq!(dotted, "services[a.b]");
+        assert_eq!(resolve(&format!("{dotted}.state")), vec![&json!("x")]);
+        let version = FactPath::child("software.installed", "version", true).unwrap();
+        assert_eq!(resolve(&version), vec![&json!("5.2")]);
+
+        assert_eq!(FactPath::child("", "", false), None);
+        assert_eq!(
+            FactPath::child("", "a.b", false),
+            None,
+            "brackets need a key before them"
+        );
+        assert_eq!(FactPath::child("software.installed", "x.y", true), None);
+        assert_eq!(FactPath::child("s", "a]b", false), None);
+        assert_eq!(
+            FactPath::child("s", &"k".repeat(MAX_FACT_PATH_LEN), false),
+            None
+        );
     }
 
     #[test]

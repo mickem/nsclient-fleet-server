@@ -207,7 +207,8 @@ export type FactTest =
 export const AGENT_FACTS = "agent";
 
 /** `GET /api/facts/catalog`: the paths the fleet's facts have, for the selector pickers. */
-export type FactPathKind = "scalar" | "list" | "map";
+/** `mixed`: different kinds on different hosts, so no one test suits every host. */
+export type FactPathKind = "scalar" | "list" | "map" | "mixed";
 export type CatalogPath = {
   path: string;
   kind: FactPathKind;

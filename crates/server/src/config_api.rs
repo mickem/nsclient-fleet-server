@@ -324,23 +324,20 @@ pub async fn preview_selector(
             return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
         }
     };
-    let mut facts_by_host = match crate::facts::load_for_tenant(
-        &state,
-        who.tenant_id,
-        &selector.fact_sources(),
-    )
-    .await
-    {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::error!(error = %e, "facts load failed");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
-        }
-    };
+    let sources = selector.fact_sources();
     let tags_repo = HostTagsRepo::new(&state.db);
     let mut matches = Vec::new();
     for h in hosts {
-        let facts = facts_by_host.remove(&h.id).unwrap_or_default();
+        // One host's documents at a time, like its tags: a tenant's inventories together can
+        // run to gigabytes, and a tags-only selector reads none.
+        let facts = match crate::facts::load_for_host(&state, who.tenant_id, &h.id, &sources).await
+        {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::error!(error = %e, "facts load failed");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+            }
+        };
         let tags = match tags_repo.map_for_host(who.tenant_id, &h.id).await {
             Ok(t) => t,
             Err(e) => {

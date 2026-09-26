@@ -24,9 +24,9 @@ use axum::{
     Json,
 };
 use fleet_core::facts::{
-    self, FactChange, AGENT_SOURCE, EMPTY_FACTS_HASH, FACTS_HASH_HEADER, FACTS_HASH_NONE,
+    self, FactsDiff, AGENT_SOURCE, EMPTY_FACTS_HASH, FACTS_HASH_HEADER, FACTS_HASH_NONE,
 };
-use fleet_core::selector::{scalar_text, HostFacts, MAX_FACT_PATH_LEN, MAX_VALUE_LEN};
+use fleet_core::selector::{scalar_text, FactPath, HostFacts, MAX_VALUE_LEN};
 use fleet_core::time::now_unix;
 use fleet_storage::{FactsHashes, HostFactsRepo, HostRepo, NewFacts, ReplaceOutcome};
 use serde::{Deserialize, Serialize};
@@ -359,24 +359,6 @@ pub async fn load_for_host(
     Ok(out)
 }
 
-/// Every host's documents from `sources` in a tenant, keyed by host id.
-pub async fn load_for_tenant(
-    state: &AppState,
-    tenant_id: i64,
-    sources: &BTreeSet<String>,
-) -> anyhow::Result<HashMap<String, HostFacts>> {
-    let repo = HostFactsRepo::new(&state.db);
-    let mut out: HashMap<String, HostFacts> = HashMap::new();
-    for source in sources {
-        for (host_id, json) in repo.list_documents(tenant_id, source).await? {
-            if let Some(doc) = parse_stored(&host_id, source, &json) {
-                out.entry(host_id).or_default().insert(source.clone(), doc);
-            }
-        }
-    }
-    Ok(out)
-}
-
 fn parse_stored(host_id: &str, source: &str, json: &str) -> Option<Value> {
     match serde_json::from_str(json) {
         Ok(v) => Some(v),
@@ -391,8 +373,9 @@ fn parse_stored(host_id: &str, source: &str, json: &str) -> Option<Value> {
 struct HistoryEntry {
     /// The first document this host sent: nothing to compare it with.
     initial: bool,
-    changes: Vec<FactChange>,
-    truncated: usize,
+    /// Stored as `changes` and `truncated` beside `initial`.
+    #[serde(flatten)]
+    diff: FactsDiff,
 }
 
 /// What to record about replacing `previous` with `document`, if anything.
@@ -404,8 +387,7 @@ fn history_entry(previous: Option<&str>, document: &Value) -> Option<String> {
         None if document.as_object().is_some_and(|o| o.is_empty()) => return None,
         None => HistoryEntry {
             initial: true,
-            changes: Vec::new(),
-            truncated: 0,
+            diff: FactsDiff::default(),
         },
         Some(previous) => {
             // A stored document that no longer parses is compared as empty, so the new one
@@ -417,8 +399,7 @@ fn history_entry(previous: Option<&str>, document: &Value) -> Option<String> {
             }
             HistoryEntry {
                 initial: false,
-                changes: d.changes,
-                truncated: d.truncated,
+                diff: d,
             }
         }
     };
@@ -471,8 +452,9 @@ pub struct FactsChangesView {
     pub at: i64,
     pub facts_hash: String,
     pub initial: bool,
-    pub changes: Vec<FactChange>,
-    pub truncated: usize,
+    /// Serialized as `changes` and `truncated` beside the fields above.
+    #[serde(flatten)]
+    pub diff: FactsDiff,
 }
 
 #[derive(Serialize)]
@@ -540,8 +522,7 @@ pub async fn host_facts(
                 at: row.at,
                 facts_hash: row.facts_hash,
                 initial: entry.initial,
-                changes: entry.changes,
-                truncated: entry.truncated,
+                diff: entry.diff,
             })
         })
         .collect();
@@ -585,6 +566,19 @@ pub enum PathKind {
     List,
     /// A map: `has` a key, or step into it.
     Map,
+    /// Different things on different hosts, or in different records of one host: no one
+    /// test suits them all, so the editor does not pick one.
+    Mixed,
+}
+
+impl PathKind {
+    fn merge(self, other: PathKind) -> PathKind {
+        if self == other {
+            self
+        } else {
+            PathKind::Mixed
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -700,6 +694,7 @@ impl CatalogAcc {
                 hosts: 0,
                 values: HashMap::new(),
             });
+            acc.kind = acc.kind.merge(kind);
             acc.hosts += 1;
             for v in values {
                 let room = acc.values.len() < MAX_DISTINCT_VALUES;
@@ -744,6 +739,7 @@ fn note(local: &mut LocalPaths, path: &str, kind: PathKind, value: Option<String
     let entry = local
         .entry(path.to_owned())
         .or_insert_with(|| (kind, BTreeSet::new()));
+    entry.0 = entry.0.merge(kind);
     if let Some(v) = value.filter(|v| v.len() <= MAX_VALUE_LEN) {
         entry.1.insert(v);
     }
@@ -761,27 +757,11 @@ fn walk_children(
         return;
     }
     for (k, v) in m {
-        // An empty key has no spelling in any form.
-        if k.is_empty() {
-            continue;
+        // Only paths a selector can actually be written with: a key the grammar has no
+        // spelling for is not offered.
+        if let Some(child) = FactPath::child(path, k, in_record) {
+            walk(v, &child, depth + 1, local);
         }
-        // A key the dotted form cannot spell is reached with brackets — which need a key
-        // before them, so such a key at the top level cannot be selected on at all. Nor can
-        // one inside a list record: there `path[k]` picks the record whose id is `k`.
-        let child = if k.contains(['.', '[', ']']) {
-            if path.is_empty() || in_record || k.contains([']']) {
-                continue;
-            }
-            format!("{path}[{k}]")
-        } else if path.is_empty() {
-            k.clone()
-        } else {
-            format!("{path}.{k}")
-        };
-        if child.len() > MAX_FACT_PATH_LEN {
-            continue;
-        }
-        walk(v, &child, depth + 1, local);
     }
 }
 
@@ -836,7 +816,7 @@ pub async fn catalog(State(state): State<AppState>, who: AuthedUser) -> Response
         let mut out = Vec::new();
         for source in sources {
             let docs = repo
-                .list_documents_limited(who.tenant_id, &source, MAX_CATALOG_HOSTS)
+                .list_documents(who.tenant_id, &source, MAX_CATALOG_HOSTS)
                 .await?;
             let mut acc = CatalogAcc::default();
             // One row per host and source (the primary key), so a count is the host count.
@@ -890,13 +870,13 @@ mod tests {
     #[test]
     fn the_catalog_lists_paths_kinds_and_values_per_host() {
         let a = serde_json::json!({
-            "os": {"family": "linux"},
+            "os": {"family": "linux", "build": "6.1"},
             "software": {"installed": [{"id": "bash", "version": "5.2", "x.y": "z"}, {"id": "vim", "version": "9.0"}]},
             "services": {"sshd": {"state": "running"}, "a.b": {"state": "x"}, "": {"state": "y"}},
             "": {"x": 1},
         });
         let b = serde_json::json!({
-            "os": {"family": "windows"},
+            "os": {"family": "windows", "build": ["19045"]},
             "software": {"installed": [{"id": "bash", "version": "5.1"}]},
             "net": {"addresses": ["10.0.0.1"]},
         });
@@ -937,6 +917,8 @@ mod tests {
             path(&c, "net.addresses").values,
             vec![("10.0.0.1".to_owned(), 1)]
         );
+        // A scalar on one host and a list on another: no single test suits both.
+        assert_eq!(path(&c, "os.build").kind, PathKind::Mixed);
         assert!(!c.truncated);
     }
 
@@ -1048,7 +1030,7 @@ mod tests {
         )
         .unwrap();
         assert!(!e.initial);
-        assert_eq!(e.changes.len(), 1);
-        assert_eq!(e.changes[0].path, "os.family");
+        assert_eq!(e.diff.changes.len(), 1);
+        assert_eq!(e.diff.changes[0].path, "os.family");
     }
 }

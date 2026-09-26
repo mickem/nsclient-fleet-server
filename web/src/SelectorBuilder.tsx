@@ -414,7 +414,7 @@ export function ExprEditor({ expr, onChange, onRemove, known, facts }: ExprProps
     const setPath = (path: string) => {
       const kind = paths?.get(path)?.kind;
       let next: FactLeaf = { ...leaf, path };
-      if (kind && kind !== "scalar" && leaf.test === "eq") next = withTest(next, "has");
+      if ((kind === "list" || kind === "map") && leaf.test === "eq") next = withTest(next, "has");
       if (kind === "scalar" && leaf.test === "has") next = withTest(next, "eq");
       onChange(next);
     };
