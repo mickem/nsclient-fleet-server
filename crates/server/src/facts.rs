@@ -613,13 +613,10 @@ pub struct FactsCatalog {
 /// and parsing every inventory in the tenant buys nothing.
 const MAX_CATALOG_HOSTS: i64 = 2_000;
 
-/// How long a built catalog may be served without its tenant's facts having moved. Stored
-/// documents only change through [`store`], which marks the tenant, but a host deleted with
-/// its documents does not; this bounds how long it lingers in the counts.
-const CATALOG_TTL_SECS: i64 = 300;
-
 /// Built catalogs per tenant, each tagged with the tenant's facts generation at the time
-/// it was built. [`store`] bumps the generation, so the next request rebuilds.
+/// it was built. Every change to a tenant's documents bumps the generation — [`store`] for
+/// a new document, the host delete handlers for documents removed with their host — so the
+/// next request rebuilds.
 #[derive(Default)]
 pub struct CatalogCache {
     inner: std::sync::Mutex<CatalogCacheInner>,
@@ -628,7 +625,7 @@ pub struct CatalogCache {
 #[derive(Default)]
 struct CatalogCacheInner {
     generations: HashMap<i64, u64>,
-    built: HashMap<i64, (u64, i64, std::sync::Arc<FactsCatalog>)>,
+    built: HashMap<i64, (u64, std::sync::Arc<FactsCatalog>)>,
 }
 
 impl CatalogCache {
@@ -640,27 +637,21 @@ impl CatalogCache {
     }
 
     /// The cached catalog if it is still current, else the generation to build against.
-    fn lookup(&self, tenant_id: i64, now: i64) -> Result<std::sync::Arc<FactsCatalog>, u64> {
+    fn lookup(&self, tenant_id: i64) -> Result<std::sync::Arc<FactsCatalog>, u64> {
         let inner = self.inner.lock().expect("catalog cache lock");
         let generation = inner.generations.get(&tenant_id).copied().unwrap_or(0);
         match inner.built.get(&tenant_id) {
-            Some((g, at, c)) if *g == generation && now - at < CATALOG_TTL_SECS => Ok(c.clone()),
+            Some((g, c)) if *g == generation => Ok(c.clone()),
             _ => Err(generation),
         }
     }
 
     /// Keep a catalog built against `generation`. One built while a document landed is
     /// already out of date and is not kept.
-    fn keep(
-        &self,
-        tenant_id: i64,
-        generation: u64,
-        now: i64,
-        catalog: std::sync::Arc<FactsCatalog>,
-    ) {
+    fn keep(&self, tenant_id: i64, generation: u64, catalog: std::sync::Arc<FactsCatalog>) {
         let mut inner = self.inner.lock().expect("catalog cache lock");
         if inner.generations.get(&tenant_id).copied().unwrap_or(0) == generation {
-            inner.built.insert(tenant_id, (generation, now, catalog));
+            inner.built.insert(tenant_id, (generation, catalog));
         }
     }
 }
@@ -799,8 +790,7 @@ fn walk(v: &Value, path: &str, depth: usize, local: &mut LocalPaths) {
 ///
 /// Reads every document in the tenant, so it is for opening an editor, not for a poll path.
 pub async fn catalog(State(state): State<AppState>, who: AuthedUser) -> Response {
-    let now = now_unix();
-    let generation = match state.facts_catalog_cache.lookup(who.tenant_id, now) {
+    let generation = match state.facts_catalog_cache.lookup(who.tenant_id) {
         Ok(cached) => return Json(&*cached).into_response(),
         Err(generation) => generation,
     };
@@ -815,19 +805,24 @@ pub async fn catalog(State(state): State<AppState>, who: AuthedUser) -> Response
         sources.insert(AGENT_SOURCE.to_owned());
         let mut out = Vec::new();
         for source in sources {
-            let docs = repo
-                .list_documents(who.tenant_id, &source, MAX_CATALOG_HOSTS)
-                .await?;
             let mut acc = CatalogAcc::default();
             // One row per host and source (the primary key), so a count is the host count.
             let mut hosts = 0;
-            for (host_id, json) in &docs {
-                if let Some(doc) = parse_stored(host_id, &source, json) {
-                    acc.add_document(&doc);
-                    hosts += 1;
-                }
-            }
-            if docs.len() as i64 >= MAX_CATALOG_HOSTS {
+            // Folded in one document at a time, each dropped before the next is read.
+            let read = repo
+                .for_each_document(
+                    who.tenant_id,
+                    &source,
+                    MAX_CATALOG_HOSTS,
+                    |host_id, json| {
+                        if let Some(doc) = parse_stored(host_id, &source, json) {
+                            acc.add_document(&doc);
+                            hosts += 1;
+                        }
+                    },
+                )
+                .await?;
+            if read as i64 >= MAX_CATALOG_HOSTS {
                 acc.truncated = true;
             }
             out.push(acc.finish(source, hosts));
@@ -840,7 +835,7 @@ pub async fn catalog(State(state): State<AppState>, who: AuthedUser) -> Response
             let c = std::sync::Arc::new(c);
             state
                 .facts_catalog_cache
-                .keep(who.tenant_id, generation, now, c.clone());
+                .keep(who.tenant_id, generation, c.clone());
             Json(&*c).into_response()
         }
         Err(e) => {

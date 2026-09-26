@@ -1758,27 +1758,34 @@ impl<'a> HostFactsRepo<'a> {
             .collect())
     }
 
-    /// A tenant's documents from one source, as `(host_id, json)`, at most `limit` of them,
-    /// in host id order. Bounded because a tenant's inventories together can be very large.
-    pub async fn list_documents(
+    /// Hand each of a tenant's documents from one source to `f`, as `(host_id, json)`, at
+    /// most `limit` of them, in host id order. Returns how many were read.
+    ///
+    /// Streamed: each row is dropped once `f` returns, so reading the whole fleet holds one
+    /// document at a time rather than all of them — a tenant's inventories together can
+    /// run to gigabytes.
+    pub async fn for_each_document(
         &self,
         tenant_id: i64,
         source: &str,
         limit: i64,
-    ) -> Result<Vec<(String, String)>> {
-        let rows = sqlx::query(
+        mut f: impl FnMut(&str, &str),
+    ) -> Result<usize> {
+        use futures_util::TryStreamExt;
+        let mut rows = sqlx::query(
             "SELECT host_id, facts_json FROM host_facts WHERE tenant_id = ? AND source = ?
               ORDER BY host_id LIMIT ?",
         )
         .bind(tenant_id)
         .bind(source)
         .bind(limit)
-        .fetch_all(&self.db.read)
-        .await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| (r.get("host_id"), r.get("facts_json")))
-            .collect())
+        .fetch(&self.db.read);
+        let mut n = 0;
+        while let Some(row) = rows.try_next().await? {
+            f(row.get("host_id"), row.get("facts_json"));
+            n += 1;
+        }
+        Ok(n)
     }
 
     /// The sources any host in the tenant holds a document from, sorted.

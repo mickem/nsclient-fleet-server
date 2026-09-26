@@ -677,6 +677,36 @@ async fn the_catalog_lists_what_the_fleet_reports() {
 }
 
 #[tokio::test]
+async fn the_catalog_forgets_a_deleted_host_at_once() {
+    let (s, agent, host_id) = setup().await;
+    agent
+        .upload_facts(facts_upload_body(OS_DOC, "t"))
+        .await
+        .unwrap();
+    let hosts = || async {
+        let c: serde_json::Value = s
+            .cookie_jar
+            .get(format!("{}/api/facts/catalog", s.base_url))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        c["sources"][0]["hosts"].as_i64().unwrap()
+    };
+    assert_eq!(hosts().await, 1, "and now cached");
+    let r = s
+        .cookie_jar
+        .delete(format!("{}/api/hosts/{host_id}", s.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success());
+    assert_eq!(hosts().await, 0, "not served from the cache");
+}
+
+#[tokio::test]
 async fn deleting_a_host_deletes_its_facts() {
     let (s, agent, host_id) = setup().await;
     agent

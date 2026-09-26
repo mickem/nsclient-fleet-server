@@ -157,11 +157,14 @@ impl DesiredStateCache {
             map.retain(|_, e| e.last_used.load(Ordering::Relaxed) >= cutoff);
             if map.len() >= MAX_ENTRIES {
                 // Nothing was idle. Rather than grow without bound, start over and pay the
-                // recompute; this should never happen on a single-VM fleet. Every tombstone
-                // goes with it, so the epoch moves: a compute already in flight could
-                // otherwise find its host's generation reset and store what it read before
-                // an invalidation.
+                // recompute; this should never happen on a single-VM fleet.
                 map.clear();
+            }
+            // Whatever went took its generation with it: a later invalidation of that host
+            // would start again from 1 and could match a ticket taken before the sweep, and
+            // the stale state that compute read would be stored. Moving the epoch voids every
+            // ticket in flight instead, which costs at most one recompute each.
+            if map.len() < before {
                 self.epoch.fetch_add(1, Ordering::Relaxed);
             }
             tracing::info!(
@@ -482,6 +485,30 @@ mod tests {
     fn an_invalidation_of_an_uncached_host_still_stops_a_compute_in_flight() {
         let c = DesiredStateCache::new();
         let ticket = c.ticket(1, "host-a");
+        c.invalidate_host(1, "host-a");
+        assert!(!c.put_if_current(1, "host-a", ticket, 1, &ds("stale")));
+    }
+
+    #[test]
+    fn a_sweep_that_drops_a_tombstone_voids_tickets_taken_before_it() {
+        let c = DesiredStateCache::new();
+        // host-a was invalidated long ago (generation 1), and a compute for it is running.
+        c.invalidate_host(1, "host-a");
+        let ticket = c.ticket(1, "host-a");
+        c.entries.read().unwrap()[&(1, "host-a".to_string())]
+            .last_used
+            .store(now_unix() - IDLE_TTL_SECS - 1, Ordering::Relaxed);
+        // The map fills up; the next store sweeps, and the idle tombstone goes.
+        for i in 0..MAX_ENTRIES {
+            c.put(1, &format!("filler-{i}"), 1, &ds("x"));
+        }
+        assert!(!c
+            .entries
+            .read()
+            .unwrap()
+            .contains_key(&(1, "host-a".to_string())));
+        // A new invalidation starts host-a from generation 1 again — the ticket's own —
+        // but the sweep moved the epoch, so the stale compute is still refused.
         c.invalidate_host(1, "host-a");
         assert!(!c.put_if_current(1, "host-a", ticket, 1, &ds("stale")));
     }
