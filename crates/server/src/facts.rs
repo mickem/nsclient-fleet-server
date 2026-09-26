@@ -26,9 +26,11 @@ use axum::{
 use fleet_core::facts::{
     self, FactChange, AGENT_SOURCE, EMPTY_FACTS_HASH, FACTS_HASH_HEADER, FACTS_HASH_NONE,
 };
+use fleet_core::selector::{scalar_text, HostFacts, MAX_FACT_PATH_LEN, MAX_VALUE_LEN};
 use fleet_storage::{FactsHashes, HostFactsRepo, HostRepo, ReplaceOutcome};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::auth::AuthedUser;
 use crate::mtls::PeerHostContext;
@@ -225,11 +227,71 @@ async fn store(
                 KEEP_HISTORY,
             )
             .await?;
+        if outcome == ReplaceOutcome::Stored {
+            // Group selectors can read facts, so a new document can move this host in or
+            // out of a group. Its own cached state only — the same scope as a change to its
+            // reported tags, and for the same reason: nobody else's membership moved.
+            // Any future writer of another source must do the same.
+            state
+                .desired_state_cache
+                .invalidate_host(tenant_id, host_id);
+        }
         if outcome != ReplaceOutcome::Conflict {
             return Ok(outcome);
         }
     }
     Ok(ReplaceOutcome::Conflict)
+}
+
+/// A host's documents from `sources`, parsed, for selector evaluation.
+///
+/// Only the sources asked for: a tags-only selector asks for none and costs nothing. A
+/// stored document that no longer parses is left out, so fact leaves on it read false
+/// rather than failing the whole evaluation.
+pub async fn load_for_host(
+    state: &AppState,
+    tenant_id: i64,
+    host_id: &str,
+    sources: &BTreeSet<String>,
+) -> anyhow::Result<HostFacts> {
+    let repo = HostFactsRepo::new(&state.db);
+    let mut out = HostFacts::new();
+    for source in sources {
+        if let Some(stored) = repo.get(tenant_id, host_id, source).await? {
+            if let Some(doc) = parse_stored(host_id, source, &stored.facts_json) {
+                out.insert(source.clone(), doc);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Every host's documents from `sources` in a tenant, keyed by host id.
+pub async fn load_for_tenant(
+    state: &AppState,
+    tenant_id: i64,
+    sources: &BTreeSet<String>,
+) -> anyhow::Result<HashMap<String, HostFacts>> {
+    let repo = HostFactsRepo::new(&state.db);
+    let mut out: HashMap<String, HostFacts> = HashMap::new();
+    for source in sources {
+        for (host_id, json) in repo.list_documents(tenant_id, source).await? {
+            if let Some(doc) = parse_stored(&host_id, source, &json) {
+                out.entry(host_id).or_default().insert(source.clone(), doc);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn parse_stored(host_id: &str, source: &str, json: &str) -> Option<Value> {
+    match serde_json::from_str(json) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::warn!(%host_id, %source, error = %e, "stored facts document does not parse");
+            None
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -396,9 +458,292 @@ pub async fn host_facts(
     Json(view).into_response()
 }
 
+// ---- Catalog: what the fleet's facts look like, for the selector editor -------------------
+
+/// Paths listed per source. A path is listed once however many hosts have it, and records
+/// in a list share their paths, so a real inventory has a few hundred; this bounds a
+/// pathological one.
+const MAX_CATALOG_PATHS: usize = 2_000;
+/// Distinct values counted per path. Past this, new values are not counted, so a path with
+/// a unique value per host (a serial number) does not grow without bound.
+const MAX_DISTINCT_VALUES: usize = 500;
+/// Values returned per path, most common first.
+const MAX_VALUES_SHOWN: usize = 50;
+/// Deepest path walked.
+const MAX_CATALOG_DEPTH: usize = 16;
+
+/// What sits at a path — which decides the tests that make sense on it.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PathKind {
+    /// A string, number or boolean: `eq` / `in`.
+    Scalar,
+    /// A list: `has` a scalar element or a record id.
+    List,
+    /// A map: `has` a key, or step into it.
+    Map,
+}
+
+#[derive(Serialize)]
+pub struct CatalogPath {
+    /// In [`fleet_core::selector::FactPath`] form, with lists fanned out (no `[id]`).
+    pub path: String,
+    pub kind: PathKind,
+    /// Hosts whose document has this path.
+    pub hosts: usize,
+    /// What a test on this path compares against — scalar values, or for a list its
+    /// elements and record ids — with the number of hosts reporting each.
+    pub values: Vec<(String, usize)>,
+}
+
+#[derive(Serialize)]
+pub struct CatalogSource {
+    pub source: String,
+    /// Hosts holding a document from this source.
+    pub hosts: usize,
+    pub paths: Vec<CatalogPath>,
+    /// True when [`MAX_CATALOG_PATHS`] cut the list short.
+    pub truncated: bool,
+}
+
+#[derive(Serialize)]
+pub struct FactsCatalog {
+    pub sources: Vec<CatalogSource>,
+}
+
+struct PathAcc {
+    kind: PathKind,
+    hosts: usize,
+    values: HashMap<String, usize>,
+}
+
+#[derive(Default)]
+struct CatalogAcc {
+    paths: BTreeMap<String, PathAcc>,
+    truncated: bool,
+}
+
+impl CatalogAcc {
+    fn add_document(&mut self, doc: &Value) {
+        // Per host first, so a host with the same path in forty records counts once.
+        let mut local: BTreeMap<String, (PathKind, BTreeSet<String>)> = BTreeMap::new();
+        if let Value::Object(m) = doc {
+            walk_children(m, "", 0, &mut local);
+        }
+        for (path, (kind, values)) in local {
+            if !self.paths.contains_key(&path) && self.paths.len() >= MAX_CATALOG_PATHS {
+                self.truncated = true;
+                continue;
+            }
+            let acc = self.paths.entry(path).or_insert_with(|| PathAcc {
+                kind,
+                hosts: 0,
+                values: HashMap::new(),
+            });
+            acc.hosts += 1;
+            for v in values {
+                let room = acc.values.len() < MAX_DISTINCT_VALUES;
+                if let Some(n) = acc.values.get_mut(&v) {
+                    *n += 1;
+                } else if room {
+                    acc.values.insert(v, 1);
+                }
+            }
+        }
+    }
+
+    fn finish(self, source: String, hosts: usize) -> CatalogSource {
+        let paths = self
+            .paths
+            .into_iter()
+            .map(|(path, acc)| {
+                let mut values: Vec<(String, usize)> = acc.values.into_iter().collect();
+                values.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                values.truncate(MAX_VALUES_SHOWN);
+                CatalogPath {
+                    path,
+                    kind: acc.kind,
+                    hosts: acc.hosts,
+                    values,
+                }
+            })
+            .collect();
+        CatalogSource {
+            source,
+            hosts,
+            paths,
+            truncated: self.truncated,
+        }
+    }
+}
+
+type LocalPaths = BTreeMap<String, (PathKind, BTreeSet<String>)>;
+
+/// Record one path's kind, and a value under it when it is short enough to compare.
+fn note(local: &mut LocalPaths, path: &str, kind: PathKind, value: Option<String>) {
+    let entry = local
+        .entry(path.to_owned())
+        .or_insert_with(|| (kind, BTreeSet::new()));
+    if let Some(v) = value.filter(|v| v.len() <= MAX_VALUE_LEN) {
+        entry.1.insert(v);
+    }
+}
+
+fn walk_children(
+    m: &serde_json::Map<String, Value>,
+    path: &str,
+    depth: usize,
+    local: &mut LocalPaths,
+) {
+    if depth >= MAX_CATALOG_DEPTH {
+        return;
+    }
+    for (k, v) in m {
+        // A key the dotted form cannot spell is reached with brackets — which need a key
+        // before them, so such a key at the top level cannot be selected on at all.
+        let child = if k.contains(['.', '[', ']']) {
+            if path.is_empty() || k.contains([']']) {
+                continue;
+            }
+            format!("{path}[{k}]")
+        } else if path.is_empty() {
+            k.clone()
+        } else {
+            format!("{path}.{k}")
+        };
+        if child.len() > MAX_FACT_PATH_LEN {
+            continue;
+        }
+        walk(v, &child, depth + 1, local);
+    }
+}
+
+fn walk(v: &Value, path: &str, depth: usize, local: &mut LocalPaths) {
+    match v {
+        Value::Null => {}
+        Value::Object(m) => {
+            // Its keys are what `has` compares against on a map.
+            note(local, path, PathKind::Map, None);
+            m.keys()
+                .for_each(|k| note(local, path, PathKind::Map, Some(k.clone())));
+            walk_children(m, path, depth, local);
+        }
+        Value::Array(items) => {
+            note(local, path, PathKind::List, None);
+            for item in items {
+                match item {
+                    // A record: offer its id to `has`, and fan out into its fields.
+                    Value::Object(record) => {
+                        let id = record.get("id").and_then(Value::as_str).map(str::to_owned);
+                        note(local, path, PathKind::List, id);
+                        walk_children(record, path, depth, local);
+                    }
+                    other => note(local, path, PathKind::List, scalar_text(other)),
+                }
+            }
+        }
+        scalar => note(local, path, PathKind::Scalar, scalar_text(scalar)),
+    }
+}
+
+/// `GET /api/facts/catalog`: the paths the fleet's facts documents have, per source, and the
+/// values seen at them. Backs the path and value pickers of the selector editor, the way the
+/// host list's tags back the tag pickers.
+///
+/// Reads every document in the tenant, so it is for opening an editor, not for a poll path.
+pub async fn catalog(State(state): State<AppState>, who: AuthedUser) -> Response {
+    let repo = HostFactsRepo::new(&state.db);
+    let built = async {
+        let mut sources: BTreeSet<String> = repo
+            .list_sources(who.tenant_id)
+            .await?
+            .into_iter()
+            .collect();
+        // Always offered, so a group can be written before the first host uploads.
+        sources.insert(AGENT_SOURCE.to_owned());
+        let mut out = Vec::new();
+        for source in sources {
+            let docs = repo.list_documents(who.tenant_id, &source).await?;
+            let mut acc = CatalogAcc::default();
+            let mut hosts = HashSet::new();
+            for (host_id, json) in &docs {
+                if let Some(doc) = parse_stored(host_id, &source, json) {
+                    acc.add_document(&doc);
+                    hosts.insert(host_id.as_str());
+                }
+            }
+            let n = hosts.len();
+            out.push(acc.finish(source, n));
+        }
+        anyhow::Ok(FactsCatalog { sources: out })
+    }
+    .await;
+    match built {
+        Ok(c) => Json(c).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "facts catalog failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn catalog_of(docs: &[Value]) -> CatalogSource {
+        let mut acc = CatalogAcc::default();
+        docs.iter().for_each(|d| acc.add_document(d));
+        acc.finish(AGENT_SOURCE.into(), docs.len())
+    }
+
+    fn path<'a>(c: &'a CatalogSource, p: &str) -> &'a CatalogPath {
+        c.paths
+            .iter()
+            .find(|x| x.path == p)
+            .unwrap_or_else(|| panic!("no {p}"))
+    }
+
+    #[test]
+    fn the_catalog_lists_paths_kinds_and_values_per_host() {
+        let a = serde_json::json!({
+            "os": {"family": "linux"},
+            "software": {"installed": [{"id": "bash", "version": "5.2"}, {"id": "vim", "version": "9.0"}]},
+            "services": {"sshd": {"state": "running"}, "a.b": {"state": "x"}},
+        });
+        let b = serde_json::json!({
+            "os": {"family": "windows"},
+            "software": {"installed": [{"id": "bash", "version": "5.1"}]},
+            "net": {"addresses": ["10.0.0.1"]},
+        });
+        let c = catalog_of(&[a, b]);
+
+        let fam = path(&c, "os.family");
+        assert_eq!(fam.kind, PathKind::Scalar);
+        assert_eq!(fam.hosts, 2);
+        assert_eq!(
+            fam.values,
+            vec![("linux".to_owned(), 1), ("windows".to_owned(), 1)]
+        );
+
+        let installed = path(&c, "software.installed");
+        assert_eq!(installed.kind, PathKind::List);
+        // Record ids are what `has` compares against; bash is on both hosts.
+        assert_eq!(installed.values[0], ("bash".to_owned(), 2));
+        // Records fan out, and a host counts once however many records have the path.
+        assert_eq!(path(&c, "software.installed.version").hosts, 2);
+        assert_eq!(path(&c, "services").kind, PathKind::Map);
+        assert!(path(&c, "services")
+            .values
+            .contains(&("sshd".to_owned(), 1)));
+        assert_eq!(path(&c, "services.sshd.state").values[0].0, "running");
+        assert_eq!(path(&c, "services[a.b].state").hosts, 1);
+        assert_eq!(
+            path(&c, "net.addresses").values,
+            vec![("10.0.0.1".to_owned(), 1)]
+        );
+        assert!(!c.truncated);
+    }
 
     fn h(held: Option<&str>, reported: Option<&str>) -> FactsHashes {
         FactsHashes {

@@ -23,13 +23,26 @@
 //! doing so states that hosts may place themselves in that group. Because `Manual` is the
 //! serde default, every selector written before this change now means operator-set-only,
 //! which is the safe reading of what it already said.
+//!
+//! v1.3 adds the `fact` leaf, which reads a host's facts documents (see [`crate::facts`])
+//! instead of its tags. Tags are flat `key = value`; a facts document is a tree with lists
+//! of records in it, so the leaf addresses a value by [`FactPath`] and has a `has` test for
+//! what a list or map contains. Which document it reads is named, not filtered: `agent` is
+//! the one the host uploads about itself and is host-controlled exactly like an agent tag,
+//! while an imported source is not the host's to write.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde_json::Value;
+use std::collections::{BTreeSet, HashMap};
+
+use crate::facts::{valid_source, AGENT_SOURCE};
 
 const MAX_NODES: usize = 64;
 const MAX_DEPTH: usize = 8;
 const MAX_IN_VALUES: usize = 64;
+
+/// Longest fact path a selector will store. Paths nest, so this is a few keys' worth.
+pub const MAX_FACT_PATH_LEN: usize = 512;
 
 /// Longest tag key a selector will compare, and therefore the longest one worth storing.
 /// Public so the tag write paths enforce the same bound: a key longer than this can never
@@ -133,9 +146,45 @@ impl TagValue {
 /// what made an agent's claim indistinguishable from an operator's.
 pub type HostTags = HashMap<String, Vec<TagValue>>;
 
+/// A host's facts documents, keyed by source (`agent`, `import:cmdb`, ...). A source the
+/// host has no document from is simply absent, and every `fact` leaf on it is false.
+pub type HostFacts = HashMap<String, Value>;
+
+fn agent_facts() -> String {
+    AGENT_SOURCE.to_owned()
+}
+
+/// What a `fact` leaf checks at the values its path resolves to. A leaf matches when *any*
+/// resolved value passes, the same reading as a tag key with several values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "test", rename_all = "lowercase")]
+pub enum FactTest {
+    /// The path resolves to something other than null.
+    Exists,
+    /// A scalar at the path equals `value`. Numbers and booleans compare by their JSON
+    /// spelling (`16`, `true`), so a selector never has to know a fact's type.
+    Eq { value: String },
+    /// A scalar at the path is one of `values`.
+    In { values: Vec<String> },
+    /// A list at the path contains `value` — as a scalar element, or as the `id` of a
+    /// record — or a map at the path has `value` as a key. The question a list of installed
+    /// packages or running services is asked.
+    Has { value: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum Expr {
+    /// A test on a host's facts document rather than its tags.
+    Fact {
+        /// The document read: [`AGENT_SOURCE`] (the default) or an imported source.
+        #[serde(default = "agent_facts")]
+        facts: String,
+        /// A [`FactPath`], e.g. `os.family` or `software.installed[bash].version`.
+        path: String,
+        #[serde(flatten)]
+        test: FactTest,
+    },
     Eq {
         key: String,
         value: String,
@@ -190,6 +239,10 @@ pub enum SelectorError {
     EmptyKey,
     #[error("empty compound (and/or with no children)")]
     EmptyCompound,
+    #[error("unknown facts source {0:?}")]
+    BadFactsSource(String),
+    #[error("bad fact path: {0}")]
+    BadFactPath(&'static str),
     #[error("invalid JSON: {0}")]
     Json(String),
 }
@@ -214,14 +267,37 @@ impl Selector {
         serde_json::to_value(self).expect("selector to_value")
     }
 
-    /// A leaf matches if at least one value under its key both satisfies the comparison and
-    /// comes from a source the leaf accepts.
-    pub fn matches(&self, tags: &HostTags) -> bool {
+    /// A tag leaf matches if at least one value under its key both satisfies the comparison
+    /// and comes from a source the leaf accepts; a fact leaf, if at least one value its path
+    /// resolves to in that source's document passes its test.
+    ///
+    /// `facts` only needs the sources [`Selector::fact_sources`] names; callers load just
+    /// those, since a document can be a megabyte.
+    pub fn matches(&self, tags: &HostTags, facts: &HostFacts) -> bool {
         // Empty selector matches everything (v1 convention; documented).
         if self.clauses.is_empty() {
             return true;
         }
-        self.clauses.iter().all(|c| eval(c, tags))
+        let host = Host { tags, facts };
+        self.clauses.iter().all(|c| eval(c, &host))
+    }
+
+    /// The facts sources this selector reads. Empty for a tags-only selector, which is what
+    /// lets the evaluation paths skip loading documents entirely.
+    pub fn fact_sources(&self) -> BTreeSet<String> {
+        fn walk(e: &Expr, out: &mut BTreeSet<String>) {
+            match e {
+                Expr::Fact { facts, .. } => {
+                    out.insert(facts.clone());
+                }
+                Expr::Not { expr } => walk(expr, out),
+                Expr::And { exprs } | Expr::Or { exprs } => exprs.iter().for_each(|c| walk(c, out)),
+                Expr::Eq { .. } | Expr::In { .. } | Expr::Exists { .. } => {}
+            }
+        }
+        let mut out = BTreeSet::new();
+        self.clauses.iter().for_each(|c| walk(c, &mut out));
+        out
     }
 
     /// True when some leaf accepts agent-reported values — that is, when a host can decide
@@ -237,6 +313,9 @@ fn expr_is_host_controlled(e: &Expr) -> bool {
         Expr::Eq { source, .. } | Expr::In { source, .. } | Expr::Exists { source, .. } => {
             source.is_host_controlled()
         }
+        // The agent's document is written by the host, so it is as much the host's claim as
+        // an agent tag. Other sources are imported by the operator's side.
+        Expr::Fact { facts, .. } => facts == AGENT_SOURCE,
         Expr::Not { expr } => expr_is_host_controlled(expr),
         Expr::And { exprs } | Expr::Or { exprs } => exprs.iter().any(expr_is_host_controlled),
     }
@@ -269,6 +348,31 @@ fn validate_expr(e: &Expr, depth: usize, nodes: &mut usize) -> Result<(), Select
             }
         }
         Expr::Exists { key, .. } => check_key(key)?,
+        Expr::Fact { facts, path, test } => {
+            if !valid_source(facts) {
+                return Err(SelectorError::BadFactsSource(facts.clone()));
+            }
+            if path.len() > MAX_FACT_PATH_LEN {
+                return Err(SelectorError::BadFactPath("too long"));
+            }
+            FactPath::parse(path).map_err(SelectorError::BadFactPath)?;
+            match test {
+                FactTest::Exists => {}
+                FactTest::Eq { value } | FactTest::Has { value } => {
+                    if value.len() > MAX_VALUE_LEN {
+                        return Err(SelectorError::ValueTooLong);
+                    }
+                }
+                FactTest::In { values } => {
+                    if values.len() > MAX_IN_VALUES {
+                        return Err(SelectorError::TooManyInValues);
+                    }
+                    if values.iter().any(|v| v.len() > MAX_VALUE_LEN) {
+                        return Err(SelectorError::ValueTooLong);
+                    }
+                }
+            }
+        }
         Expr::Not { expr } => validate_expr(expr, depth + 1, nodes)?,
         Expr::And { exprs } | Expr::Or { exprs } => {
             if exprs.is_empty() {
@@ -282,7 +386,14 @@ fn validate_expr(e: &Expr, depth: usize, nodes: &mut usize) -> Result<(), Select
     Ok(())
 }
 
-fn eval(e: &Expr, tags: &HostTags) -> bool {
+/// Everything a selector is evaluated against.
+struct Host<'a> {
+    tags: &'a HostTags,
+    facts: &'a HostFacts,
+}
+
+fn eval(e: &Expr, host: &Host<'_>) -> bool {
+    let tags = host.tags;
     match e {
         Expr::Eq { key, value, source } => matching(tags, key, *source).any(|t| &t.value == value),
         Expr::In {
@@ -291,9 +402,139 @@ fn eval(e: &Expr, tags: &HostTags) -> bool {
             source,
         } => matching(tags, key, *source).any(|t| values.iter().any(|allowed| allowed == &t.value)),
         Expr::Exists { key, source } => matching(tags, key, *source).next().is_some(),
-        Expr::Not { expr } => !eval(expr, tags),
-        Expr::And { exprs } => exprs.iter().all(|c| eval(c, tags)),
-        Expr::Or { exprs } => exprs.iter().any(|c| eval(c, tags)),
+        Expr::Fact { facts, path, test } => {
+            let (Some(doc), Ok(path)) = (host.facts.get(facts), FactPath::parse(path)) else {
+                return false;
+            };
+            path.resolve(doc).into_iter().any(|v| fact_test(test, v))
+        }
+        Expr::Not { expr } => !eval(expr, host),
+        Expr::And { exprs } => exprs.iter().all(|c| eval(c, host)),
+        Expr::Or { exprs } => exprs.iter().any(|c| eval(c, host)),
+    }
+}
+
+fn fact_test(test: &FactTest, v: &Value) -> bool {
+    match test {
+        FactTest::Exists => !v.is_null(),
+        FactTest::Eq { value } => scalar_text(v).is_some_and(|s| s == *value),
+        FactTest::In { values } => scalar_text(v).is_some_and(|s| values.contains(&s)),
+        FactTest::Has { value } => match v {
+            Value::Array(items) => items.iter().any(|item| match item {
+                Value::Object(record) => record.get("id").and_then(Value::as_str) == Some(value),
+                other => scalar_text(other).is_some_and(|s| s == *value),
+            }),
+            Value::Object(map) => map.contains_key(value),
+            _ => false,
+        },
+    }
+}
+
+/// A scalar as the text a selector compares it to. `None` for null, a list or a map: those
+/// are what `exists` and `has` are for, and equality with a string would be a guess.
+pub fn scalar_text(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Null | Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
+/// A dotted path into a facts document: `os.family`, `software.installed[bash].version`.
+///
+/// Each segment is a key, optionally followed by `[id]`. The grammar is the one the facts
+/// history already prints (see [`crate::facts::diff`]), so a path copied from a change
+/// works as a selector:
+///
+/// * A key steps into a map. Stepping into a *list* steps into every record in it, so
+///   `network.interfaces.addresses` is every interface's addresses, and a test on it passes
+///   if any of them does.
+/// * `[id]` picks one record out of a list by its `id` — or one entry out of a map by its
+///   key, which is also how a key containing a dot is reached. Picking the record first is
+///   what ties two conditions to the same record: `software.installed[bash].version`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactPath {
+    segments: Vec<Segment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Segment {
+    key: String,
+    ids: Vec<String>,
+}
+
+impl FactPath {
+    pub fn parse(path: &str) -> Result<Self, &'static str> {
+        if path.is_empty() {
+            return Err("empty");
+        }
+        let mut segments = Vec::new();
+        let mut rest = path;
+        loop {
+            let end = rest.find(['.', '[', ']']).unwrap_or(rest.len());
+            let key = &rest[..end];
+            if key.is_empty() {
+                return Err("empty key");
+            }
+            rest = &rest[end..];
+            let mut ids = Vec::new();
+            while let Some(after) = rest.strip_prefix('[') {
+                let close = after.find(']').ok_or("unclosed [")?;
+                let id = &after[..close];
+                if id.is_empty() {
+                    return Err("empty [id]");
+                }
+                ids.push(id.to_owned());
+                rest = &after[close + 1..];
+            }
+            segments.push(Segment {
+                key: key.to_owned(),
+                ids,
+            });
+            match rest.strip_prefix('.') {
+                Some(r) => rest = r,
+                None if rest.is_empty() => break,
+                None => return Err("expected . after ]"),
+            }
+        }
+        Ok(Self { segments })
+    }
+
+    /// Every value this path reaches in `doc`.
+    pub fn resolve<'a>(&self, doc: &'a Value) -> Vec<&'a Value> {
+        let mut current = vec![doc];
+        for seg in &self.segments {
+            let mut next = Vec::new();
+            for v in current {
+                match v {
+                    Value::Object(m) => next.extend(m.get(&seg.key)),
+                    Value::Array(items) => next.extend(
+                        items
+                            .iter()
+                            .filter_map(|i| i.as_object().and_then(|m| m.get(&seg.key))),
+                    ),
+                    _ => {}
+                }
+            }
+            for id in &seg.ids {
+                next = next.into_iter().flat_map(|v| pick(v, id)).collect();
+            }
+            current = next;
+        }
+        current
+    }
+}
+
+/// `[id]` applied to one value: the matching record of a list, or the entry of a map.
+fn pick<'a>(v: &'a Value, id: &str) -> Vec<&'a Value> {
+    match v {
+        Value::Array(items) => items
+            .iter()
+            .filter(|i| i.get("id").and_then(Value::as_str) == Some(id))
+            .collect(),
+        Value::Object(m) => m.get(id).into_iter().collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -323,6 +564,293 @@ fn check_key(key: &str) -> Result<(), SelectorError> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Most of these tests are about tags; they evaluate against a host with no facts.
+    trait TagsOnly {
+        fn matches_tags(&self, tags: &HostTags) -> bool;
+    }
+
+    impl TagsOnly for Selector {
+        fn matches_tags(&self, tags: &HostTags) -> bool {
+            self.matches(tags, &HostFacts::new())
+        }
+    }
+
+    /// A host with no tags and `doc` as its agent document.
+    fn agent_doc(s: &Selector, doc: Value) -> bool {
+        let facts = HostFacts::from([(AGENT_SOURCE.to_owned(), doc)]);
+        s.matches(&HostTags::new(), &facts)
+    }
+
+    fn fact(path: &str, test: FactTest) -> Selector {
+        Selector {
+            clauses: vec![Expr::Fact {
+                facts: AGENT_SOURCE.into(),
+                path: path.into(),
+                test,
+            }],
+        }
+    }
+
+    fn fact_eq(path: &str, value: &str) -> Selector {
+        fact(
+            path,
+            FactTest::Eq {
+                value: value.into(),
+            },
+        )
+    }
+
+    fn fact_has(path: &str, value: &str) -> Selector {
+        fact(
+            path,
+            FactTest::Has {
+                value: value.into(),
+            },
+        )
+    }
+
+    fn inventory() -> Value {
+        json!({
+            "os": {"family": "windows", "version": "2019", "server": true},
+            "hardware": {"memory_gb": 16, "cpu_cores": 4},
+            "software": {"installed": [
+                {"id": "sqlserver", "version": "15.0"},
+                {"id": "bash", "version": "5.2"},
+            ]},
+            "network": {"interfaces": [
+                {"id": "eth0", "addresses": ["10.0.0.5", "fe80::1"]},
+                {"id": "eth1", "addresses": ["192.168.1.9"]},
+            ]},
+            "services": {"MSSQLSERVER": {"state": "running"}, "w3svc.x": {"state": "stopped"}},
+        })
+    }
+
+    // ---- fact leaves ---------------------------------------------------------------
+
+    #[test]
+    fn fact_eq_reads_a_nested_scalar() {
+        assert!(agent_doc(&fact_eq("os.family", "windows"), inventory()));
+        assert!(!agent_doc(&fact_eq("os.family", "linux"), inventory()));
+        assert!(!agent_doc(&fact_eq("os.missing", "windows"), inventory()));
+    }
+
+    #[test]
+    fn numbers_and_booleans_compare_by_their_json_spelling() {
+        assert!(agent_doc(&fact_eq("hardware.memory_gb", "16"), inventory()));
+        assert!(agent_doc(&fact_eq("os.server", "true"), inventory()));
+    }
+
+    #[test]
+    fn eq_does_not_look_inside_a_list_or_map() {
+        // That is `has`: equality with a whole list would be a guess at what was meant.
+        assert!(!agent_doc(
+            &fact_eq("network.interfaces.addresses", "10.0.0.5"),
+            inventory()
+        ));
+        assert!(!agent_doc(&fact_eq("os", "windows"), inventory()));
+    }
+
+    #[test]
+    fn has_finds_a_record_by_id() {
+        assert!(agent_doc(
+            &fact_has("software.installed", "sqlserver"),
+            inventory()
+        ));
+        assert!(!agent_doc(
+            &fact_has("software.installed", "nginx"),
+            inventory()
+        ));
+    }
+
+    #[test]
+    fn has_finds_a_scalar_element_through_a_list_of_records() {
+        // Any interface: the path fans out over the list of interfaces.
+        assert!(agent_doc(
+            &fact_has("network.interfaces.addresses", "192.168.1.9"),
+            inventory()
+        ));
+        assert!(!agent_doc(
+            &fact_has("network.interfaces.addresses", "10.9.9.9"),
+            inventory()
+        ));
+    }
+
+    #[test]
+    fn has_on_a_map_is_a_key_lookup() {
+        assert!(agent_doc(&fact_has("services", "MSSQLSERVER"), inventory()));
+        assert!(!agent_doc(&fact_has("services", "nginx"), inventory()));
+    }
+
+    #[test]
+    fn fanning_out_over_records_matches_any_of_them() {
+        assert!(agent_doc(
+            &fact_eq("software.installed.version", "5.2"),
+            inventory()
+        ));
+    }
+
+    #[test]
+    fn an_id_ties_conditions_to_one_record() {
+        // bash is 5.2 and sqlserver is 15.0: fanned out, "installed has bash" and "some
+        // installed version is 15.0" are both true, but bash's own version is not 15.0.
+        assert!(agent_doc(
+            &fact_eq("software.installed[bash].version", "5.2"),
+            inventory()
+        ));
+        assert!(!agent_doc(
+            &fact_eq("software.installed[bash].version", "15.0"),
+            inventory()
+        ));
+    }
+
+    #[test]
+    fn brackets_reach_a_map_key_that_contains_a_dot() {
+        assert!(agent_doc(
+            &fact_eq("services[w3svc.x].state", "stopped"),
+            inventory()
+        ));
+    }
+
+    #[test]
+    fn fact_in_and_exists() {
+        let s = fact(
+            "os.version",
+            FactTest::In {
+                values: vec!["2016".into(), "2019".into()],
+            },
+        );
+        assert!(agent_doc(&s, inventory()));
+        assert!(agent_doc(
+            &fact("software.installed[bash]", FactTest::Exists),
+            inventory()
+        ));
+        assert!(!agent_doc(
+            &fact("software.installed[nginx]", FactTest::Exists),
+            inventory()
+        ));
+        assert!(!agent_doc(
+            &fact("os.family", FactTest::Exists),
+            json!({"os": {"family": null}})
+        ));
+    }
+
+    #[test]
+    fn a_host_without_the_document_matches_no_fact_leaf() {
+        let s = fact_eq("os.family", "windows");
+        assert!(!s.matches(&HostTags::new(), &HostFacts::new()));
+        // ...and NOT of one is true, as for a missing tag.
+        let not = Selector {
+            clauses: vec![Expr::Not {
+                expr: Box::new(s.clauses[0].clone()),
+            }],
+        };
+        assert!(not.matches(&HostTags::new(), &HostFacts::new()));
+    }
+
+    #[test]
+    fn a_leaf_reads_only_its_own_source() {
+        let s = Selector {
+            clauses: vec![Expr::Fact {
+                facts: "import:cmdb".into(),
+                path: "os.family".into(),
+                test: FactTest::Eq {
+                    value: "windows".into(),
+                },
+            }],
+        };
+        assert!(
+            !agent_doc(&s, inventory()),
+            "the agent's document is not the import's"
+        );
+        let facts = HostFacts::from([("import:cmdb".to_owned(), inventory())]);
+        assert!(s.matches(&HostTags::new(), &facts));
+    }
+
+    #[test]
+    fn agent_facts_are_host_controlled_and_imports_are_not() {
+        assert!(fact_eq("os.family", "windows").is_host_controlled());
+        let imported = Selector {
+            clauses: vec![Expr::Fact {
+                facts: "import:cmdb".into(),
+                path: "owner".into(),
+                test: FactTest::Exists,
+            }],
+        };
+        assert!(!imported.is_host_controlled());
+    }
+
+    #[test]
+    fn fact_sources_lists_what_to_load() {
+        let s = Selector {
+            clauses: vec![
+                eq("env", "prod"),
+                Expr::Not {
+                    expr: Box::new(fact_eq("os.family", "linux").clauses.remove(0)),
+                },
+            ],
+        };
+        assert_eq!(s.fact_sources(), BTreeSet::from([AGENT_SOURCE.to_owned()]));
+        assert!(Selector {
+            clauses: vec![eq("env", "prod")]
+        }
+        .fact_sources()
+        .is_empty());
+    }
+
+    #[test]
+    fn fact_json_shape() {
+        let raw = json!({"clauses": [
+            {"op": "fact", "path": "software.installed", "test": "has", "value": "bash"},
+            {"op": "fact", "facts": "import:cmdb", "path": "owner", "test": "exists"},
+            {"op": "fact", "path": "os.version", "test": "in", "values": ["2019", "2022"]},
+        ]});
+        let s = Selector::from_json(&raw).unwrap();
+        // `facts` defaults to the agent's document when omitted.
+        assert_eq!(
+            s.clauses[0],
+            Expr::Fact {
+                facts: AGENT_SOURCE.into(),
+                path: "software.installed".into(),
+                test: FactTest::Has {
+                    value: "bash".into()
+                },
+            }
+        );
+        assert_eq!(Selector::from_json(&s.to_json()).unwrap(), s);
+    }
+
+    #[test]
+    fn bad_fact_leaves_are_refused() {
+        for bad in [
+            json!({"op": "fact", "path": "", "test": "exists"}),
+            json!({"op": "fact", "path": "a..b", "test": "exists"}),
+            json!({"op": "fact", "path": "a[x", "test": "exists"}),
+            json!({"op": "fact", "path": "a[]", "test": "exists"}),
+            json!({"op": "fact", "path": "a[x]b", "test": "exists"}),
+            json!({"op": "fact", "path": "a", "test": "regex", "value": "x"}),
+            json!({"op": "fact", "path": "a", "test": "eq"}),
+            json!({"op": "fact", "facts": "Bad Source", "path": "a", "test": "exists"}),
+            json!({"op": "fact", "path": "a".repeat(MAX_FACT_PATH_LEN + 1), "test": "exists"}),
+        ] {
+            let s = json!({ "clauses": [bad.clone()] });
+            assert!(Selector::from_json(&s).is_err(), "{bad} must be refused");
+        }
+    }
+
+    #[test]
+    fn fact_paths_parse() {
+        for ok in [
+            "os",
+            "os.family",
+            "a[b]",
+            "a[b].c",
+            "a[b][c].d",
+            "s.installed[python3.11]",
+        ] {
+            assert!(FactPath::parse(ok).is_ok(), "{ok}");
+        }
+    }
 
     /// Operator-set tags, which is what most of these tests are about.
     fn tags(items: &[(&str, &[&str])]) -> HostTags {
@@ -374,8 +902,8 @@ mod tests {
     #[test]
     fn empty_selector_matches_everything() {
         let s = Selector { clauses: vec![] };
-        assert!(s.matches(&tags(&[])));
-        assert!(s.matches(&tags(&[("os", &["linux"])])));
+        assert!(s.matches_tags(&tags(&[])));
+        assert!(s.matches_tags(&tags(&[("os", &["linux"])])));
     }
 
     #[test]
@@ -383,8 +911,8 @@ mod tests {
         let s = Selector {
             clauses: vec![eq("os", "linux")],
         };
-        assert!(!s.matches(&tags(&[])));
-        assert!(!s.matches(&tags(&[("env", &["prod"])])));
+        assert!(!s.matches_tags(&tags(&[])));
+        assert!(!s.matches_tags(&tags(&[("env", &["prod"])])));
     }
 
     #[test]
@@ -393,7 +921,7 @@ mod tests {
             clauses: vec![eq("role", "sql_server")],
         };
         // Two operator-set values under one key disagree; one matches, so the leaf does.
-        assert!(s.matches(&tags(&[("role", &["app", "sql_server"])])));
+        assert!(s.matches_tags(&tags(&[("role", &["app", "sql_server"])])));
     }
 
     // ---- source filtering ---------------------------------------------------------
@@ -405,8 +933,8 @@ mod tests {
         let s = Selector {
             clauses: vec![eq("role", "sql_server")],
         };
-        assert!(!s.matches(&sourced(&[("role", &[("sql_server", TagSource::Agent)])])));
-        assert!(s.matches(&sourced(&[("role", &[("sql_server", TagSource::Manual)])])));
+        assert!(!s.matches_tags(&sourced(&[("role", &[("sql_server", TagSource::Agent)])])));
+        assert!(s.matches_tags(&sourced(&[("role", &[("sql_server", TagSource::Manual)])])));
     }
 
     #[test]
@@ -416,7 +944,7 @@ mod tests {
         let s = Selector {
             clauses: vec![eq("env", "prod")],
         };
-        assert!(!s.matches(&sourced(&[(
+        assert!(!s.matches_tags(&sourced(&[(
             "env",
             &[("dev", TagSource::Manual), ("prod", TagSource::Agent)]
         )])));
@@ -427,9 +955,9 @@ mod tests {
         let s = Selector {
             clauses: vec![eq_from("os", "windows", SourceFilter::Agent)],
         };
-        assert!(s.matches(&sourced(&[("os", &[("windows", TagSource::Agent)])])));
+        assert!(s.matches_tags(&sourced(&[("os", &[("windows", TagSource::Agent)])])));
         // ...and *only* those: an operator-set value is not what this leaf asked for.
-        assert!(!s.matches(&sourced(&[("os", &[("windows", TagSource::Manual)])])));
+        assert!(!s.matches_tags(&sourced(&[("os", &[("windows", TagSource::Manual)])])));
     }
 
     #[test]
@@ -437,8 +965,8 @@ mod tests {
         let s = Selector {
             clauses: vec![eq_from("os", "windows", SourceFilter::Any)],
         };
-        assert!(s.matches(&sourced(&[("os", &[("windows", TagSource::Agent)])])));
-        assert!(s.matches(&sourced(&[("os", &[("windows", TagSource::Manual)])])));
+        assert!(s.matches_tags(&sourced(&[("os", &[("windows", TagSource::Agent)])])));
+        assert!(s.matches_tags(&sourced(&[("os", &[("windows", TagSource::Manual)])])));
     }
 
     #[test]
@@ -484,8 +1012,8 @@ mod tests {
                 source: SourceFilter::Manual,
             }],
         };
-        assert!(!s.matches(&sourced(&[("sql_present", &[("true", TagSource::Agent)])])));
-        assert!(s.matches(&sourced(&[("sql_present", &[("true", TagSource::Manual)])])));
+        assert!(!s.matches_tags(&sourced(&[("sql_present", &[("true", TagSource::Agent)])])));
+        assert!(s.matches_tags(&sourced(&[("sql_present", &[("true", TagSource::Manual)])])));
     }
 
     #[test]
@@ -497,8 +1025,8 @@ mod tests {
                 source: SourceFilter::Manual,
             }],
         };
-        assert!(!s.matches(&sourced(&[("os", &[("linux", TagSource::Agent)])])));
-        assert!(s.matches(&sourced(&[("os", &[("linux", TagSource::Manual)])])));
+        assert!(!s.matches_tags(&sourced(&[("os", &[("linux", TagSource::Agent)])])));
+        assert!(s.matches_tags(&sourced(&[("os", &[("linux", TagSource::Manual)])])));
     }
 
     #[test]
@@ -510,9 +1038,9 @@ mod tests {
                 source: SourceFilter::Manual,
             }],
         };
-        assert!(s.matches(&tags(&[("os", &["linux"])])));
-        assert!(s.matches(&tags(&[("os", &["windows"])])));
-        assert!(!s.matches(&tags(&[("os", &["macos"])])));
+        assert!(s.matches_tags(&tags(&[("os", &["linux"])])));
+        assert!(s.matches_tags(&tags(&[("os", &["windows"])])));
+        assert!(!s.matches_tags(&tags(&[("os", &["macos"])])));
     }
 
     #[test]
@@ -520,9 +1048,9 @@ mod tests {
         let s = Selector {
             clauses: vec![eq("os", "windows"), eq("role", "sql_server")],
         };
-        assert!(s.matches(&tags(&[("os", &["windows"]), ("role", &["sql_server"]),])));
-        assert!(!s.matches(&tags(&[("os", &["windows"])])));
-        assert!(!s.matches(&tags(&[("role", &["sql_server"])])));
+        assert!(s.matches_tags(&tags(&[("os", &["windows"]), ("role", &["sql_server"]),])));
+        assert!(!s.matches_tags(&tags(&[("os", &["windows"])])));
+        assert!(!s.matches_tags(&tags(&[("role", &["sql_server"])])));
     }
 
     #[test]
@@ -533,9 +1061,9 @@ mod tests {
                 source: SourceFilter::Manual,
             }],
         };
-        assert!(s.matches(&tags(&[("env", &["prod"])])));
-        assert!(s.matches(&tags(&[("env", &["staging"])])));
-        assert!(!s.matches(&tags(&[("os", &["linux"])])));
+        assert!(s.matches_tags(&tags(&[("env", &["prod"])])));
+        assert!(s.matches_tags(&tags(&[("env", &["staging"])])));
+        assert!(!s.matches_tags(&tags(&[("os", &["linux"])])));
     }
 
     #[test]
@@ -545,10 +1073,10 @@ mod tests {
                 expr: Box::new(eq("env", "prod")),
             }],
         };
-        assert!(s.matches(&tags(&[("env", &["staging"])])));
-        assert!(!s.matches(&tags(&[("env", &["prod"])])));
+        assert!(s.matches_tags(&tags(&[("env", &["staging"])])));
+        assert!(!s.matches_tags(&tags(&[("env", &["prod"])])));
         // Missing tag: !false = true. Useful for "everything except prod".
-        assert!(s.matches(&tags(&[])));
+        assert!(s.matches_tags(&tags(&[])));
     }
 
     #[test]
@@ -558,9 +1086,9 @@ mod tests {
                 exprs: vec![eq("role", "sql_server"), eq("role", "sql_cluster")],
             }],
         };
-        assert!(s.matches(&tags(&[("role", &["sql_server"])])));
-        assert!(s.matches(&tags(&[("role", &["sql_cluster"])])));
-        assert!(!s.matches(&tags(&[("role", &["web"])])));
+        assert!(s.matches_tags(&tags(&[("role", &["sql_server"])])));
+        assert!(s.matches_tags(&tags(&[("role", &["sql_cluster"])])));
+        assert!(!s.matches_tags(&tags(&[("role", &["web"])])));
     }
 
     #[test]
@@ -579,12 +1107,12 @@ mod tests {
                 },
             ],
         };
-        assert!(s.matches(&tags(&[
+        assert!(s.matches_tags(&tags(&[
             ("os", &["windows"]),
             ("role", &["sql_server"]),
             ("env", &["prod"])
         ])));
-        assert!(!s.matches(&tags(&[
+        assert!(!s.matches_tags(&tags(&[
             ("os", &["windows"]),
             ("role", &["sql_server"]),
             ("env", &["dev"])

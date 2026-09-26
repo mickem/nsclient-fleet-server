@@ -395,6 +395,172 @@ async fn another_source_is_kept_apart_from_the_agents_document() {
     assert_eq!(n, 2);
 }
 
+/// A group reading the agent's facts, with a bundle assigned. Returns the group id.
+async fn fact_group_with_a_bundle(s: &TestServer, clause: serde_json::Value) -> String {
+    let g = s
+        .cookie_jar
+        .post(format!("{}/api/groups", s.base_url))
+        .json(&serde_json::json!({ "name": "sql-hosts", "selector": { "clauses": [clause] } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(g.status(), 201);
+    let group_id = g.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let form = reqwest::multipart::Form::new()
+        .text("name", "sql-checks")
+        .text("version", "1.0.0")
+        .part(
+            "bundle",
+            reqwest::multipart::Part::bytes(b"sql-bundle".to_vec())
+                .file_name("bundle.zip")
+                .mime_str("application/zip")
+                .unwrap(),
+        );
+    let b = s
+        .cookie_jar
+        .post(format!("{}/api/bundles", s.base_url))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(b.status(), 200);
+    let bundle_id = b.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let a = s
+        .cookie_jar
+        .post(format!("{}/api/groups/{group_id}/bundles", s.base_url))
+        .json(&serde_json::json!({ "bundle_id": bundle_id, "priority": 10 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(a.status(), 204);
+    group_id
+}
+
+async fn bundles_served(
+    s: &TestServer,
+    agent: &fleet_agent_sim::EnrolledAgent,
+    host_id: &str,
+) -> usize {
+    s.agent_limits.forget_last_poll(host_id);
+    agent
+        .fetch_desired_state(None)
+        .await
+        .unwrap()
+        .unwrap()
+        .bundles
+        .len()
+}
+
+async fn preview(s: &TestServer, clause: serde_json::Value) -> Vec<serde_json::Value> {
+    let r = s
+        .cookie_jar
+        .post(format!("{}/api/groups/preview", s.base_url))
+        .json(&serde_json::json!({ "selector": { "clauses": [clause] } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    r.json().await.unwrap()
+}
+
+const SQL_DOC: &str =
+    r#"{"os":{"family":"windows"},"software":{"installed":[{"id":"sqlserver","version":"15.0"}]}}"#;
+
+#[tokio::test]
+async fn a_fact_selector_serves_a_bundle_once_the_document_says_so() {
+    let (s, agent, host_id) = setup().await;
+    let clause = serde_json::json!(
+        { "op": "fact", "path": "software.installed", "test": "has", "value": "sqlserver" }
+    );
+    fact_group_with_a_bundle(&s, clause.clone()).await;
+
+    assert_eq!(bundles_served(&s, &agent, &host_id).await, 0);
+    assert!(preview(&s, clause.clone()).await.is_empty());
+
+    // The upload alone moves the host into the group: no tag, no config change, and the
+    // cached desired state computed by the poll above must not survive it.
+    agent
+        .upload_facts(facts_upload_body(SQL_DOC, "t"))
+        .await
+        .unwrap();
+    assert_eq!(bundles_served(&s, &agent, &host_id).await, 1);
+    let matched = preview(&s, clause).await;
+    assert_eq!(matched.len(), 1);
+    assert_eq!(matched[0]["id"], host_id.as_str());
+
+    // ...and a document that no longer says so moves it out again.
+    agent
+        .upload_facts(facts_upload_body(OS_DOC, "t"))
+        .await
+        .unwrap();
+    assert_eq!(bundles_served(&s, &agent, &host_id).await, 0);
+}
+
+#[tokio::test]
+async fn a_group_with_a_bad_fact_path_is_refused() {
+    let (s, _agent, _host_id) = setup().await;
+    let r = s
+        .cookie_jar
+        .post(format!("{}/api/groups", s.base_url))
+        .json(
+            &serde_json::json!({ "name": "bad", "selector": { "clauses": [
+            { "op": "fact", "path": "a..b", "test": "exists" }
+        ] } }),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+}
+
+#[tokio::test]
+async fn the_catalog_lists_what_the_fleet_reports() {
+    let (s, agent, _host_id) = setup().await;
+    let empty: serde_json::Value = s
+        .cookie_jar
+        .get(format!("{}/api/facts/catalog", s.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    // The agent source is offered before any host has uploaded.
+    assert_eq!(empty["sources"][0]["source"], AGENT_SOURCE);
+    assert_eq!(empty["sources"][0]["hosts"], 0);
+
+    agent
+        .upload_facts(facts_upload_body(SQL_DOC, "t"))
+        .await
+        .unwrap();
+    let c: serde_json::Value = s
+        .cookie_jar
+        .get(format!("{}/api/facts/catalog", s.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let agent_src = &c["sources"][0];
+    assert_eq!(agent_src["hosts"], 1);
+    let installed = agent_src["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["path"] == "software.installed")
+        .unwrap();
+    assert_eq!(installed["kind"], "list");
+    assert_eq!(installed["values"][0], serde_json::json!(["sqlserver", 1]));
+}
+
 #[tokio::test]
 async fn deleting_a_host_deletes_its_facts() {
     let (s, agent, host_id) = setup().await;

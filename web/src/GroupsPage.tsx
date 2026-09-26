@@ -21,6 +21,7 @@ import {
   canWriteConfig,
   Me,
   BundleView,
+  FactsCatalog,
   GroupView,
   HostView,
   PreviewMatch,
@@ -28,6 +29,8 @@ import {
 } from "./api";
 import {
   describeSelector,
+  KnownFacts,
+  knownFactsFromCatalog,
   KnownTags,
   knownTagsFromHosts,
   SelectorEditor,
@@ -41,6 +44,8 @@ export function GroupsPage({ me }: { me: Me }) {
   // The tags the fleet reports right now, so the selector editor can offer them. Derived
   // from the host list, which already carries every host's tags for the hosts page.
   const [known, setKnown] = useState<KnownTags>(() => new Map());
+  // Likewise the paths the fleet's facts documents have, from the facts catalog.
+  const [facts, setFacts] = useState<KnownFacts>(() => new Map());
   // Which editor is open lives in the URL — /groups/new, or /groups/:id for the card
   // being edited — so the "Groups" sidebar entry closes it and a refresh reopens it.
   const navigate = useNavigate();
@@ -61,6 +66,10 @@ export function GroupsPage({ me }: { me: Me }) {
         (hosts) => setKnown(knownTagsFromHosts(hosts)),
         () => {},
       ),
+      apiGet<FactsCatalog>("/api/facts/catalog").then(
+        (c) => setFacts(knownFactsFromCatalog(c)),
+        () => {},
+      ),
     ]).finally(() => setRefreshing(false));
   };
   useEffect(refresh, []);
@@ -79,8 +88,8 @@ export function GroupsPage({ me }: { me: Me }) {
         </Stack>
       </Stack>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        A group is a saved rule over host tags. Bundles assigned to a group apply to every host
-        the rule matches.
+        A group is a saved rule over host tags and facts. Bundles assigned to a group apply to
+        every host the rule matches.
       </Typography>
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
@@ -90,6 +99,7 @@ export function GroupsPage({ me }: { me: Me }) {
       {creating && (
         <GroupEditor
           known={known}
+          facts={facts}
           initialName=""
           initialSelector={{ clauses: [] }}
           onCancel={() => navigate("/groups")}
@@ -113,6 +123,7 @@ export function GroupsPage({ me }: { me: Me }) {
           {groups.map((g) => (
             <GroupCard
               known={known}
+              facts={facts}
               key={g.id}
               group={g}
               bundles={bundles}
@@ -130,6 +141,7 @@ export function GroupsPage({ me }: { me: Me }) {
 
 function GroupCard({
   known,
+  facts,
   group,
   bundles,
   canWrite,
@@ -138,6 +150,7 @@ function GroupCard({
   onChanged,
 }: {
   known: KnownTags;
+  facts: KnownFacts;
   group: GroupView;
   bundles: BundleView[];
   canWrite: boolean;
@@ -187,13 +200,14 @@ function GroupCard({
         </Typography>
         {selectorIsHostControlled(group.selector) && (
           <Alert severity="warning" sx={{ my: 1 }}>
-            Hosts can join this group by reporting the tag themselves, and will then be served
-            its bundles.
+            Hosts can join this group by reporting the tag or fact themselves, and will then be
+            served its bundles.
           </Alert>
         )}
         {editing && (
           <GroupEditor
             known={known}
+            facts={facts}
             initialName={group.name}
             initialSelector={group.selector}
             onCancel={() => onEdit(false)}
@@ -212,12 +226,14 @@ function GroupCard({
 
 function GroupEditor({
   known,
+  facts,
   initialName,
   initialSelector,
   onSave,
   onCancel,
 }: {
   known: KnownTags;
+  facts: KnownFacts;
   initialName: string;
   initialSelector: Selector;
   onSave: (name: string, selector: Selector) => Promise<void>;
@@ -258,7 +274,7 @@ function GroupEditor({
         placeholder="sql-servers"
         sx={{ mb: 2 }}
       />
-      <SelectorEditor selector={selector} onChange={setSelector} known={known} />
+      <SelectorEditor selector={selector} onChange={setSelector} known={known} facts={facts} />
       {error && (
         <Alert severity="error" sx={{ my: 1 }}>
           {error}

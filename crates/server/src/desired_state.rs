@@ -4,9 +4,11 @@
 //! Results are memoized per host against the tenant's `config_version` (Phase 9). Every
 //! input to the computation — tags, groups and their selectors, bundle assignments, bundle
 //! rows, host overrides — is behind a mutation path that bumps that counter, so a stale
-//! entry cannot outlive a change. See `DesiredStateCache`.
+//! entry cannot outlive a change. See `DesiredStateCache`. The per-host inputs a host
+//! writes itself (its reported tags and its facts document) invalidate that host's entry
+//! instead.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::RwLock;
 
@@ -211,19 +213,25 @@ pub async fn compute_uncached(
         .map_for_host(tenant_id, host_id)
         .await?;
 
-    // 2. Find groups whose selector matches the host.
+    // 2. Find groups whose selector matches the host. Facts documents are loaded only for
+    //    the sources some selector reads — none at all for a tenant grouping on tags alone.
     let groups = GroupsRepo::new(&state.db).list(tenant_id).await?;
-    let matching_group_ids: Vec<String> = groups
+    let selectors: Vec<(&str, Selector)> = groups
         .iter()
         .filter_map(|g| {
             let selector_v: Value = serde_json::from_str(&g.selector_json).ok()?;
-            let selector = Selector::from_json(&selector_v).ok()?;
-            if selector.matches(&tags) {
-                Some(g.id.clone())
-            } else {
-                None
-            }
+            Some((g.id.as_str(), Selector::from_json(&selector_v).ok()?))
         })
+        .collect();
+    let sources: BTreeSet<String> = selectors
+        .iter()
+        .flat_map(|(_, s)| s.fact_sources())
+        .collect();
+    let facts = crate::facts::load_for_host(state, tenant_id, host_id, &sources).await?;
+    let matching_group_ids: Vec<String> = selectors
+        .iter()
+        .filter(|(_, s)| s.matches(&tags, &facts))
+        .map(|(id, _)| (*id).to_owned())
         .collect();
 
     // 3. Collect (bundle, priority) for those groups.

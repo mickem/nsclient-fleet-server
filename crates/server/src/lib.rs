@@ -228,6 +228,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/hosts/:id/desired", get(hosts::desired))
         .route("/api/hosts/:id/facts", get(facts::host_facts))
+        .route("/api/facts/catalog", get(facts::catalog))
         .route(
             "/api/hosts/:id/revoke-certs",
             post(hosts::revoke_host_certs),

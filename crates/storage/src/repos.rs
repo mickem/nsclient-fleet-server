@@ -1699,6 +1699,37 @@ impl<'a> HostFactsRepo<'a> {
             })
             .collect())
     }
+
+    /// Every host's document from one source in a tenant, as `(host_id, facts_json)`. For
+    /// the paths that evaluate a selector across the fleet (the group preview) or list what
+    /// the fleet reports (the selector editor's catalog).
+    pub async fn list_documents(
+        &self,
+        tenant_id: i64,
+        source: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let rows = sqlx::query(
+            "SELECT host_id, facts_json FROM host_facts WHERE tenant_id = ? AND source = ?",
+        )
+        .bind(tenant_id)
+        .bind(source)
+        .fetch_all(&self.db.read)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get("host_id"), r.get("facts_json")))
+            .collect())
+    }
+
+    /// The sources any host in the tenant holds a document from, sorted.
+    pub async fn list_sources(&self, tenant_id: i64) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT DISTINCT source FROM host_facts WHERE tenant_id = ? ORDER BY source",
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.db.read)
+        .await?)
+    }
 }
 
 fn map_host(r: sqlx::sqlite::SqliteRow) -> Host {

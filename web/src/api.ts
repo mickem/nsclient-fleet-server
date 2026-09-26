@@ -191,11 +191,34 @@ export type CreateHostResponse = {
  *  own membership — and therefore which bundles they are served. */
 export type SourceFilter = "manual" | "agent" | "any";
 
+/** What a `fact` leaf checks — mirrors fleet_core::selector::FactTest (serde tag = "test"). */
+export type FactTest =
+  | { test: "exists" }
+  | { test: "eq"; value: string }
+  | { test: "in"; values: string[] }
+  | { test: "has"; value: string };
+
+/** The facts source the host uploads itself. A leaf on it is host-controlled. */
+export const AGENT_FACTS = "agent";
+
+/** `GET /api/facts/catalog`: the paths the fleet's facts have, for the selector pickers. */
+export type FactPathKind = "scalar" | "list" | "map";
+export type CatalogPath = {
+  path: string;
+  kind: FactPathKind;
+  hosts: number;
+  values: [string, number][];
+};
+export type FactsCatalog = {
+  sources: { source: string; hosts: number; paths: CatalogPath[]; truncated: boolean }[];
+};
+
 // Selector expression tree — mirrors fleet_core::selector::Expr (serde tag = "op").
 export type Expr =
   | { op: "eq"; key: string; value: string; source?: SourceFilter }
   | { op: "in"; key: string; values: string[]; source?: SourceFilter }
   | { op: "exists"; key: string; source?: SourceFilter }
+  | ({ op: "fact"; facts?: string; path: string } & FactTest)
   | { op: "not"; expr: Expr }
   | { op: "and"; exprs: Expr[] }
   | { op: "or"; exprs: Expr[] };
