@@ -63,6 +63,7 @@ async fn start_with(adjust: impl FnOnce(&mut fleet_server::config::Config)) -> T
             dir.path().join("bundles"),
         )),
         desired_state_cache: Default::default(),
+        facts_catalog_cache: Default::default(),
     };
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

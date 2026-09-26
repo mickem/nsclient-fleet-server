@@ -1453,6 +1453,22 @@ pub struct FactChangeRow {
     pub changes_json: String,
 }
 
+/// A document to store with [`HostFactsRepo::replace`]. Named fields rather than positional
+/// arguments: several are optional strings, and swapping two of them must not compile.
+#[derive(Debug, Clone, Copy)]
+pub struct NewFacts<'a> {
+    pub source: &'a str,
+    /// SHA-256 hex of exactly `facts_json`.
+    pub facts_hash: &'a str,
+    pub facts_json: &'a str,
+    /// When the producer read the values, as it reported it.
+    pub collected_at: Option<&'a str>,
+    /// Hash of the document the caller read and diffed against; `None`: it saw none.
+    pub expected_previous: Option<&'a str>,
+    /// The history entry to record with it, if any.
+    pub history: Option<&'a str>,
+}
+
 /// What [`HostFactsRepo::replace`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplaceOutcome {
@@ -1565,19 +1581,21 @@ impl<'a> HostFactsRepo<'a> {
     /// `history` is the entry to record, if any. At most `keep_history` entries are kept
     /// per host and source. The source name is checked here, at the one place any source
     /// writes, so no path can store one [`fleet_core::facts::valid_source`] refuses.
-    #[allow(clippy::too_many_arguments)]
     pub async fn replace(
         &self,
         tenant_id: i64,
         host_id: &str,
-        source: &str,
-        facts_hash: &str,
-        facts_json: &str,
-        collected_at: Option<&str>,
-        expected_previous: Option<&str>,
-        history: Option<&str>,
+        doc: &NewFacts<'_>,
         keep_history: i64,
     ) -> Result<ReplaceOutcome> {
+        let NewFacts {
+            source,
+            facts_hash,
+            facts_json,
+            collected_at,
+            expected_previous,
+            history,
+        } = *doc;
         anyhow::ensure!(
             fleet_core::facts::valid_source(source),
             "invalid facts source name {source:?}"
@@ -1745,6 +1763,28 @@ impl<'a> HostFactsRepo<'a> {
         )
         .bind(tenant_id)
         .bind(source)
+        .fetch_all(&self.db.read)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get("host_id"), r.get("facts_json")))
+            .collect())
+    }
+
+    /// As [`Self::list_documents`], at most `limit` of them, in host id order.
+    pub async fn list_documents_limited(
+        &self,
+        tenant_id: i64,
+        source: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, String)>> {
+        let rows = sqlx::query(
+            "SELECT host_id, facts_json FROM host_facts WHERE tenant_id = ? AND source = ?
+              ORDER BY host_id LIMIT ?",
+        )
+        .bind(tenant_id)
+        .bind(source)
+        .bind(limit)
         .fetch_all(&self.db.read)
         .await?;
         Ok(rows

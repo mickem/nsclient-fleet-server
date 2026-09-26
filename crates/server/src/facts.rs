@@ -28,10 +28,10 @@ use fleet_core::facts::{
 };
 use fleet_core::selector::{scalar_text, HostFacts, MAX_FACT_PATH_LEN, MAX_VALUE_LEN};
 use fleet_core::time::now_unix;
-use fleet_storage::{FactsHashes, HostFactsRepo, HostRepo, ReplaceOutcome};
+use fleet_storage::{FactsHashes, HostFactsRepo, HostRepo, NewFacts, ReplaceOutcome};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::auth::AuthedUser;
 use crate::mtls::PeerHostContext;
@@ -98,8 +98,9 @@ pub async fn advertise(
                 tracing::error!(error = %e, "set_reported_hash failed");
             }
         }
-        if reported == EMPTY_FACTS_HASH && holds_inventory(&hashes) {
-            if empty_for_long_enough(&hashes, now_unix()) {
+        match empty_over_inventory(&hashes, &reported, now_unix()) {
+            EmptyOverInventory::NotApplicable => {}
+            EmptyOverInventory::Due => {
                 // The operator switched every fact set off, and the agent has said so for
                 // the whole grace period. The hash alone says what the document is — `{}` —
                 // so clear what we hold rather than wait for an upload of it.
@@ -125,15 +126,38 @@ pub async fn advertise(
                     }
                     Err(e) => tracing::error!(error = %e, "clearing host facts failed"),
                 }
-            } else {
-                // A clear is pending. Answer as if it had happened, so the agent does not
-                // upload `{}` in the meantime; if it goes back to its old document before the
-                // grace period is up, the answer is the held hash again and nothing moved.
+            }
+            EmptyOverInventory::Pending => {
+                // Answer as if the clear had happened, so the agent does not upload `{}` in
+                // the meantime; if it goes back to its old document before the grace period
+                // is up, the answer is the held hash again and nothing moved.
                 advertised = Some(EMPTY_FACTS_HASH.to_owned());
             }
         }
     }
     HeaderValue::from_str(advertised.as_deref().unwrap_or(FACTS_HASH_NONE)).ok()
+}
+
+/// What to do with the agent holding `hash` when it is the empty document and we hold a
+/// real inventory. The one place the grace rule lives: the poll and the upload both ask it.
+#[derive(Debug, PartialEq, Eq)]
+enum EmptyOverInventory {
+    /// Not that case: `hash` is a real document, or there is nothing to clear.
+    NotApplicable,
+    /// The agent has not said so for the whole grace period yet: keep the inventory.
+    Pending,
+    /// It has: clear the inventory.
+    Due,
+}
+
+fn empty_over_inventory(h: &FactsHashes, hash: &str, now: i64) -> EmptyOverInventory {
+    if hash != EMPTY_FACTS_HASH || !holds_inventory(h) {
+        EmptyOverInventory::NotApplicable
+    } else if empty_for_long_enough(h, now) {
+        EmptyOverInventory::Due
+    } else {
+        EmptyOverInventory::Pending
+    }
 }
 
 /// Whether we hold an inventory with something in it.
@@ -202,9 +226,8 @@ pub async fn upload(
                 tracing::error!(error = %e, "refreshing collected_at failed");
             }
         }
-    } else if upload.facts_hash == EMPTY_FACTS_HASH
-        && holds_inventory(&hashes)
-        && !empty_for_long_enough(&hashes, now_unix())
+    } else if empty_over_inventory(&hashes, &upload.facts_hash, now_unix())
+        == EmptyOverInventory::Pending
     {
         // An empty document over a real one waits out the same grace period as an empty
         // report does; the poll that ends it clears the inventory. Accepted, so the agent
@@ -289,25 +312,22 @@ pub async fn store(
             previous.as_ref().map(|p| p.facts_json.as_str()),
             document.as_ref().expect("parsed above"),
         );
-        let outcome = repo
-            .replace(
-                tenant_id,
-                host_id,
-                source,
-                hash,
-                json,
-                collected_at,
-                previous_hash,
-                entry.as_deref(),
-                KEEP_HISTORY,
-            )
-            .await?;
+        let doc = NewFacts {
+            source,
+            facts_hash: hash,
+            facts_json: json,
+            collected_at,
+            expected_previous: previous_hash,
+            history: entry.as_deref(),
+        };
+        let outcome = repo.replace(tenant_id, host_id, &doc, KEEP_HISTORY).await?;
         if outcome == ReplaceOutcome::Stored {
             // This host's cached state only — the same scope as a change to its reported
             // tags, and for the same reason: nobody else's membership moved.
             state
                 .desired_state_cache
                 .invalidate_host(tenant_id, host_id);
+            state.facts_catalog_cache.bump(tenant_id);
         }
         if outcome != ReplaceOutcome::Conflict {
             return Ok(outcome);
@@ -445,6 +465,8 @@ pub fn status(h: &FactsHashes) -> FactsStatus {
 
 #[derive(Serialize)]
 pub struct FactsChangesView {
+    /// The history row's id: unique, where time and hash are not.
+    pub id: i64,
     pub source: String,
     pub at: i64,
     pub facts_hash: String,
@@ -513,6 +535,7 @@ pub async fn host_facts(
         .filter_map(|row| {
             let entry: HistoryEntry = serde_json::from_str(&row.changes_json).ok()?;
             Some(FactsChangesView {
+                id: row.id,
                 source: row.source,
                 at: row.at,
                 facts_hash: row.facts_hash,
@@ -589,6 +612,63 @@ pub struct CatalogSource {
 #[derive(Serialize)]
 pub struct FactsCatalog {
     pub sources: Vec<CatalogSource>,
+}
+
+/// Documents read per source for the catalog. The catalog is for picking paths and values,
+/// and a few thousand hosts show every shape the fleet has; beyond that, the cost of reading
+/// and parsing every inventory in the tenant buys nothing.
+const MAX_CATALOG_HOSTS: i64 = 2_000;
+
+/// How long a built catalog may be served without its tenant's facts having moved. Stored
+/// documents only change through [`store`], which marks the tenant, but a host deleted with
+/// its documents does not; this bounds how long it lingers in the counts.
+const CATALOG_TTL_SECS: i64 = 300;
+
+/// Built catalogs per tenant, each tagged with the tenant's facts generation at the time
+/// it was built. [`store`] bumps the generation, so the next request rebuilds.
+#[derive(Default)]
+pub struct CatalogCache {
+    inner: std::sync::Mutex<CatalogCacheInner>,
+}
+
+#[derive(Default)]
+struct CatalogCacheInner {
+    generations: HashMap<i64, u64>,
+    built: HashMap<i64, (u64, i64, std::sync::Arc<FactsCatalog>)>,
+}
+
+impl CatalogCache {
+    /// A tenant's facts changed.
+    pub fn bump(&self, tenant_id: i64) {
+        let mut inner = self.inner.lock().expect("catalog cache lock");
+        *inner.generations.entry(tenant_id).or_default() += 1;
+        inner.built.remove(&tenant_id);
+    }
+
+    /// The cached catalog if it is still current, else the generation to build against.
+    fn lookup(&self, tenant_id: i64, now: i64) -> Result<std::sync::Arc<FactsCatalog>, u64> {
+        let inner = self.inner.lock().expect("catalog cache lock");
+        let generation = inner.generations.get(&tenant_id).copied().unwrap_or(0);
+        match inner.built.get(&tenant_id) {
+            Some((g, at, c)) if *g == generation && now - at < CATALOG_TTL_SECS => Ok(c.clone()),
+            _ => Err(generation),
+        }
+    }
+
+    /// Keep a catalog built against `generation`. One built while a document landed is
+    /// already out of date and is not kept.
+    fn keep(
+        &self,
+        tenant_id: i64,
+        generation: u64,
+        now: i64,
+        catalog: std::sync::Arc<FactsCatalog>,
+    ) {
+        let mut inner = self.inner.lock().expect("catalog cache lock");
+        if inner.generations.get(&tenant_id).copied().unwrap_or(0) == generation {
+            inner.built.insert(tenant_id, (generation, now, catalog));
+        }
+    }
 }
 
 struct PathAcc {
@@ -681,6 +761,10 @@ fn walk_children(
         return;
     }
     for (k, v) in m {
+        // An empty key has no spelling in any form.
+        if k.is_empty() {
+            continue;
+        }
         // A key the dotted form cannot spell is reached with brackets — which need a key
         // before them, so such a key at the top level cannot be selected on at all. Nor can
         // one inside a list record: there `path[k]` picks the record whose id is `k`.
@@ -735,6 +819,11 @@ fn walk(v: &Value, path: &str, depth: usize, local: &mut LocalPaths) {
 ///
 /// Reads every document in the tenant, so it is for opening an editor, not for a poll path.
 pub async fn catalog(State(state): State<AppState>, who: AuthedUser) -> Response {
+    let now = now_unix();
+    let generation = match state.facts_catalog_cache.lookup(who.tenant_id, now) {
+        Ok(cached) => return Json(&*cached).into_response(),
+        Err(generation) => generation,
+    };
     let repo = HostFactsRepo::new(&state.db);
     let built = async {
         let mut sources: BTreeSet<String> = repo
@@ -746,23 +835,34 @@ pub async fn catalog(State(state): State<AppState>, who: AuthedUser) -> Response
         sources.insert(AGENT_SOURCE.to_owned());
         let mut out = Vec::new();
         for source in sources {
-            let docs = repo.list_documents(who.tenant_id, &source).await?;
+            let docs = repo
+                .list_documents_limited(who.tenant_id, &source, MAX_CATALOG_HOSTS)
+                .await?;
             let mut acc = CatalogAcc::default();
-            let mut hosts = HashSet::new();
+            // One row per host and source (the primary key), so a count is the host count.
+            let mut hosts = 0;
             for (host_id, json) in &docs {
                 if let Some(doc) = parse_stored(host_id, &source, json) {
                     acc.add_document(&doc);
-                    hosts.insert(host_id.as_str());
+                    hosts += 1;
                 }
             }
-            let n = hosts.len();
-            out.push(acc.finish(source, n));
+            if docs.len() as i64 >= MAX_CATALOG_HOSTS {
+                acc.truncated = true;
+            }
+            out.push(acc.finish(source, hosts));
         }
         anyhow::Ok(FactsCatalog { sources: out })
     }
     .await;
     match built {
-        Ok(c) => Json(c).into_response(),
+        Ok(c) => {
+            let c = std::sync::Arc::new(c);
+            state
+                .facts_catalog_cache
+                .keep(who.tenant_id, generation, now, c.clone());
+            Json(&*c).into_response()
+        }
         Err(e) => {
             tracing::error!(error = %e, "facts catalog failed");
             (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response()
@@ -792,7 +892,8 @@ mod tests {
         let a = serde_json::json!({
             "os": {"family": "linux"},
             "software": {"installed": [{"id": "bash", "version": "5.2", "x.y": "z"}, {"id": "vim", "version": "9.0"}]},
-            "services": {"sshd": {"state": "running"}, "a.b": {"state": "x"}},
+            "services": {"sshd": {"state": "running"}, "a.b": {"state": "x"}, "": {"state": "y"}},
+            "": {"x": 1},
         });
         let b = serde_json::json!({
             "os": {"family": "windows"},
@@ -821,6 +922,11 @@ mod tests {
             .contains(&("sshd".to_owned(), 1)));
         assert_eq!(path(&c, "services.sshd.state").values[0].0, "running");
         assert_eq!(path(&c, "services[a.b].state").hosts, 1);
+        // An empty key has no spelling at all, at the top or below it.
+        assert!(c
+            .paths
+            .iter()
+            .all(|p| !p.path.is_empty() && !p.path.contains("[]") && !p.path.contains("..")));
         // A dotted field of a list record has no spelling: `installed[x.y]` would pick the
         // record whose id is "x.y". It is not offered.
         assert!(c
@@ -840,6 +946,42 @@ mod tests {
             reported: reported.map(str::to_owned),
             reported_since: None,
         }
+    }
+
+    #[test]
+    fn the_grace_rule_only_applies_to_an_empty_document_over_an_inventory() {
+        let a = "a".repeat(64);
+        let now = 10_000;
+        let over = |held: Option<&str>, since: i64| FactsHashes {
+            held: held.map(str::to_owned),
+            reported: Some(EMPTY_FACTS_HASH.to_owned()),
+            reported_since: Some(since),
+        };
+        use EmptyOverInventory::*;
+        assert_eq!(
+            empty_over_inventory(&over(Some(&a), now), &a, now),
+            NotApplicable
+        );
+        assert_eq!(
+            empty_over_inventory(&over(None, 0), EMPTY_FACTS_HASH, now),
+            NotApplicable
+        );
+        assert_eq!(
+            empty_over_inventory(&over(Some(EMPTY_FACTS_HASH), 0), EMPTY_FACTS_HASH, now),
+            NotApplicable
+        );
+        assert_eq!(
+            empty_over_inventory(&over(Some(&a), now), EMPTY_FACTS_HASH, now),
+            Pending
+        );
+        assert_eq!(
+            empty_over_inventory(
+                &over(Some(&a), now - EMPTY_CLEAR_GRACE_SECS),
+                EMPTY_FACTS_HASH,
+                now
+            ),
+            Due
+        );
     }
 
     #[test]

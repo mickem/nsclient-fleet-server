@@ -291,8 +291,9 @@ facts (an older version, or it could not read the host) — never a reason to up
 The server stores the last hash the agent reported, only writing it when it moves, so the
 host page can say whether what it shows is current, whether a newer inventory is on its way,
 or whether the host has nothing enabled. Each stored document is compared with the previous
-one, matching list records by their `id`, and the differences are kept as a bounded history
-(the last 100 changes per host).
+one, matching list records by their `id`, and the differences are kept as a bounded history:
+the last 100 entries per host and source, one per stored document, each listing up to 200
+changes and counting any beyond that.
 
 ## 4. Certificate lifecycle
 

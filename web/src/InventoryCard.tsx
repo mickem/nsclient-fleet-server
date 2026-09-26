@@ -65,19 +65,13 @@ function fmtValue(key: string, v: unknown): string {
   if (v === undefined || v === null) return "";
   if (typeof v === "boolean") return v ? "yes" : "no";
   if (typeof v === "number") {
-    if (key.endsWith("_bytes")) return fmtBytesWide(v);
+    if (key.endsWith("_bytes")) return fmtBytes(v);
     if (key.endsWith("_bps")) return fmtBps(v);
     return v.toLocaleString();
   }
   if (Array.isArray(v)) return v.map((x) => fmtValue(key, x)).join(", ");
   if (typeof v === "string") return v;
   return JSON.stringify(v);
-}
-
-function fmtBytesWide(n: number): string {
-  if (n >= 1024 ** 4) return `${(n / 1024 ** 4).toFixed(1)} TB`;
-  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GB`;
-  return fmtBytes(n);
 }
 
 function fmtBps(n: number): string {
@@ -387,8 +381,7 @@ export function InventoryCard({
                     {showHistory ? "Hide" : `Show ${history.length}`}
                   </Button>
                 </Stack>
-                {showHistory &&
-                  history.map((e) => <ChangeEntry key={`${e.at}:${e.facts_hash}`} entry={e} />)}
+                {showHistory && history.map((e) => <ChangeEntry key={e.id} entry={e} />)}
               </Box>
             )}
           </>

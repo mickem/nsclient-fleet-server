@@ -6,7 +6,7 @@ mod common;
 use common::{enroll_a_host, signup_login, start, TestServer};
 use fleet_agent_sim::facts_upload_body;
 use fleet_core::facts::{sha256_hex, AGENT_SOURCE, EMPTY_FACTS_HASH};
-use fleet_storage::{HostFactsRepo, ReplaceOutcome};
+use fleet_storage::{HostFactsRepo, NewFacts, ReplaceOutcome};
 
 const OS_DOC: &str = r#"{"os":{"arch":"x86_64","family":"linux","name":"Ubuntu 24.04"},"storage":{"volumes":[{"device":"/dev/vda","id":"/","size_bytes":270553174016,"type":"fixed"}]}}"#;
 const OS_DOC_2: &str = r#"{"os":{"arch":"x86_64","family":"linux","name":"Ubuntu 24.04.1"},"storage":{"volumes":[{"device":"/dev/vda","id":"/","size_bytes":270553174016,"type":"fixed"},{"id":"/data","type":"fixed"}]}}"#;
@@ -259,12 +259,14 @@ async fn store_imported(s: &TestServer, host_id: &str, doc: &str) -> bool {
         .replace(
             tenant_of(s, host_id).await,
             host_id,
-            "import:cmdb",
-            &sha256_hex(doc.as_bytes()),
-            doc,
-            None,
-            None,
-            Some(r#"{"initial":true,"changes":[],"truncated":0}"#),
+            &NewFacts {
+                source: "import:cmdb",
+                facts_hash: &sha256_hex(doc.as_bytes()),
+                facts_json: doc,
+                collected_at: None,
+                expected_previous: None,
+                history: Some(r#"{"initial":true,"changes":[],"truncated":0}"#),
+            },
             100,
         )
         .await
@@ -281,12 +283,14 @@ async fn a_source_name_outside_the_charset_is_refused() {
             .replace(
                 tenant_id,
                 &host_id,
-                bad,
-                EMPTY_FACTS_HASH,
-                "{}",
-                None,
-                None,
-                None,
+                &NewFacts {
+                    source: bad,
+                    facts_hash: EMPTY_FACTS_HASH,
+                    facts_json: "{}",
+                    collected_at: None,
+                    expected_previous: None,
+                    history: None,
+                },
                 100,
             )
             .await;
@@ -311,12 +315,15 @@ async fn a_write_that_raced_another_is_refused_as_a_conflict() {
         .replace(
             tenant_of(&s, &host_id).await,
             &host_id,
-            AGENT_SOURCE,
-            &sha256_hex(OS_DOC_2.as_bytes()),
-            OS_DOC_2,
-            None,
-            None,
-            None,
+            &NewFacts {
+                source: AGENT_SOURCE,
+                facts_hash: &sha256_hex(OS_DOC_2.as_bytes()),
+                facts_json: OS_DOC_2,
+                collected_at: None,
+                // Diffed against "nothing stored" — but a document is stored now.
+                expected_previous: None,
+                history: None,
+            },
             100,
         )
         .await
@@ -643,6 +650,7 @@ async fn the_catalog_lists_what_the_fleet_reports() {
     assert_eq!(empty["sources"][0]["source"], AGENT_SOURCE);
     assert_eq!(empty["sources"][0]["hosts"], 0);
 
+    // The catalog above is cached now; the upload has to be what makes it rebuild.
     agent
         .upload_facts(facts_upload_body(SQL_DOC, "t"))
         .await

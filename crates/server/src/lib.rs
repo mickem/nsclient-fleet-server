@@ -62,6 +62,9 @@ pub struct AppState {
     /// Memoized desired state, invalidated by the tenant's `config_version`. Shared across
     /// clones of `AppState` — one cache per process.
     pub desired_state_cache: Arc<crate::desired_state::DesiredStateCache>,
+    /// The facts catalog per tenant, rebuilt only when a tenant's facts moved. Shared across
+    /// clones of `AppState`.
+    pub facts_catalog_cache: Arc<crate::facts::CatalogCache>,
 }
 
 /// Narrow a directory we own to owner-only access.

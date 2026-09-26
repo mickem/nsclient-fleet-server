@@ -53,7 +53,13 @@ const IDLE_TTL_SECS: i64 = 3600;
 
 struct Entry {
     config_version: i64,
-    state: DesiredState,
+    /// `None`: a tombstone. The host was invalidated and nothing has been computed for it
+    /// since; the entry is kept only to carry `generation`.
+    state: Option<DesiredState>,
+    /// Bumped by every [`DesiredStateCache::invalidate_host`]. A compute records it before
+    /// reading its inputs and may only store its result if it has not moved — see
+    /// [`CacheTicket`].
+    generation: u64,
     /// Atomic so a cache hit only needs the read lock.
     last_used: AtomicI64,
 }
@@ -70,9 +76,21 @@ struct Entry {
 /// change a computed input. If you add a mutation that touches tags, groups, selectors,
 /// bundle assignments, bundle rows, or host overrides and do not bump it, agents will be
 /// served stale configuration until something else bumps the counter.
+/// What a compute saw of a host's entry before it read its inputs. Storing the result is
+/// refused if the host was invalidated in between: that compute may have read the document
+/// or tags the invalidation was about, and caching it would pin the stale membership under
+/// a `config_version` that no longer moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheTicket {
+    /// Bumped when the whole map is reclaimed, which also forgets every generation.
+    epoch: u64,
+    generation: u64,
+}
+
 #[derive(Default)]
 pub struct DesiredStateCache {
     entries: RwLock<HashMap<(i64, String), Entry>>,
+    epoch: AtomicU64,
     hits: AtomicU64,
     misses: AtomicU64,
 }
@@ -87,9 +105,10 @@ impl DesiredStateCache {
         // Cheap borrow-key lookup would need a custom Borrow impl; hosts poll at most a few
         // times a minute, so one key allocation here is not worth the complexity.
         let hit = map.get(&(tenant_id, host_id.to_string())).and_then(|e| {
+            let state = e.state.as_ref()?;
             (e.config_version == config_version).then(|| {
                 e.last_used.store(now_unix(), Ordering::Relaxed);
-                e.state.clone()
+                state.clone()
             })
         });
         match hit {
@@ -104,16 +123,46 @@ impl DesiredStateCache {
         }
     }
 
-    fn put(&self, tenant_id: i64, host_id: &str, config_version: i64, state: &DesiredState) {
+    /// Take before reading any input of a compute; hand to [`Self::put_if_current`].
+    fn ticket(&self, tenant_id: i64, host_id: &str) -> CacheTicket {
+        let map = self.entries.read().expect("desired-state cache lock");
+        CacheTicket {
+            // Read under the lock that `put_if_current` takes to bump it, so the two agree.
+            epoch: self.epoch.load(Ordering::Relaxed),
+            generation: map
+                .get(&(tenant_id, host_id.to_string()))
+                .map_or(0, |e| e.generation),
+        }
+    }
+
+    /// Store a computed state, unless the host was invalidated after `ticket` was taken.
+    /// Returns whether it was stored.
+    fn put_if_current(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        ticket: CacheTicket,
+        config_version: i64,
+        state: &DesiredState,
+    ) -> bool {
         let mut map = self.entries.write().expect("desired-state cache lock");
+        let key = (tenant_id, host_id.to_string());
+        let generation = map.get(&key).map_or(0, |e| e.generation);
+        if ticket.epoch != self.epoch.load(Ordering::Relaxed) || ticket.generation != generation {
+            return false;
+        }
         if map.len() >= MAX_ENTRIES {
             let cutoff = now_unix() - IDLE_TTL_SECS;
             let before = map.len();
             map.retain(|_, e| e.last_used.load(Ordering::Relaxed) >= cutoff);
             if map.len() >= MAX_ENTRIES {
                 // Nothing was idle. Rather than grow without bound, start over and pay the
-                // recompute; this should never happen on a single-VM fleet.
+                // recompute; this should never happen on a single-VM fleet. Every tombstone
+                // goes with it, so the epoch moves: a compute already in flight could
+                // otherwise find its host's generation reset and store what it read before
+                // an invalidation.
                 map.clear();
+                self.epoch.fetch_add(1, Ordering::Relaxed);
             }
             tracing::info!(
                 before,
@@ -122,22 +171,39 @@ impl DesiredStateCache {
             );
         }
         map.insert(
-            (tenant_id, host_id.to_string()),
+            key,
             Entry {
                 config_version,
-                state: state.clone(),
+                state: Some(state.clone()),
+                generation,
                 last_used: AtomicI64::new(now_unix()),
             },
         );
+        true
     }
 
-    /// Drop a host's entry. `config_version` covers every *configuration* change, but not a
-    /// host disappearing — deleting a host does not change the tenant's config.
+    /// Store unconditionally, for tests that are not about the race.
+    #[cfg(test)]
+    fn put(&self, tenant_id: i64, host_id: &str, config_version: i64, state: &DesiredState) {
+        let ticket = self.ticket(tenant_id, host_id);
+        assert!(self.put_if_current(tenant_id, host_id, ticket, config_version, state));
+    }
+
+    /// Drop a host's cached state. `config_version` covers every *configuration* change, but
+    /// not a change to the host's own inputs — its reported tags or facts — nor a host
+    /// disappearing. A compute already under way for this host will not store its result.
     pub fn invalidate_host(&self, tenant_id: i64, host_id: &str) {
-        self.entries
-            .write()
-            .expect("desired-state cache lock")
-            .remove(&(tenant_id, host_id.to_string()));
+        let mut map = self.entries.write().expect("desired-state cache lock");
+        let entry = map
+            .entry((tenant_id, host_id.to_string()))
+            .or_insert_with(|| Entry {
+                config_version: 0,
+                state: None,
+                generation: 0,
+                last_used: AtomicI64::new(now_unix()),
+            });
+        entry.state = None;
+        entry.generation += 1;
     }
 
     /// `(hits, misses)` since startup. Exposed so the cost of the lazy recompute can be
@@ -187,14 +253,17 @@ pub async fn compute_desired_state_at(
         return Ok(cached);
     }
 
+    // Before reading anything the result depends on.
+    let ticket = state.desired_state_cache.ticket(tenant_id, host_id);
     let computed = compute_uncached(state, tenant_id, host_id).await?;
 
     // Store against the version we were handed. If a bump landed while we were computing,
     // this entry is already stale-by-key and the next poll recomputes — the same outcome as
-    // having no cache, never a stale answer.
+    // having no cache, never a stale answer. A bump to this host alone (its facts or tags)
+    // is not in the version; the ticket catches that one.
     state
         .desired_state_cache
-        .put(tenant_id, host_id, config_version, &computed);
+        .put_if_current(tenant_id, host_id, ticket, config_version, &computed);
     Ok(computed)
 }
 
@@ -374,6 +443,34 @@ mod tests {
 
         assert!(c.get(1, "host-a", 1).is_none());
         assert_eq!(c.get(1, "host-b", 1).unwrap().state_hash, "bbb");
+    }
+
+    #[test]
+    fn a_compute_that_raced_an_invalidation_is_not_cached() {
+        let c = DesiredStateCache::new();
+        c.put(1, "host-a", 1, &ds("old"));
+        c.invalidate_host(1, "host-a");
+
+        // A compute starts, reading the host's facts...
+        let ticket = c.ticket(1, "host-a");
+        // ...a new document lands and invalidates the host...
+        c.invalidate_host(1, "host-a");
+        // ...and the compute finishes with what it read before.
+        assert!(!c.put_if_current(1, "host-a", ticket, 1, &ds("stale")));
+        assert!(c.get(1, "host-a", 1).is_none(), "the next poll recomputes");
+
+        // A compute that started after the invalidation is stored.
+        let ticket = c.ticket(1, "host-a");
+        assert!(c.put_if_current(1, "host-a", ticket, 1, &ds("fresh")));
+        assert_eq!(c.get(1, "host-a", 1).unwrap().state_hash, "fresh");
+    }
+
+    #[test]
+    fn an_invalidation_of_an_uncached_host_still_stops_a_compute_in_flight() {
+        let c = DesiredStateCache::new();
+        let ticket = c.ticket(1, "host-a");
+        c.invalidate_host(1, "host-a");
+        assert!(!c.put_if_current(1, "host-a", ticket, 1, &ds("stale")));
     }
 
     #[test]

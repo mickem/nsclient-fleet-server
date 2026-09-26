@@ -303,6 +303,7 @@ async fn serve(shutdown: Shutdown, env_file_vars: &[String]) -> anyhow::Result<(
         mtls_server_cert_pem: Arc::new(mtls_cert_pem),
         bundle_store,
         desired_state_cache: Default::default(),
+        facts_catalog_cache: Default::default(),
     };
 
     // Both cleanups existed and neither was ever called, so these two tables only grew.

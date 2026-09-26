@@ -121,6 +121,7 @@ pub async fn start_with(tweak: impl FnOnce(&mut fleet_server::AppState)) -> Test
             dir.path().join("bundles"),
         )),
         desired_state_cache: Default::default(),
+        facts_catalog_cache: Default::default(),
     };
     tweak(&mut state);
     let state_handle = state.clone();
