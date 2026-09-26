@@ -145,6 +145,8 @@ export type FactChange = {
 };
 
 export type FactsChanges = {
+  /** The source whose document changed: `agent` today. */
+  source: string;
   at: number;
   facts_hash: string;
   /** The first inventory this host sent — nothing to compare it with. */
@@ -155,6 +157,9 @@ export type FactsChanges = {
 };
 
 export type HostFacts = {
+  /** Which source this document is from. Only `agent` today; imported sources (spreadsheets,
+   *  files, cloud inventories) will sit beside it. */
+  source: string;
   status: FactsStatus;
   /** The stored document; null when the host never sent one. */
   facts: Record<string, unknown> | null;

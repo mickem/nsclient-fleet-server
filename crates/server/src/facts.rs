@@ -23,7 +23,9 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use fleet_core::facts::{self, FactChange, EMPTY_FACTS_HASH, FACTS_HASH_HEADER, FACTS_HASH_NONE};
+use fleet_core::facts::{
+    self, FactChange, AGENT_SOURCE, EMPTY_FACTS_HASH, FACTS_HASH_HEADER, FACTS_HASH_NONE,
+};
 use fleet_storage::{FactsHashes, HostFactsRepo, HostRepo};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -122,6 +124,7 @@ pub async fn upload(
         .replace(
             ctx.tenant_id,
             &ctx.host_id,
+            AGENT_SOURCE,
             &upload.facts_hash,
             upload.facts,
             upload.collected_at.as_deref(),
@@ -225,6 +228,7 @@ pub fn status(h: &FactsHashes) -> FactsStatus {
 
 #[derive(Serialize)]
 pub struct FactsChangesView {
+    pub source: String,
     pub at: i64,
     pub facts_hash: String,
     pub initial: bool,
@@ -234,6 +238,8 @@ pub struct FactsChangesView {
 
 #[derive(Serialize)]
 pub struct HostFactsView {
+    /// Which source this is. Only `agent` today; imported sources will sit beside it.
+    pub source: &'static str,
     pub status: FactsStatus,
     /// The stored document, or null when the host never uploaded one.
     pub facts: Option<Value>,
@@ -249,7 +255,8 @@ pub struct HostFactsView {
     pub changes: Vec<FactsChangesView>,
 }
 
-/// `GET /api/hosts/:id/facts`: the host's inventory, its freshness, and its recent history.
+/// `GET /api/hosts/:id/facts`: the host's inventory as its agent reported it, its
+/// freshness, and its recent history.
 pub async fn host_facts(
     State(state): State<AppState>,
     who: AuthedUser,
@@ -269,9 +276,9 @@ pub async fn host_facts(
             .hashes(who.tenant_id, &host_id)
             .await?
             .unwrap_or_default();
-        let stored = repo.get(who.tenant_id, &host_id).await?;
+        let stored = repo.get(who.tenant_id, &host_id, AGENT_SOURCE).await?;
         let changes = repo
-            .list_changes(who.tenant_id, &host_id, CHANGES_SHOWN)
+            .list_changes(who.tenant_id, &host_id, AGENT_SOURCE, CHANGES_SHOWN)
             .await?;
         anyhow::Ok((hashes, stored, changes))
     }
@@ -289,6 +296,7 @@ pub async fn host_facts(
         .filter_map(|row| {
             let entry: HistoryEntry = serde_json::from_str(&row.changes_json).ok()?;
             Some(FactsChangesView {
+                source: row.source,
                 at: row.at,
                 facts_hash: row.facts_hash,
                 initial: entry.initial,
@@ -301,6 +309,7 @@ pub async fn host_facts(
     let status = status(&hashes);
     let view = match stored {
         Some(s) => HostFactsView {
+            source: AGENT_SOURCE,
             status,
             facts: serde_json::from_str(&s.facts_json).ok(),
             facts_hash: Some(s.facts_hash),
@@ -311,6 +320,7 @@ pub async fn host_facts(
             changes,
         },
         None => HostFactsView {
+            source: AGENT_SOURCE,
             status,
             facts: None,
             facts_hash: None,

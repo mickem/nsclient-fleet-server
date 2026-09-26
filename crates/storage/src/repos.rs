@@ -1425,8 +1425,9 @@ impl<'a> HostOverridesRepo<'a> {
     }
 }
 
-/// A host's stored facts document, verbatim.
+/// A host's stored facts document from one source, verbatim.
 pub struct StoredFacts {
+    pub source: String,
     pub facts_hash: String,
     pub facts_json: String,
     pub collected_at: Option<String>,
@@ -1444,6 +1445,7 @@ pub struct FactsHashes {
 
 pub struct FactChangeRow {
     pub id: i64,
+    pub source: String,
     pub at: i64,
     pub facts_hash: String,
     pub changes_json: String,
@@ -1458,7 +1460,9 @@ impl<'a> HostFactsRepo<'a> {
         Self { db }
     }
 
-    /// Both hashes in one read. `None` when there is no such host.
+    /// Both hashes of the agent's own document, in one read. `None` when there is no such
+    /// host. Only the `agent` source takes part in the hash exchange; imported sources are
+    /// never the agent's to upload.
     ///
     /// On the desired-state path, so it is one indexed lookup and never a write: every poll
     /// from every host asks it.
@@ -1466,9 +1470,11 @@ impl<'a> HostFactsRepo<'a> {
         let row = sqlx::query(
             "SELECT h.facts_reported_hash AS reported, f.facts_hash AS held
                FROM hosts h
-               LEFT JOIN host_facts f ON f.tenant_id = h.tenant_id AND f.host_id = h.id
+               LEFT JOIN host_facts f
+                      ON f.tenant_id = h.tenant_id AND f.host_id = h.id AND f.source = ?
               WHERE h.tenant_id = ? AND h.id = ?",
         )
+        .bind(fleet_core::facts::AGENT_SOURCE)
         .bind(tenant_id)
         .bind(host_id)
         .fetch_optional(&self.db.read)
@@ -1502,16 +1508,23 @@ impl<'a> HostFactsRepo<'a> {
         Ok(res.rows_affected() > 0)
     }
 
-    pub async fn get(&self, tenant_id: i64, host_id: &str) -> Result<Option<StoredFacts>> {
+    pub async fn get(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        source: &str,
+    ) -> Result<Option<StoredFacts>> {
         let row = sqlx::query(
-            "SELECT facts_hash, facts_json, collected_at, received_at, size_bytes
-               FROM host_facts WHERE tenant_id = ? AND host_id = ?",
+            "SELECT source, facts_hash, facts_json, collected_at, received_at, size_bytes
+               FROM host_facts WHERE tenant_id = ? AND host_id = ? AND source = ?",
         )
         .bind(tenant_id)
         .bind(host_id)
+        .bind(source)
         .fetch_optional(&self.db.read)
         .await?;
         Ok(row.map(|r| StoredFacts {
+            source: r.get("source"),
             facts_hash: r.get("facts_hash"),
             facts_json: r.get("facts_json"),
             collected_at: r.get("collected_at"),
@@ -1520,20 +1533,22 @@ impl<'a> HostFactsRepo<'a> {
         }))
     }
 
-    /// Store a new document for a host, and what changed since the previous one.
+    /// Store a new document for a host from one source, and what changed since that
+    /// source's previous one. Other sources' documents are untouched.
     ///
     /// `changes` is handed the previous document (`None` on a first upload) and returns the
     /// history entry to record, if any. It runs inside the write transaction, so two uploads
     /// racing each other cannot both diff against the same predecessor and leave a history
-    /// that skips a step. At most `keep_history` entries are kept per host.
+    /// that skips a step. At most `keep_history` entries are kept per host and source.
     ///
-    /// Returns false, writing nothing, when the host already holds a document with this
+    /// Returns false, writing nothing, when the source already holds a document with this
     /// hash — a repeated upload is not a change — or when there is no such host.
     #[allow(clippy::too_many_arguments)]
     pub async fn replace(
         &self,
         tenant_id: i64,
         host_id: &str,
+        source: &str,
         facts_hash: &str,
         facts_json: &str,
         collected_at: Option<&str>,
@@ -1555,10 +1570,12 @@ impl<'a> HostFactsRepo<'a> {
         }
 
         let previous = sqlx::query(
-            "SELECT facts_hash, facts_json FROM host_facts WHERE tenant_id = ? AND host_id = ?",
+            "SELECT facts_hash, facts_json FROM host_facts
+              WHERE tenant_id = ? AND host_id = ? AND source = ?",
         )
         .bind(tenant_id)
         .bind(host_id)
+        .bind(source)
         .fetch_optional(&mut *tx)
         .await?
         .map(|r| {
@@ -1577,9 +1594,10 @@ impl<'a> HostFactsRepo<'a> {
 
         sqlx::query(
             "INSERT INTO host_facts
-               (tenant_id, host_id, facts_hash, facts_json, collected_at, received_at, size_bytes)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(host_id) DO UPDATE SET
+               (tenant_id, host_id, source, facts_hash, facts_json, collected_at, received_at,
+                size_bytes)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(host_id, source) DO UPDATE SET
                facts_hash = excluded.facts_hash,
                facts_json = excluded.facts_json,
                collected_at = excluded.collected_at,
@@ -1589,6 +1607,7 @@ impl<'a> HostFactsRepo<'a> {
         )
         .bind(tenant_id)
         .bind(host_id)
+        .bind(source)
         .bind(facts_hash)
         .bind(facts_json)
         .bind(collected_at)
@@ -1599,11 +1618,13 @@ impl<'a> HostFactsRepo<'a> {
 
         if let Some(entry) = entry {
             sqlx::query(
-                "INSERT INTO host_fact_changes (tenant_id, host_id, at, facts_hash, changes_json)
-                 VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO host_fact_changes
+                   (tenant_id, host_id, source, at, facts_hash, changes_json)
+                 VALUES (?, ?, ?, ?, ?, ?)",
             )
             .bind(tenant_id)
             .bind(host_id)
+            .bind(source)
             .bind(now)
             .bind(facts_hash)
             .bind(&entry)
@@ -1611,15 +1632,17 @@ impl<'a> HostFactsRepo<'a> {
             .await?;
             sqlx::query(
                 "DELETE FROM host_fact_changes
-                  WHERE tenant_id = ? AND host_id = ?
+                  WHERE tenant_id = ? AND host_id = ? AND source = ?
                     AND id NOT IN (SELECT id FROM host_fact_changes
-                                    WHERE tenant_id = ? AND host_id = ?
+                                    WHERE tenant_id = ? AND host_id = ? AND source = ?
                                     ORDER BY id DESC LIMIT ?)",
             )
             .bind(tenant_id)
             .bind(host_id)
+            .bind(source)
             .bind(tenant_id)
             .bind(host_id)
+            .bind(source)
             .bind(keep_history)
             .execute(&mut *tx)
             .await?;
@@ -1629,20 +1652,22 @@ impl<'a> HostFactsRepo<'a> {
         Ok(true)
     }
 
-    /// The most recent history entries for a host, newest first.
+    /// The most recent history entries of one source for a host, newest first.
     pub async fn list_changes(
         &self,
         tenant_id: i64,
         host_id: &str,
+        source: &str,
         limit: i64,
     ) -> Result<Vec<FactChangeRow>> {
         let rows = sqlx::query(
-            "SELECT id, at, facts_hash, changes_json FROM host_fact_changes
-              WHERE tenant_id = ? AND host_id = ?
+            "SELECT id, source, at, facts_hash, changes_json FROM host_fact_changes
+              WHERE tenant_id = ? AND host_id = ? AND source = ?
               ORDER BY id DESC LIMIT ?",
         )
         .bind(tenant_id)
         .bind(host_id)
+        .bind(source)
         .bind(limit)
         .fetch_all(&self.db.read)
         .await?;
@@ -1650,6 +1675,7 @@ impl<'a> HostFactsRepo<'a> {
             .into_iter()
             .map(|r| FactChangeRow {
                 id: r.get("id"),
+                source: r.get("source"),
                 at: r.get("at"),
                 facts_hash: r.get("facts_hash"),
                 changes_json: r.get("changes_json"),

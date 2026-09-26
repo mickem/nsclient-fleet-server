@@ -30,6 +30,28 @@ pub const FACTS_HASH_HEADER: &str = "x-facts-hash";
 /// Header value meaning "the server holds no document for this host".
 pub const FACTS_HASH_NONE: &str = "none";
 
+/// The source of the agent's own document: the one uploaded over mTLS, and the only one
+/// the hash exchange covers. Other sources (imports, cloud inventories, the API) store
+/// their documents beside it under their own names; see [`valid_source`].
+pub const AGENT_SOURCE: &str = "agent";
+
+/// Longest source name.
+pub const MAX_SOURCE_LEN: usize = 64;
+
+/// Whether `s` can name a facts source: lowercase ASCII letters and digits, with `_ . : -`
+/// inside (`agent`, `import:cmdb`, `aws:prod-eu`), at most [`MAX_SOURCE_LEN`] characters.
+/// Source names are stored and rendered, so they are kept to a charset that needs no
+/// escaping anywhere.
+pub fn valid_source(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty()
+        && b.len() <= MAX_SOURCE_LEN
+        && b[0].is_ascii_lowercase()
+        && b.iter().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'_' | b'.' | b':' | b'-')
+        })
+}
+
 /// `sha256("{}")`: the hash of a host with no fact set enabled.
 pub const EMPTY_FACTS_HASH: &str =
     "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a";
@@ -306,6 +328,16 @@ mod tests {
     #[test]
     fn empty_document_hash_matches_the_agent() {
         assert_eq!(sha256_hex(b"{}"), EMPTY_FACTS_HASH);
+    }
+
+    #[test]
+    fn source_names() {
+        for ok in [AGENT_SOURCE, "import:cmdb", "aws:prod-eu", "gcp.project_1"] {
+            assert!(valid_source(ok), "{ok}");
+        }
+        for bad in ["", "Agent", "1st", ":x", "a b", "a/b", &"a".repeat(65)] {
+            assert!(!valid_source(bad), "{bad}");
+        }
     }
 
     #[test]

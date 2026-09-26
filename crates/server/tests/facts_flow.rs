@@ -442,6 +442,64 @@ async fn facts_of_an_unknown_host_are_not_found() {
     assert_eq!(r.status(), 404);
 }
 
+/// Store a document under a non-agent source, the way an import will.
+async fn store_imported(s: &TestServer, host_id: &str, doc: &str) -> bool {
+    let tenant_id: i64 = sqlx::query_scalar("SELECT tenant_id FROM hosts WHERE id = ?")
+        .bind(host_id)
+        .fetch_one(&s.db.read)
+        .await
+        .unwrap();
+    fleet_storage::HostFactsRepo::new(&s.db)
+        .replace(
+            tenant_id,
+            host_id,
+            "import:cmdb",
+            &sha256_hex(doc.as_bytes()),
+            doc,
+            None,
+            100,
+            |_| Some(r#"{"initial":true,"changes":[],"truncated":0}"#.into()),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn another_source_is_kept_apart_from_the_agents_document() {
+    let (s, agent, host_id) = setup().await;
+    let hash = sha256_hex(OS_DOC.as_bytes());
+    agent
+        .upload_facts(facts_upload_body(OS_DOC, "t"))
+        .await
+        .unwrap();
+    assert!(store_imported(&s, &host_id, r#"{"cmdb":{"owner":"ops"}}"#).await);
+
+    // The hash exchange only ever concerns the agent's document: an import beside it must
+    // not read as a miss and send the agent into a re-upload.
+    let (_, held) = agent.poll_with_facts(None, &hash).await.unwrap();
+    assert_eq!(held.as_deref(), Some(hash.as_str()));
+
+    let v = facts_view(&s, &host_id).await;
+    assert_eq!(v["source"], "agent");
+    assert_eq!(v["status"], "current");
+    assert!(v["facts"].get("cmdb").is_none());
+    let changes = v["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0]["source"], "agent");
+
+    // A new agent document replaces the agent's and leaves the import's alone.
+    agent
+        .upload_facts(facts_upload_body(OS_DOC_2, "t"))
+        .await
+        .unwrap();
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM host_facts WHERE host_id = ?")
+        .bind(&host_id)
+        .fetch_one(&s.db.read)
+        .await
+        .unwrap();
+    assert_eq!(n, 2);
+}
+
 #[tokio::test]
 async fn deleting_a_host_deletes_its_facts() {
     let (s, agent, host_id) = setup().await;
@@ -449,6 +507,8 @@ async fn deleting_a_host_deletes_its_facts() {
         .upload_facts(facts_upload_body(OS_DOC, "t"))
         .await
         .unwrap();
+    // Every source's rows go, not just the agent's.
+    assert!(store_imported(&s, &host_id, r#"{"cmdb":{"owner":"ops"}}"#).await);
     let r = s
         .cookie_jar
         .delete(format!("{}/api/hosts/{host_id}", s.base_url))
