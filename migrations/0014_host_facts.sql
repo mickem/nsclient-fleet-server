@@ -52,3 +52,8 @@ CREATE INDEX idx_host_fact_changes_tenant_host ON host_fact_changes(tenant_id, h
 -- newer inventory we have not received" and "nothing enabled on the host". NULL: the agent
 -- never sent one — a build without facts support.
 ALTER TABLE hosts ADD COLUMN facts_reported_hash TEXT;
+-- When `facts_reported_hash` last changed. An agent that starts reporting the empty document
+-- has its stored inventory cleared only once it has kept saying so for a while, so a single
+-- empty report (an agent polling before its collectors ran) does not wipe and then restore
+-- the inventory, writing two history rows each time.
+ALTER TABLE hosts ADD COLUMN facts_reported_at INTEGER;

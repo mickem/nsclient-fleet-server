@@ -67,6 +67,7 @@ export function HostDetailPage({ me }: Props) {
   const [host, setHost] = useState<HostDetail | null>(null);
   const [desired, setDesired] = useState<DesiredStateView | null>(null);
   const [facts, setFacts] = useState<HostFacts | null>(null);
+  const [factsError, setFactsError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -86,7 +87,13 @@ export function HostDetailPage({ me }: Props) {
         (e) => setError(e.message),
       ),
       apiGet<DesiredStateView>(`/api/hosts/${hostId}/desired`).then(setDesired, () => {}),
-      apiGet<HostFacts>(`/api/hosts/${hostId}/facts`).then(setFacts, () => {}),
+      apiGet<HostFacts>(`/api/hosts/${hostId}/facts`).then(
+        (f) => {
+          setFacts(f);
+          setFactsError(null);
+        },
+        (e) => setFactsError(e instanceof Error ? e.message : String(e)),
+      ),
     ]).finally(() => setRefreshing(false));
   };
   useEffect(refresh, [hostId]);
@@ -200,7 +207,7 @@ export function HostDetailPage({ me }: Props) {
           <OverrideCard host={host} canWrite={canWriteConfig(me.role)} onChanged={refresh} />
         </Grid>
         <Grid size={12}>
-          <InventoryCard facts={facts} />
+          <InventoryCard facts={facts} error={factsError} />
         </Grid>
       </Grid>
     </Box>

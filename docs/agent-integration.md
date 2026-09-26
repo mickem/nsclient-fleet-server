@@ -280,9 +280,12 @@ the document in rather than re-encode it after hashing.
 
 `none` and the empty document's hash mean the same thing to the agent, so a host with nothing
 enabled never uploads. When a host that had an inventory has every set switched off, the
-server does not wait for an upload of `{}`: the reported hash already says what the document
-is, so the server clears the stored inventory itself and answers with the empty document's
-hash in the same response. A response **without** `X-Facts-Hash` means the server does not do
+server does not need an upload of `{}`: the reported hash already says what the document is.
+It answers with the empty document's hash straight away, so the agent sends nothing, and
+clears the stored inventory once the agent has kept reporting the empty hash for ten minutes.
+An agent that reports it only briefly (it polled before its collectors ran) and then returns
+to its previous document costs nothing: the inventory and its history are left as they were.
+An upload of `{}` over an inventory is treated the same way. A response **without** `X-Facts-Hash` means the server does not do
 facts (an older version, or it could not read the host) — never a reason to upload.
 
 The server stores the last hash the agent reported, only writing it when it moves, so the

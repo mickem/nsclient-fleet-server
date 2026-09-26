@@ -133,7 +133,10 @@ export type FactsStatus =
   /** The agent has an inventory we have not received yet; it follows its next poll. */
   | "pending"
   /** The agent has a newer inventory than the one shown; same. */
-  | "outdated";
+  | "outdated"
+  /** The agent reports every fact set switched off; the inventory shown is cleared once it
+   *  has said so for a while (ten minutes), so a brief empty report does not wipe it. */
+  | "switched_off";
 
 export type FactChange = {
   /** Dotted, list records addressed by id: `software.installed[bash].version`. */

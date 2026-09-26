@@ -27,6 +27,7 @@ use fleet_core::facts::{
     self, FactChange, AGENT_SOURCE, EMPTY_FACTS_HASH, FACTS_HASH_HEADER, FACTS_HASH_NONE,
 };
 use fleet_core::selector::{scalar_text, HostFacts, MAX_FACT_PATH_LEN, MAX_VALUE_LEN};
+use fleet_core::time::now_unix;
 use fleet_storage::{FactsHashes, HostFactsRepo, HostRepo, ReplaceOutcome};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -56,6 +57,13 @@ const CHANGES_SHOWN: i64 = 50;
 /// Attempts at storing a document when another write keeps replacing it underneath.
 const STORE_ATTEMPTS: usize = 3;
 
+/// How long an agent must keep reporting the empty document before the inventory it had is
+/// cleared. One empty report — an agent that polled before its collectors ran — would
+/// otherwise wipe the inventory and restore it on the next poll, writing a "removed" and an
+/// "added" history row every time, and handing a misbehaving agent a cheap way to make the
+/// server diff its whole document twice per cycle.
+pub const EMPTY_CLEAR_GRACE_SECS: i64 = 600;
+
 fn header_name() -> HeaderName {
     HeaderName::from_static(FACTS_HASH_HEADER)
 }
@@ -80,7 +88,7 @@ pub async fn advertise(
             return None;
         }
     };
-    let mut held = hashes.held;
+    let mut advertised = hashes.held.clone();
     // Written only when it moved, so a steady-state poll stays a read. A malformed value is
     // ignored rather than refused: it is descriptive, and failing a poll over it would cost
     // the host its configuration.
@@ -90,21 +98,58 @@ pub async fn advertise(
                 tracing::error!(error = %e, "set_reported_hash failed");
             }
         }
-        // The operator switched every fact set off. The hash alone says what the document
-        // is — `{}` — so there is nothing to wait for: clear what we hold now, rather than
-        // keep showing the last inventory as merely "outdated" until an upload of an empty
-        // document that the agent has no reason to send.
-        if reported == EMPTY_FACTS_HASH && held.as_deref().is_some_and(|h| h != EMPTY_FACTS_HASH) {
-            match store(state, tenant_id, host_id, EMPTY_FACTS_HASH, "{}", None).await {
-                Ok(_) => {
-                    tracing::info!(%host_id, "host has no fact set enabled any more; cleared its inventory");
-                    held = Some(EMPTY_FACTS_HASH.to_owned());
+        if reported == EMPTY_FACTS_HASH && holds_inventory(&hashes) {
+            if empty_for_long_enough(&hashes, now_unix()) {
+                // The operator switched every fact set off, and the agent has said so for
+                // the whole grace period. The hash alone says what the document is — `{}` —
+                // so clear what we hold rather than wait for an upload of it.
+                match store(
+                    state,
+                    tenant_id,
+                    host_id,
+                    AGENT_SOURCE,
+                    EMPTY_FACTS_HASH,
+                    "{}",
+                    None,
+                )
+                .await
+                {
+                    Ok(ReplaceOutcome::Stored | ReplaceOutcome::Unchanged) => {
+                        tracing::info!(%host_id, "host has no fact set enabled any more; cleared its inventory");
+                        advertised = Some(EMPTY_FACTS_HASH.to_owned());
+                    }
+                    // Not cleared: keep answering with what we do hold, and try again on
+                    // the next poll.
+                    Ok(outcome) => {
+                        tracing::warn!(%host_id, ?outcome, "clearing host facts did not take")
+                    }
+                    Err(e) => tracing::error!(error = %e, "clearing host facts failed"),
                 }
-                Err(e) => tracing::error!(error = %e, "clearing host facts failed"),
+            } else {
+                // A clear is pending. Answer as if it had happened, so the agent does not
+                // upload `{}` in the meantime; if it goes back to its old document before the
+                // grace period is up, the answer is the held hash again and nothing moved.
+                advertised = Some(EMPTY_FACTS_HASH.to_owned());
             }
         }
     }
-    HeaderValue::from_str(held.as_deref().unwrap_or(FACTS_HASH_NONE)).ok()
+    HeaderValue::from_str(advertised.as_deref().unwrap_or(FACTS_HASH_NONE)).ok()
+}
+
+/// Whether we hold an inventory with something in it.
+fn holds_inventory(h: &FactsHashes) -> bool {
+    h.held
+        .as_deref()
+        .is_some_and(|held| held != EMPTY_FACTS_HASH)
+}
+
+/// Whether the agent has reported the empty document for the whole grace period. `hashes`
+/// is what was stored *before* this request, so a report that only now turned empty has
+/// not.
+fn empty_for_long_enough(h: &FactsHashes, now: i64) -> bool {
+    h.reported.as_deref() == Some(EMPTY_FACTS_HASH)
+        && h.reported_since
+            .is_some_and(|since| now - since >= EMPTY_CLEAR_GRACE_SECS)
 }
 
 /// Attach the header to a response, if there is one to attach.
@@ -132,20 +177,44 @@ pub async fn upload(
         }
     };
     let repo = HostFactsRepo::new(&state.db);
-    // A retried upload of what we already hold is the common repeat: answer it from the
-    // hash alone, without walking the document or reading the stored one.
-    let already_held = match repo.hashes(ctx.tenant_id, &ctx.host_id).await {
-        Ok(h) => h.and_then(|h| h.held).as_deref() == Some(upload.facts_hash.as_str()),
+    let hashes = match repo.hashes(ctx.tenant_id, &ctx.host_id).await {
+        Ok(Some(h)) => h,
+        Ok(None) => return (StatusCode::NOT_FOUND, "host not found").into_response(),
         Err(e) => {
             tracing::error!(error = %e, "facts hash lookup failed");
             return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
         }
     };
-    if !already_held {
+    if hashes.held.as_deref() == Some(upload.facts_hash.as_str()) {
+        // A re-send of what we already hold: answered from the hash alone, without walking
+        // the document. Only its collection time can have moved.
+        if let Some(collected_at) = upload.collected_at.as_deref() {
+            if let Err(e) = repo
+                .refresh_collected_at(
+                    ctx.tenant_id,
+                    &ctx.host_id,
+                    AGENT_SOURCE,
+                    &upload.facts_hash,
+                    collected_at,
+                )
+                .await
+            {
+                tracing::error!(error = %e, "refreshing collected_at failed");
+            }
+        }
+    } else if upload.facts_hash == EMPTY_FACTS_HASH
+        && holds_inventory(&hashes)
+        && !empty_for_long_enough(&hashes, now_unix())
+    {
+        // An empty document over a real one waits out the same grace period as an empty
+        // report does; the poll that ends it clears the inventory. Accepted, so the agent
+        // does not retry it.
+    } else {
         match store(
             &state,
             ctx.tenant_id,
             &ctx.host_id,
+            AGENT_SOURCE,
             &upload.facts_hash,
             upload.facts,
             upload.collected_at.as_deref(),
@@ -185,16 +254,22 @@ pub async fn upload(
     with_header(Json(serde_json::json!({})).into_response(), held)
 }
 
-/// Store `json` as the agent's document, and what changed since the previous one.
+/// Store `json` as `source`'s document for a host, and what changed since the previous one.
+///
+/// The one write path for facts, whatever the source: it also drops the host's cached
+/// desired state, because group selectors can read facts and a new document can move the
+/// host in or out of a group. A writer that went around this would leave hosts in the wrong
+/// groups until something else invalidated them.
 ///
 /// The previous document is read and diffed here, outside any transaction, and the write is
 /// a compare-and-set against its hash, so the single write connection is never held while a
 /// megabyte document is parsed. The new document is parsed at most once, and only when it
 /// actually differs from what is stored.
-async fn store(
+pub async fn store(
     state: &AppState,
     tenant_id: i64,
     host_id: &str,
+    source: &str,
     hash: &str,
     json: &str,
     collected_at: Option<&str>,
@@ -202,7 +277,7 @@ async fn store(
     let repo = HostFactsRepo::new(&state.db);
     let mut document: Option<Value> = None;
     for _ in 0..STORE_ATTEMPTS {
-        let previous = repo.get(tenant_id, host_id, AGENT_SOURCE).await?;
+        let previous = repo.get(tenant_id, host_id, source).await?;
         let previous_hash = previous.as_ref().map(|p| p.facts_hash.as_str());
         if previous_hash == Some(hash) {
             return Ok(ReplaceOutcome::Unchanged);
@@ -218,7 +293,7 @@ async fn store(
             .replace(
                 tenant_id,
                 host_id,
-                AGENT_SOURCE,
+                source,
                 hash,
                 json,
                 collected_at,
@@ -228,10 +303,8 @@ async fn store(
             )
             .await?;
         if outcome == ReplaceOutcome::Stored {
-            // Group selectors can read facts, so a new document can move this host in or
-            // out of a group. Its own cached state only — the same scope as a change to its
-            // reported tags, and for the same reason: nobody else's membership moved.
-            // Any future writer of another source must do the same.
+            // This host's cached state only — the same scope as a change to its reported
+            // tags, and for the same reason: nobody else's membership moved.
             state
                 .desired_state_cache
                 .invalidate_host(tenant_id, host_id);
@@ -336,7 +409,8 @@ fn history_entry(previous: Option<&str>, document: &Value) -> Option<String> {
 #[derive(Serialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FactsStatus {
-    /// The agent never sent a hash: it predates facts, or has not polled since.
+    /// The agent never sent a hash: it predates facts, or has not polled since. Also what a
+    /// stored document reads as when the agent has not confirmed holding it.
     NotReported,
     /// The agent has no fact set enabled.
     NothingEnabled,
@@ -346,6 +420,9 @@ pub enum FactsStatus {
     Pending,
     /// The agent has a newer document than the one shown; same.
     Outdated,
+    /// The agent reports every fact set switched off; the inventory shown is cleared once
+    /// it has said so for [`EMPTY_CLEAR_GRACE_SECS`].
+    SwitchedOff,
 }
 
 pub fn status(h: &FactsHashes) -> FactsStatus {
@@ -355,8 +432,11 @@ pub fn status(h: &FactsHashes) -> FactsStatus {
         {
             FactsStatus::NothingEnabled
         }
-        (None, None) => FactsStatus::NotReported,
-        (Some(_), None) => FactsStatus::Current,
+        (Some(_), Some(EMPTY_FACTS_HASH)) => FactsStatus::SwitchedOff,
+        // A document with no confirmation from the agent that it still holds it — the
+        // reported-hash write failed, or something other than the agent wrote its slot — is
+        // not "up to date".
+        (_, None) => FactsStatus::NotReported,
         (Some(held), Some(reported)) if held == reported => FactsStatus::Current,
         (None, Some(_)) => FactsStatus::Pending,
         (Some(_), Some(_)) => FactsStatus::Outdated,
@@ -528,7 +608,7 @@ impl CatalogAcc {
         // Per host first, so a host with the same path in forty records counts once.
         let mut local: BTreeMap<String, (PathKind, BTreeSet<String>)> = BTreeMap::new();
         if let Value::Object(m) = doc {
-            walk_children(m, "", 0, &mut local);
+            walk_children(m, "", false, 0, &mut local);
         }
         for (path, (kind, values)) in local {
             if !self.paths.contains_key(&path) && self.paths.len() >= MAX_CATALOG_PATHS {
@@ -589,9 +669,11 @@ fn note(local: &mut LocalPaths, path: &str, kind: PathKind, value: Option<String
     }
 }
 
+/// `in_record`: `m` is a record of the list at `path`, whose fields the path fans out to.
 fn walk_children(
     m: &serde_json::Map<String, Value>,
     path: &str,
+    in_record: bool,
     depth: usize,
     local: &mut LocalPaths,
 ) {
@@ -600,9 +682,10 @@ fn walk_children(
     }
     for (k, v) in m {
         // A key the dotted form cannot spell is reached with brackets — which need a key
-        // before them, so such a key at the top level cannot be selected on at all.
+        // before them, so such a key at the top level cannot be selected on at all. Nor can
+        // one inside a list record: there `path[k]` picks the record whose id is `k`.
         let child = if k.contains(['.', '[', ']']) {
-            if path.is_empty() || k.contains([']']) {
+            if path.is_empty() || in_record || k.contains([']']) {
                 continue;
             }
             format!("{path}[{k}]")
@@ -626,7 +709,7 @@ fn walk(v: &Value, path: &str, depth: usize, local: &mut LocalPaths) {
             note(local, path, PathKind::Map, None);
             m.keys()
                 .for_each(|k| note(local, path, PathKind::Map, Some(k.clone())));
-            walk_children(m, path, depth, local);
+            walk_children(m, path, false, depth, local);
         }
         Value::Array(items) => {
             note(local, path, PathKind::List, None);
@@ -636,7 +719,7 @@ fn walk(v: &Value, path: &str, depth: usize, local: &mut LocalPaths) {
                     Value::Object(record) => {
                         let id = record.get("id").and_then(Value::as_str).map(str::to_owned);
                         note(local, path, PathKind::List, id);
-                        walk_children(record, path, depth, local);
+                        walk_children(record, path, true, depth, local);
                     }
                     other => note(local, path, PathKind::List, scalar_text(other)),
                 }
@@ -708,7 +791,7 @@ mod tests {
     fn the_catalog_lists_paths_kinds_and_values_per_host() {
         let a = serde_json::json!({
             "os": {"family": "linux"},
-            "software": {"installed": [{"id": "bash", "version": "5.2"}, {"id": "vim", "version": "9.0"}]},
+            "software": {"installed": [{"id": "bash", "version": "5.2", "x.y": "z"}, {"id": "vim", "version": "9.0"}]},
             "services": {"sshd": {"state": "running"}, "a.b": {"state": "x"}},
         });
         let b = serde_json::json!({
@@ -738,6 +821,12 @@ mod tests {
             .contains(&("sshd".to_owned(), 1)));
         assert_eq!(path(&c, "services.sshd.state").values[0].0, "running");
         assert_eq!(path(&c, "services[a.b].state").hosts, 1);
+        // A dotted field of a list record has no spelling: `installed[x.y]` would pick the
+        // record whose id is "x.y". It is not offered.
+        assert!(c
+            .paths
+            .iter()
+            .all(|p| !p.path.starts_with("software.installed[")));
         assert_eq!(
             path(&c, "net.addresses").values,
             vec![("10.0.0.1".to_owned(), 1)]
@@ -749,7 +838,30 @@ mod tests {
         FactsHashes {
             held: held.map(str::to_owned),
             reported: reported.map(str::to_owned),
+            reported_since: None,
         }
+    }
+
+    #[test]
+    fn an_empty_report_clears_only_after_the_grace_period() {
+        let a = "a".repeat(64);
+        let now = 10_000;
+        let hashes = |reported: &str, since: i64| FactsHashes {
+            held: Some(a.clone()),
+            reported: Some(reported.to_owned()),
+            reported_since: Some(since),
+        };
+        assert!(!empty_for_long_enough(&hashes(EMPTY_FACTS_HASH, now), now));
+        assert!(!empty_for_long_enough(
+            &hashes(EMPTY_FACTS_HASH, now - EMPTY_CLEAR_GRACE_SECS + 1),
+            now
+        ));
+        assert!(empty_for_long_enough(
+            &hashes(EMPTY_FACTS_HASH, now - EMPTY_CLEAR_GRACE_SECS),
+            now
+        ));
+        // Long-standing, but not empty.
+        assert!(!empty_for_long_enough(&hashes(&a, 0), now));
     }
 
     #[test]
@@ -765,16 +877,16 @@ mod tests {
             status(&h(Some(EMPTY_FACTS_HASH), Some(EMPTY_FACTS_HASH))),
             FactsStatus::NothingEnabled
         );
-        // Only until the next poll or report: `advertise` clears a stored inventory as soon
-        // as the agent reports the empty document's hash.
+        // Until the grace period ends and the inventory is cleared.
         assert_eq!(
             status(&h(Some(&a), Some(EMPTY_FACTS_HASH))),
-            FactsStatus::Outdated
+            FactsStatus::SwitchedOff
         );
         assert_eq!(status(&h(None, Some(&a))), FactsStatus::Pending);
         assert_eq!(status(&h(Some(&a), Some(&a))), FactsStatus::Current);
         assert_eq!(status(&h(Some(&a), Some(&b))), FactsStatus::Outdated);
-        assert_eq!(status(&h(Some(&a), None)), FactsStatus::Current);
+        // Stored, but the agent never confirmed holding it.
+        assert_eq!(status(&h(Some(&a), None)), FactsStatus::NotReported);
     }
 
     #[test]

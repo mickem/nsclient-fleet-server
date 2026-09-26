@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import {
+  Alert,
   Accordion,
   AccordionDetails,
   AccordionSummary,
@@ -41,6 +42,7 @@ const STATUS: Record<FactsStatus, StatusLook> = {
   pending: { label: "Inventory on its way", color: "info" },
   outdated: { label: "Newer inventory pending", color: "warning" },
   nothing_enabled: { label: "No fact sets enabled", color: "default" },
+  switched_off: { label: "Switched off", color: "default" },
   not_reported: { label: "Not reported", color: "default" },
 };
 
@@ -319,7 +321,14 @@ function emptyExplanation(status: FactsStatus): string {
   }
 }
 
-export function InventoryCard({ facts }: { facts: HostFacts | null }) {
+export function InventoryCard({
+  facts,
+  error,
+}: {
+  facts: HostFacts | null;
+  /** Why the inventory could not be loaded, when it could not. */
+  error?: string | null;
+}) {
   const [showHistory, setShowHistory] = useState(false);
   const sets = facts?.facts ? Object.keys(facts.facts).sort() : [];
   const history = facts?.changes ?? [];
@@ -339,7 +348,9 @@ export function InventoryCard({ facts }: { facts: HostFacts | null }) {
             />
           )}
         </Stack>
-        {!facts ? (
+        {!facts && error ? (
+          <Alert severity="error">Could not load the inventory: {error}</Alert>
+        ) : !facts ? (
           <Typography>Loading…</Typography>
         ) : (
           <>
@@ -350,6 +361,9 @@ export function InventoryCard({ facts }: { facts: HostFacts | null }) {
                 {facts.size_bytes !== null && <> · {fmtBytes(facts.size_bytes)}</>}
                 {facts.status === "outdated" &&
                   " · the agent has a newer inventory, which follows its next poll"}
+                {facts.status === "switched_off" &&
+                  " · every fact set was switched off on the host; this inventory is cleared " +
+                    "once it has stayed off for ten minutes"}
               </Typography>
             )}
             {sets.length === 0 ? (

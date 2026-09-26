@@ -1441,6 +1441,8 @@ pub struct StoredFacts {
 pub struct FactsHashes {
     pub held: Option<String>,
     pub reported: Option<String>,
+    /// When `reported` last changed (unix seconds): how long the agent has been saying it.
+    pub reported_since: Option<i64>,
 }
 
 pub struct FactChangeRow {
@@ -1481,7 +1483,8 @@ impl<'a> HostFactsRepo<'a> {
     /// from every host asks it.
     pub async fn hashes(&self, tenant_id: i64, host_id: &str) -> Result<Option<FactsHashes>> {
         let row = sqlx::query(
-            "SELECT h.facts_reported_hash AS reported, f.facts_hash AS held
+            "SELECT h.facts_reported_hash AS reported, h.facts_reported_at AS reported_since,
+                    f.facts_hash AS held
                FROM hosts h
                LEFT JOIN host_facts f
                       ON f.tenant_id = h.tenant_id AND f.host_id = h.id AND f.source = ?
@@ -1495,12 +1498,13 @@ impl<'a> HostFactsRepo<'a> {
         Ok(row.map(|r| FactsHashes {
             held: r.get("held"),
             reported: r.get("reported"),
+            reported_since: r.get("reported_since"),
         }))
     }
 
-    /// Record the hash the agent says it holds. Returns true iff that changed the stored
-    /// value. The comparison lives in the statement, so an unchanged hash — nearly every
-    /// report — writes nothing.
+    /// Record the hash the agent says it holds, and since when. Returns true iff that
+    /// changed the stored value. The comparison lives in the statement, so an unchanged
+    /// hash — nearly every report — writes nothing, and the time stays when it first moved.
     pub async fn set_reported_hash(
         &self,
         tenant_id: i64,
@@ -1508,11 +1512,12 @@ impl<'a> HostFactsRepo<'a> {
         hash: &str,
     ) -> Result<bool> {
         let res = sqlx::query(
-            "UPDATE hosts SET facts_reported_hash = ?
+            "UPDATE hosts SET facts_reported_hash = ?, facts_reported_at = ?
               WHERE tenant_id = ? AND id = ?
                 AND (facts_reported_hash IS NULL OR facts_reported_hash != ?)",
         )
         .bind(hash)
+        .bind(now_unix())
         .bind(tenant_id)
         .bind(host_id)
         .bind(hash)
@@ -1667,6 +1672,33 @@ impl<'a> HostFactsRepo<'a> {
 
         tx.commit().await?;
         Ok(ReplaceOutcome::Stored)
+    }
+
+    /// The agent sent again the document we already hold: keep the document, record when it
+    /// was collected and received. Writes only when the collection time actually moved.
+    pub async fn refresh_collected_at(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        source: &str,
+        facts_hash: &str,
+        collected_at: &str,
+    ) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE host_facts SET collected_at = ?, received_at = ?
+              WHERE tenant_id = ? AND host_id = ? AND source = ? AND facts_hash = ?
+                AND (collected_at IS NULL OR collected_at != ?)",
+        )
+        .bind(collected_at)
+        .bind(now_unix())
+        .bind(tenant_id)
+        .bind(host_id)
+        .bind(source)
+        .bind(facts_hash)
+        .bind(collected_at)
+        .execute(&self.db.write)
+        .await?;
+        Ok(res.rows_affected() > 0)
     }
 
     /// The most recent history entries of one source for a host, newest first.

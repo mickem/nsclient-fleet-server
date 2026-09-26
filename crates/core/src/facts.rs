@@ -173,6 +173,11 @@ impl FactsDiff {
 const MAX_SHOWN_STRING: usize = 200;
 /// Longest list of scalars copied into a change.
 const MAX_SHOWN_LIST: usize = 16;
+/// Longest key or record id copied into a change's path. Both come from the document, and
+/// without a cap a single megabyte id would make one history row the size of the document.
+const MAX_PATH_SEGMENT: usize = 128;
+/// Longest path stored in a change, however deep the document.
+const MAX_PATH: usize = 1024;
 
 /// Differences from `old` to `new`, at most `max_changes` of them listed.
 pub fn diff(old: &Value, new: &Value, max_changes: usize) -> FactsDiff {
@@ -196,7 +201,7 @@ impl Differ {
             return;
         }
         self.out.changes.push(FactChange {
-            path,
+            path: clip_to(&path, MAX_PATH),
             kind,
             old: old.and_then(shown),
             new: new.and_then(shown),
@@ -257,15 +262,16 @@ impl Differ {
 }
 
 fn join(path: &str, key: &str) -> String {
+    let key = clip_to(key, MAX_PATH_SEGMENT);
     if path.is_empty() {
-        key.to_owned()
+        key
     } else {
         format!("{path}.{key}")
     }
 }
 
 fn record_path(path: &str, id: &str) -> String {
-    format!("{path}[{id}]")
+    format!("{path}[{}]", clip_to(id, MAX_PATH_SEGMENT))
 }
 
 /// The ids of a list of records, or `None` if this is not one: every element an object with
@@ -306,12 +312,18 @@ fn shown(v: &Value) -> Option<Value> {
 }
 
 fn clip(s: &str) -> String {
-    if s.chars().count() <= MAX_SHOWN_STRING {
-        s.to_owned()
-    } else {
-        let mut c: String = s.chars().take(MAX_SHOWN_STRING).collect();
-        c.push('…');
-        c
+    clip_to(s, MAX_SHOWN_STRING)
+}
+
+/// `s` cut to `max` characters, with an ellipsis marking the cut.
+fn clip_to(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        None => s.to_owned(),
+        Some((cut, _)) => {
+            let mut c = s[..cut].to_owned();
+            c.push('…');
+            c
+        }
     }
 }
 
@@ -504,6 +516,35 @@ mod tests {
         let d = diff(&old, &new, 3);
         assert_eq!(d.changes.len(), 3);
         assert_eq!(d.truncated, 7);
+    }
+
+    #[test]
+    fn long_ids_and_keys_are_clipped_in_paths() {
+        let id = "i".repeat(1_000_000);
+        let key = "k".repeat(10_000);
+        let old = json!({"s": {"l": []}});
+        let new = json!({"s": {"l": [{ "id": id }]}, key.clone(): 1});
+        let d = diff(&old, &new, 10);
+        assert_eq!(d.changes.len(), 2);
+        for c in &d.changes {
+            assert!(
+                c.path.chars().count() <= 2 + MAX_PATH_SEGMENT + 8,
+                "{}",
+                c.path.len()
+            );
+            assert!(c.path.contains('…'));
+        }
+        // Deep documents are capped as a whole.
+        let deep = |leaf: i64| {
+            let mut v = json!(leaf);
+            for _ in 0..20 {
+                v = json!({ key.clone(): v });
+            }
+            v
+        };
+        let d = diff(&deep(1), &deep(2), 10);
+        assert_eq!(d.changes.len(), 1);
+        assert_eq!(d.changes[0].path.chars().count(), MAX_PATH + 1);
     }
 
     #[test]

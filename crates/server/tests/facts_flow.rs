@@ -328,8 +328,25 @@ async fn a_write_that_raced_another_is_refused_as_a_conflict() {
     );
 }
 
+/// Pretend the agent has reported what it reports now for longer than the grace period.
+async fn age_reported_hash(s: &TestServer, host_id: &str) {
+    sqlx::query("UPDATE hosts SET facts_reported_at = facts_reported_at - ? WHERE id = ?")
+        .bind(fleet_server::facts::EMPTY_CLEAR_GRACE_SECS + 1)
+        .bind(host_id)
+        .execute(&s.db.write)
+        .await
+        .unwrap();
+}
+
+async fn history_len(s: &TestServer, host_id: &str) -> usize {
+    facts_view(s, host_id).await["changes"]
+        .as_array()
+        .unwrap()
+        .len()
+}
+
 #[tokio::test]
-async fn switching_every_set_off_clears_the_inventory_without_an_upload() {
+async fn switching_every_set_off_clears_the_inventory_after_the_grace_period() {
     let (s, agent, host_id) = setup().await;
     agent
         .upload_facts(facts_upload_body(OS_DOC, "t"))
@@ -337,13 +354,21 @@ async fn switching_every_set_off_clears_the_inventory_without_an_upload() {
         .unwrap();
 
     // The operator turned everything off: the agent now reports the empty document's hash.
-    // It has no reason to upload `{}`, and must not need to.
+    // The clear is pending, and the answer already says so, so the agent uploads nothing.
     let (_, held) = agent.poll_with_facts(None, EMPTY_FACTS_HASH).await.unwrap();
+    assert_eq!(held.as_deref(), Some(EMPTY_FACTS_HASH));
+    let v = facts_view(&s, &host_id).await;
+    assert_eq!(v["status"], "switched_off");
     assert_eq!(
-        held.as_deref(),
-        Some(EMPTY_FACTS_HASH),
-        "answered with the cleared document's hash, so the agent sees no miss"
+        v["facts"]["os"]["family"], "linux",
+        "kept during the grace period"
     );
+
+    // Still saying so once the grace period is over: the next poll clears it.
+    age_reported_hash(&s, &host_id).await;
+    s.agent_limits.forget_last_poll(&host_id);
+    let (_, held) = agent.poll_with_facts(None, EMPTY_FACTS_HASH).await.unwrap();
+    assert_eq!(held.as_deref(), Some(EMPTY_FACTS_HASH));
 
     let v = facts_view(&s, &host_id).await;
     assert_eq!(v["status"], "nothing_enabled");
@@ -357,6 +382,88 @@ async fn switching_every_set_off_clears_the_inventory_without_an_upload() {
         .collect();
     assert_eq!(removed, vec!["os", "storage"]);
     assert_eq!(latest["changes"][0]["kind"], "removed");
+}
+
+#[tokio::test]
+async fn a_brief_empty_report_changes_nothing() {
+    let (s, agent, host_id) = setup().await;
+    let hash = sha256_hex(OS_DOC.as_bytes());
+    agent
+        .upload_facts(facts_upload_body(OS_DOC, "t"))
+        .await
+        .unwrap();
+    let before = history_len(&s, &host_id).await;
+
+    // An agent that polled before its collectors ran, and even sent `{}`...
+    agent.poll_with_facts(None, EMPTY_FACTS_HASH).await.unwrap();
+    let (status, held) = agent
+        .upload_facts(facts_upload_body("{}", "t"))
+        .await
+        .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(held.as_deref(), Some(EMPTY_FACTS_HASH));
+
+    // ...and then came back with its inventory.
+    s.agent_limits.forget_last_poll(&host_id);
+    let (_, held) = agent.poll_with_facts(None, &hash).await.unwrap();
+    assert_eq!(held.as_deref(), Some(hash.as_str()), "nothing to re-upload");
+
+    let v = facts_view(&s, &host_id).await;
+    assert_eq!(v["status"], "current");
+    assert_eq!(v["facts_hash"], hash);
+    assert_eq!(
+        history_len(&s, &host_id).await,
+        before,
+        "no removed/added churn"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_clear_is_not_reported_as_cleared() {
+    let (s, agent, host_id) = setup().await;
+    agent
+        .upload_facts(facts_upload_body(OS_DOC, "t"))
+        .await
+        .unwrap();
+    agent.poll_with_facts(None, EMPTY_FACTS_HASH).await.unwrap();
+    age_reported_hash(&s, &host_id).await;
+    // The document cannot be replaced: the clear has to fail.
+    sqlx::query(
+        "CREATE TRIGGER no_facts_update BEFORE UPDATE ON host_facts
+         BEGIN SELECT RAISE(ABORT, 'refused'); END",
+    )
+    .execute(&s.db.write)
+    .await
+    .unwrap();
+
+    s.agent_limits.forget_last_poll(&host_id);
+    let (_, held) = agent.poll_with_facts(None, EMPTY_FACTS_HASH).await.unwrap();
+    assert_eq!(
+        held.as_deref(),
+        Some(sha256_hex(OS_DOC.as_bytes()).as_str()),
+        "answered with what is actually held"
+    );
+    assert_eq!(
+        facts_view(&s, &host_id).await["facts"]["os"]["family"],
+        "linux"
+    );
+}
+
+#[tokio::test]
+async fn a_resent_document_updates_when_it_was_collected() {
+    let (s, agent, host_id) = setup().await;
+    agent
+        .upload_facts(facts_upload_body(OS_DOC, "2026-09-25T10:00:00Z"))
+        .await
+        .unwrap();
+    let (status, _) = agent
+        .upload_facts(facts_upload_body(OS_DOC, "2026-09-26T10:00:00Z"))
+        .await
+        .unwrap();
+    assert_eq!(status, 200);
+    let v = facts_view(&s, &host_id).await;
+    assert_eq!(v["collected_at"], "2026-09-26T10:00:00Z");
+    assert_eq!(v["changes"].as_array().unwrap().len(), 1, "not a change");
 }
 
 #[tokio::test]

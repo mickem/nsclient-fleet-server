@@ -180,8 +180,10 @@ pub enum Expr {
         /// The document read: [`AGENT_SOURCE`] (the default) or an imported source.
         #[serde(default = "agent_facts")]
         facts: String,
-        /// A [`FactPath`], e.g. `os.family` or `software.installed[bash].version`.
-        path: String,
+        /// A [`FactPath`], e.g. `os.family` or `software.installed[bash].version`. Parsed
+        /// once, when the selector is read, and stored parsed: it is resolved per group per
+        /// host on every recompute.
+        path: FactPath,
         #[serde(flatten)]
         test: FactTest,
     },
@@ -352,10 +354,11 @@ fn validate_expr(e: &Expr, depth: usize, nodes: &mut usize) -> Result<(), Select
             if !valid_source(facts) {
                 return Err(SelectorError::BadFactsSource(facts.clone()));
             }
-            if path.len() > MAX_FACT_PATH_LEN {
+            // Parsed and length-checked when deserialized; checked again for a selector
+            // built in code.
+            if path.as_str().len() > MAX_FACT_PATH_LEN {
                 return Err(SelectorError::BadFactPath("too long"));
             }
-            FactPath::parse(path).map_err(SelectorError::BadFactPath)?;
             match test {
                 FactTest::Exists => {}
                 FactTest::Eq { value } | FactTest::Has { value } => {
@@ -403,7 +406,7 @@ fn eval(e: &Expr, host: &Host<'_>) -> bool {
         } => matching(tags, key, *source).any(|t| values.iter().any(|allowed| allowed == &t.value)),
         Expr::Exists { key, source } => matching(tags, key, *source).next().is_some(),
         Expr::Fact { facts, path, test } => {
-            let (Some(doc), Ok(path)) = (host.facts.get(facts), FactPath::parse(path)) else {
+            let Some(doc) = host.facts.get(facts) else {
                 return false;
             };
             path.resolve(doc).into_iter().any(|v| fact_test(test, v))
@@ -453,9 +456,30 @@ pub fn scalar_text(v: &Value) -> Option<String> {
 /// * `[id]` picks one record out of a list by its `id` — or one entry out of a map by its
 ///   key, which is also how a key containing a dot is reached. Picking the record first is
 ///   what ties two conditions to the same record: `software.installed[bash].version`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serialized as the path text; deserializing parses it, so a stored selector with a path
+/// that does not parse is refused when read rather than evaluated as never matching.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct FactPath {
+    raw: String,
     segments: Vec<Segment>,
+}
+
+impl TryFrom<String> for FactPath {
+    type Error = String;
+    fn try_from(raw: String) -> Result<Self, String> {
+        if raw.len() > MAX_FACT_PATH_LEN {
+            return Err("fact path too long".into());
+        }
+        Self::parse(&raw).map_err(|e| format!("bad fact path: {e}"))
+    }
+}
+
+impl From<FactPath> for String {
+    fn from(p: FactPath) -> String {
+        p.raw
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -498,7 +522,15 @@ impl FactPath {
                 None => return Err("expected . after ]"),
             }
         }
-        Ok(Self { segments })
+        Ok(Self {
+            raw: path.to_owned(),
+            segments,
+        })
+    }
+
+    /// The path as written.
+    pub fn as_str(&self) -> &str {
+        &self.raw
     }
 
     /// Every value this path reaches in `doc`.
@@ -586,7 +618,7 @@ mod tests {
         Selector {
             clauses: vec![Expr::Fact {
                 facts: AGENT_SOURCE.into(),
-                path: path.into(),
+                path: FactPath::parse(path).unwrap(),
                 test,
             }],
         }
@@ -753,7 +785,7 @@ mod tests {
         let s = Selector {
             clauses: vec![Expr::Fact {
                 facts: "import:cmdb".into(),
-                path: "os.family".into(),
+                path: FactPath::parse("os.family").unwrap(),
                 test: FactTest::Eq {
                     value: "windows".into(),
                 },
@@ -773,7 +805,7 @@ mod tests {
         let imported = Selector {
             clauses: vec![Expr::Fact {
                 facts: "import:cmdb".into(),
-                path: "owner".into(),
+                path: FactPath::parse("owner").unwrap(),
                 test: FactTest::Exists,
             }],
         };
@@ -811,7 +843,7 @@ mod tests {
             s.clauses[0],
             Expr::Fact {
                 facts: AGENT_SOURCE.into(),
-                path: "software.installed".into(),
+                path: FactPath::parse("software.installed").unwrap(),
                 test: FactTest::Has {
                     value: "bash".into()
                 },

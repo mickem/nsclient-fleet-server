@@ -1,7 +1,12 @@
 //! The test server shared by the integration tests that use it: the real routers on
 //! ephemeral ports, a fresh database, and the sign-up and enrollment steps most tests start
-//! with. New tests should use this rather than copy it — a `Config` field added later then
-//! means editing one harness, not one per test file.
+//! with. New tests should use this rather than copy it. [`start_with`] adjusts the state
+//! (a limit, a config value) before the server comes up.
+//!
+//! Not every test file is on it yet. api_key_flow, auth_flow, mux_flow, platform_flow,
+//! users_flow and shutdown_flow build servers that differ materially — on-prem config,
+//! other listeners, their own lifecycle — and still carry their own harness; a `Config`
+//! field added later has to be added there too until they move over.
 //!
 //! Each test binary compiles its own copy of this module and uses a different subset of it.
 #![allow(dead_code)]
@@ -20,6 +25,9 @@ pub struct TestServer {
     pub handles: Vec<tokio::task::JoinHandle<()>>,
     pub db: Db,
     pub agent_limits: fleet_server::agent_limits::AgentRateLimits,
+    /// The state the routers were built with: its caches, trust store and config are the
+    /// live ones.
+    pub state: fleet_server::AppState,
     pub cookie_jar: reqwest::Client,
 }
 
@@ -32,6 +40,11 @@ impl Drop for TestServer {
 }
 
 pub async fn start() -> TestServer {
+    start_with(|_| {}).await
+}
+
+/// [`start`], with `tweak` applied to the state before the routers are built.
+pub async fn start_with(tweak: impl FnOnce(&mut fleet_server::AppState)) -> TestServer {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
 
@@ -94,7 +107,7 @@ pub async fn start() -> TestServer {
             .unwrap();
 
     let agent_limits_handle = agent_limits.clone();
-    let state = fleet_server::AppState {
+    let mut state = fleet_server::AppState {
         db: db.clone(),
         config: cfg.clone(),
         email,
@@ -109,6 +122,8 @@ pub async fn start() -> TestServer {
         )),
         desired_state_cache: Default::default(),
     };
+    tweak(&mut state);
+    let state_handle = state.clone();
 
     let mtls_state = state.clone();
     let mtls_handle = tokio::spawn(async move {
@@ -144,6 +159,7 @@ pub async fn start() -> TestServer {
         handles: vec![http_handle, mtls_handle],
         db,
         agent_limits: agent_limits_handle,
+        state: state_handle,
         cookie_jar: reqwest::Client::builder()
             .cookie_store(true)
             .redirect(reqwest::redirect::Policy::none())
