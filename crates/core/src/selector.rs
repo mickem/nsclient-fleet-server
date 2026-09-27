@@ -446,9 +446,9 @@ pub fn scalar_text(v: &Value) -> Option<String> {
 
 /// A dotted path into a facts document: `os.family`, `software.installed[bash].version`.
 ///
-/// Each segment is a key, optionally followed by `[id]`. The grammar is the one the facts
-/// history already prints (see [`crate::facts::diff`]), so a path copied from a change
-/// works as a selector:
+/// Each segment is a key, optionally followed by `[id]`. The facts history spells its paths
+/// with [`Self::child`] and [`Self::pick`] (see [`crate::facts::diff`]), so a path copied
+/// from a change works as a selector:
 ///
 /// * A key steps into a map. Stepping into a *list* steps into every record in it, so
 ///   `network.interfaces.addresses` is every interface's addresses, and a test on it passes
@@ -556,6 +556,19 @@ impl FactPath {
         } else {
             format!("{parent}.{key}")
         };
+        (path.len() <= MAX_FACT_PATH_LEN).then_some(path)
+    }
+
+    /// How to write the path to the record whose `id` is `id` in the list at `parent`, or
+    /// `None` when the grammar has no way to: the `[id]` [`Self::parse`] reads back. An id
+    /// is taken up to the first `]`, so one holding `]` has no spelling, nor does an empty
+    /// one, a list at the top (there is none: a document is a map), or a path longer than a
+    /// selector may store.
+    pub fn pick(parent: &str, id: &str) -> Option<String> {
+        if parent.is_empty() || id.is_empty() || id.contains(']') {
+            return None;
+        }
+        let path = format!("{parent}[{id}]");
         (path.len() <= MAX_FACT_PATH_LEN).then_some(path)
     }
 

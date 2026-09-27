@@ -24,6 +24,8 @@ use serde_json::{Map, Value};
 pub use crate::digest::sha256_hex;
 use std::collections::{BTreeSet, HashMap};
 
+use crate::selector::FactPath;
+
 /// Response header carrying the hash of the document the server holds for this host.
 /// Lowercase, as the agent looks it up.
 pub const FACTS_HASH_HEADER: &str = "x-facts-hash";
@@ -142,7 +144,9 @@ pub enum ChangeKind {
 
 /// One difference between two documents.
 ///
-/// `path` is dotted, with list records addressed by id: `software.installed[bash].version`.
+/// `path` is dotted, with list records addressed by id: `software.installed[bash].version`
+/// — a selector path ([`FactPath`]), usable in a group as it stands. A change with no such
+/// path is reported at the nearest one that has, as `changed`; `""` is the whole document.
 /// `old`/`new` carry the value when it is short enough to be worth showing (a scalar, or a
 /// short list of scalars); a whole added or removed record or section is named, not copied.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -173,35 +177,47 @@ impl FactsDiff {
 const MAX_SHOWN_STRING: usize = 200;
 /// Longest list of scalars copied into a change.
 const MAX_SHOWN_LIST: usize = 16;
-/// Longest key or record id copied into a change's path. Both come from the document, and
-/// without a cap a single megabyte id would make one history row the size of the document.
-const MAX_PATH_SEGMENT: usize = 128;
-/// Longest path stored in a change, however deep the document.
-const MAX_PATH: usize = 1024;
 
 /// Differences from `old` to `new`, at most `max_changes` of them listed.
 pub fn diff(old: &Value, new: &Value, max_changes: usize) -> FactsDiff {
     let mut d = Differ {
         out: FactsDiff::default(),
         max: max_changes,
+        at_parent: BTreeSet::new(),
     };
     d.value("", old, new);
     d.out
 }
 
+/// Every path a change carries is spelled with the selector grammar ([`FactPath::child`]
+/// and [`FactPath::pick`]), so it can be copied into a group's selector as it stands. A
+/// key or record id the grammar cannot spell — an id holding `]`, a dotted key at the top,
+/// a path longer than a selector may store — is reported as a change of the nearest path
+/// that can be spelled, once, rather than under a path that would not read back. That
+/// also bounds every stored path by the selector's own limit, however long an id is.
 struct Differ {
     out: FactsDiff,
     max: usize,
+    /// Parents already reported for a change beneath them that has no path of its own.
+    at_parent: BTreeSet<String>,
 }
 
 impl Differ {
+    /// Something under `path` changed that has no path of its own: report `path` itself as
+    /// changed, once however many such changes it has. `""` is the whole document.
+    fn changed_beneath(&mut self, path: &str) {
+        if self.at_parent.insert(path.to_owned()) {
+            self.push(path.to_owned(), ChangeKind::Changed, None, None);
+        }
+    }
+
     fn push(&mut self, path: String, kind: ChangeKind, old: Option<&Value>, new: Option<&Value>) {
         if self.out.changes.len() >= self.max {
             self.out.truncated += 1;
             return;
         }
         self.out.changes.push(FactChange {
-            path: clip_to(&path, MAX_PATH),
+            path,
             kind,
             old: old.and_then(shown),
             new: new.and_then(shown),
@@ -226,7 +242,14 @@ impl Differ {
         // any crate in the build may turn that on.
         let keys: BTreeSet<&String> = old.keys().chain(new.keys()).collect();
         for k in keys {
-            let p = join(path, k);
+            // A record, once picked by `[id]`, is an ordinary map: its keys are spelled as
+            // any map's (not as the fanned-out fields of a list, which the catalog offers).
+            let Some(p) = FactPath::child(path, k, false) else {
+                if old.get(k) != new.get(k) {
+                    self.changed_beneath(path);
+                }
+                continue;
+            };
             match (old.get(k), new.get(k)) {
                 (Some(o), Some(n)) => self.value(&p, o, n),
                 (Some(o), None) => self.push(p, ChangeKind::Removed, Some(o), None),
@@ -248,30 +271,25 @@ impl Differ {
         let new_set: BTreeSet<&str> = new_ids.iter().copied().collect();
         for (id, v) in old_ids.iter().zip(old) {
             if !new_set.contains(id) {
-                self.push(record_path(path, id), ChangeKind::Removed, Some(v), None);
+                match FactPath::pick(path, id) {
+                    Some(p) => self.push(p, ChangeKind::Removed, Some(v), None),
+                    None => self.changed_beneath(path),
+                }
             }
         }
         for (id, v) in new_ids.iter().zip(new) {
-            let p = record_path(path, id);
+            let Some(p) = FactPath::pick(path, id) else {
+                if old_by_id.get(id) != Some(&v) {
+                    self.changed_beneath(path);
+                }
+                continue;
+            };
             match old_by_id.get(id) {
                 Some(o) => self.value(&p, o, v),
                 None => self.push(p, ChangeKind::Added, None, Some(v)),
             }
         }
     }
-}
-
-fn join(path: &str, key: &str) -> String {
-    let key = clip_to(key, MAX_PATH_SEGMENT);
-    if path.is_empty() {
-        key
-    } else {
-        format!("{path}.{key}")
-    }
-}
-
-fn record_path(path: &str, id: &str) -> String {
-    format!("{path}[{}]", clip_to(id, MAX_PATH_SEGMENT))
 }
 
 /// The ids of a list of records, or `None` if this is not one: every element an object with
@@ -519,32 +537,70 @@ mod tests {
     }
 
     #[test]
-    fn long_ids_and_keys_are_clipped_in_paths() {
-        let id = "i".repeat(1_000_000);
-        let key = "k".repeat(10_000);
-        let old = json!({"s": {"l": []}});
-        let new = json!({"s": {"l": [{ "id": id }]}, key.clone(): 1});
+    fn a_change_with_no_spelling_is_reported_at_its_parent() {
+        use crate::selector::MAX_FACT_PATH_LEN;
+        let long_id = "i".repeat(1_000_000);
+        let long_key = "k".repeat(10_000);
+        let old = json!({"s": {"l": [], "m": {"a": 1}}});
+        let new = json!({
+            "s": {"l": [{ "id": long_id }, {"id": "x]y"}], "m": {"a": 1, "b.c": 2}},
+            long_key.clone(): 1,
+            "top.level": 1,
+        });
         let d = diff(&old, &new, 10);
-        assert_eq!(d.changes.len(), 2);
+        let got: Vec<(&str, ChangeKind)> = d
+            .changes
+            .iter()
+            .map(|c| (c.path.as_str(), c.kind))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                // The key too long for a selector, and the dotted key at the top: both are
+                // changes to the document itself, reported once.
+                ("", ChangeKind::Changed),
+                // Neither record has one: a megabyte id, and one holding `]`.
+                ("s.l", ChangeKind::Changed),
+                // A dotted key below the top has a spelling: brackets.
+                ("s.m[b.c]", ChangeKind::Added),
+            ]
+        );
+        assert!(d.changes.iter().all(|c| c.path.len() <= MAX_FACT_PATH_LEN));
+    }
+
+    #[test]
+    fn every_change_path_reads_back_as_a_selector_path() {
+        let old = json!({
+            "os": {"name": "a"},
+            "services": {"a.b": {"state": "stopped"}, "sshd": {"state": "running"}},
+            "software": {"installed": [
+                {"id": "python3.11", "version": "3.11.1"},
+                {"id": "bash", "version": "5.1"},
+            ]},
+        });
+        let new = json!({
+            "os": {"name": "b"},
+            "services": {"a.b": {"state": "running"}},
+            "software": {"installed": [
+                {"id": "python3.11", "version": "3.11.2"},
+                {"id": "zsh", "version": "5.9"},
+            ]},
+        });
+        let d = diff(&old, &new, 100);
+        assert_eq!(d.changes.len(), 6, "{:?}", d.changes);
         for c in &d.changes {
-            assert!(
-                c.path.chars().count() <= 2 + MAX_PATH_SEGMENT + 8,
-                "{}",
-                c.path.len()
-            );
-            assert!(c.path.contains('…'));
-        }
-        // Deep documents are capped as a whole.
-        let deep = |leaf: i64| {
-            let mut v = json!(leaf);
-            for _ in 0..20 {
-                v = json!({ key.clone(): v });
+            let path = FactPath::parse(&c.path).unwrap_or_else(|e| panic!("{}: {e}", c.path));
+            // What the change says is there, the path finds there.
+            let (doc, value) = match c.kind {
+                ChangeKind::Removed => (&old, &c.old),
+                _ => (&new, &c.new),
+            };
+            let found = path.resolve(doc);
+            assert_eq!(found.len(), 1, "{} resolves to one value", c.path);
+            if let Some(v) = value {
+                assert_eq!(found[0], v, "{}", c.path);
             }
-            v
-        };
-        let d = diff(&deep(1), &deep(2), 10);
-        assert_eq!(d.changes.len(), 1);
-        assert_eq!(d.changes[0].path.chars().count(), MAX_PATH + 1);
+        }
     }
 
     #[test]

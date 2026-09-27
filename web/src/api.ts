@@ -139,7 +139,9 @@ export type FactsStatus =
   | "switched_off";
 
 export type FactChange = {
-  /** Dotted, list records addressed by id: `software.installed[bash].version`. */
+  /** Dotted, list records addressed by id: `software.installed[bash].version`. A selector
+   *  path, usable in a group as it stands. `""`: the whole document (a change beneath it
+   *  that has no path of its own). */
   path: string;
   kind: "added" | "removed" | "changed";
   /** Present when short enough to show: a scalar, or a short list of scalars. */

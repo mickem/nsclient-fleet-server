@@ -267,7 +267,7 @@ function ChangeLine({ c }: { c: FactChange }) {
         sx={{ height: 20, minWidth: "4.5rem" }}
       />
       <Typography variant="body2" sx={{ fontFamily: "monospace", wordBreak: "break-all" }}>
-        {c.path}
+        {c.path || "(whole document)"}
       </Typography>
       {detail && (
         <Typography variant="body2" color="text.secondary" sx={{ wordBreak: "break-word" }}>
