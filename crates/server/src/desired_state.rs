@@ -195,13 +195,20 @@ impl DesiredStateCache {
     /// Forget a host that is gone — deleted, or cut off pending re-enrollment — entirely.
     /// Not [`Self::invalidate_host`], whose tombstone would stay in the map for a host that
     /// never polls again: a fleet that enrolls and deletes hosts all day would fill the map
-    /// with them. A compute still in flight for the host may store its result; nothing will
-    /// ever read it, and it is reclaimed as idle.
+    /// with them.
+    ///
+    /// Dropping the entry drops its generation, as a sweep does, and for the same reason the
+    /// epoch moves with it: a revoked host keeps its row, so an operator can still edit its
+    /// tags, and that invalidation would start it again from generation 1 — possibly the
+    /// generation of a compute still in flight, whose pre-edit result would then be stored
+    /// and served once the host re-enrolls under the same id. Moving the epoch voids every
+    /// ticket in flight, at the cost of one recompute each.
     pub fn forget_host(&self, tenant_id: i64, host_id: &str) {
-        self.entries
-            .write()
-            .expect("desired-state cache lock")
-            .remove(&(tenant_id, host_id.to_string()));
+        let mut map = self.entries.write().expect("desired-state cache lock");
+        if map.remove(&(tenant_id, host_id.to_string())).is_some() {
+            // Under the write lock, so no ticket is taken between the removal and the bump.
+            self.epoch.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Drop a host's cached state because one of its own inputs — its reported tags or
@@ -521,6 +528,26 @@ mod tests {
         c.forget_host(1, "host-a");
         c.forget_host(1, "never-cached");
         assert_eq!(c.len(), 0);
+    }
+
+    #[test]
+    fn forgetting_a_host_voids_tickets_taken_before_it() {
+        let c = DesiredStateCache::new();
+        // host-a's tags were edited once (generation 1), and a compute for it is running.
+        c.invalidate_host(1, "host-a");
+        let ticket = c.ticket(1, "host-a");
+        // The host is revoked; its entry, and with it its generation, goes.
+        c.forget_host(1, "host-a");
+        // An operator edits the revoked host's tags: it starts again from generation 1 —
+        // the ticket's own — but forgetting moved the epoch, so the stale compute is refused.
+        c.invalidate_host(1, "host-a");
+        assert!(!c.put_if_current(1, "host-a", ticket, 1, &ds("stale")));
+        assert!(c.get(1, "host-a", 1).is_none());
+
+        // Forgetting a host that was never cached leaves other hosts' computes alone.
+        let ticket = c.ticket(1, "host-b");
+        c.forget_host(1, "never-cached");
+        assert!(c.put_if_current(1, "host-b", ticket, 1, &ds("fresh")));
     }
 
     #[test]
