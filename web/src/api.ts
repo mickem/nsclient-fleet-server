@@ -136,7 +136,10 @@ export type FactsStatus =
   | "outdated"
   /** The agent reports every fact set switched off; the inventory shown is cleared once it
    *  has said so for a while (ten minutes), so a brief empty report does not wipe it. */
-  | "switched_off";
+  | "switched_off"
+  /** The agent's inventory was refused (too large, or malformed). The agent does not send
+   *  that inventory again; the next one follows when the host's inventory changes. */
+  | "refused";
 
 export type FactChange = {
   /** Dotted, list records addressed by id: `software.installed[bash].version`. A selector
@@ -174,6 +177,9 @@ export type HostFacts = {
   unreadable: boolean;
   facts_hash: string | null;
   reported_hash: string | null;
+  /** Why nothing newer is coming, when the status is `refused`: the HTTP status of the
+   *  refusal (413 too large, 400 malformed) and when it was. */
+  refusal: { status: number; at: number } | null;
   /** When the agent collected it, by the agent's clock (ISO 8601). */
   collected_at: string | null;
   /** When the server received it. */

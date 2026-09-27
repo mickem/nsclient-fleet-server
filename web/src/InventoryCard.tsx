@@ -44,6 +44,7 @@ const STATUS: Record<FactsStatus, StatusLook> = {
   nothing_enabled: { label: "No fact sets enabled", color: "default" },
   switched_off: { label: "Switched off", color: "default" },
   not_reported: { label: "Not reported", color: "default" },
+  refused: { label: "Upload refused", color: "warning" },
 };
 
 /** A status this bundle does not know yet (a server newer than the web UI) is shown by its
@@ -317,6 +318,8 @@ function emptyExplanation(status: FactsStatus): string {
     case "outdated":
       // `outdated` with an empty document: the sets were switched back on after a clear.
       return "The agent has an inventory for this host and sends it after its next poll.";
+    case "refused":
+      return "No inventory has been received from this host.";
     case "not_reported":
       return (
         "This agent has not reported an inventory hash — it may predate host facts, or has " +
@@ -375,6 +378,17 @@ export function InventoryCard({
                   " · every fact set was switched off on the host; this inventory is cleared " +
                     "once it has stayed off for ten minutes"}
               </Typography>
+            )}
+            {facts.status === "refused" && facts.refusal && (
+              <Alert severity="warning" sx={{ mb: 1.5 }}>
+                {facts.refusal.status === 413
+                  ? "The agent's inventory is larger than the server accepts (4 MiB). Switch " +
+                    "off the largest fact sets in the host's inventory bundle."
+                  : "The server refused the agent's inventory as malformed — an agent bug worth " +
+                    "reporting."}{" "}
+                Refused {fmtAgo(facts.refusal.at)}; the agent does not send that inventory again,
+                and sends the next one when the host&apos;s inventory changes.
+              </Alert>
             )}
             {facts.unreadable ? (
               <Alert severity="warning">

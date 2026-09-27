@@ -17,7 +17,7 @@
 //! See [`fleet_core::facts`] for the wire format and the document diff.
 
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{Path, State},
     http::{HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
@@ -29,9 +29,11 @@ use fleet_core::facts::{
 use fleet_core::selector::{scalar_text, FactPath, HostFacts, MAX_VALUE_LEN};
 use fleet_core::time::now_unix;
 use fleet_storage::{FactsHashes, HostFactsRepo, HostRepo, NewFacts, ReplaceOutcome};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use crate::auth::AuthedUser;
 use crate::mtls::PeerHostContext;
@@ -125,15 +127,17 @@ pub async fn advertise(
                 host_id,
                 AGENT_SOURCE,
                 EMPTY_FACTS_HASH,
-                "{}",
+                Arc::from("{}"),
                 None,
             )
             .await
             {
-                Ok(ReplaceOutcome::Stored | ReplaceOutcome::Unchanged) => {
+                Ok(ReplaceOutcome::Stored) => {
                     tracing::info!(%host_id, "host has no fact set enabled any more; cleared its inventory");
                     advertised = Some(EMPTY_FACTS_HASH.to_owned());
                 }
+                // Another request cleared it first: nothing done here, nothing to log.
+                Ok(ReplaceOutcome::Unchanged) => advertised = Some(EMPTY_FACTS_HASH.to_owned()),
                 // Not cleared: keep answering with what we do hold, and try again on
                 // the next poll.
                 Ok(outcome) => {
@@ -190,6 +194,50 @@ fn empty_for_long_enough(h: &FactsHashes, now: i64) -> bool {
             .is_some_and(|since| now - since >= EMPTY_CLEAR_GRACE_SECS)
 }
 
+/// A verified upload, owned so it can come back from a blocking task.
+struct Upload {
+    facts_hash: String,
+    collected_at: Option<String>,
+    facts: Arc<str>,
+}
+
+enum BodyError {
+    TooLarge,
+    Unreadable,
+}
+
+/// The whole body, or `TooLarge` as soon as it passes `limit` — without reading the rest.
+async fn read_capped(body: Body, limit: usize) -> Result<Bytes, BodyError> {
+    let mut stream = body.into_data_stream();
+    let mut buf = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| BodyError::Unreadable)?;
+        if buf.len() + chunk.len() > limit {
+            return Err(BodyError::TooLarge);
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(Bytes::from(buf))
+}
+
+/// Refuse an upload, and record that it was: the agent does not retry a refused document,
+/// so without the record the host would read as "inventory on its way" until its inventory
+/// next changes.
+async fn refuse(
+    repo: &HostFactsRepo<'_>,
+    ctx: &PeerHostContext,
+    status: StatusCode,
+    message: &str,
+) -> Response {
+    if let Err(e) = repo
+        .record_refusal(ctx.tenant_id, &ctx.host_id, status.as_u16())
+        .await
+    {
+        tracing::error!(error = %e, "recording a facts refusal failed");
+    }
+    (status, message.to_owned()).into_response()
+}
+
 /// Attach the header to a response, if there is one to attach.
 pub fn with_header(mut response: Response, value: Option<HeaderValue>) -> Response {
     if let Some(v) = value {
@@ -201,17 +249,50 @@ pub fn with_header(mut response: Response, value: Option<HeaderValue>) -> Respon
 /// `POST /agent/v1/facts`: store the host's document.
 ///
 /// The body is read as bytes, not through `Json`, because the hash covers the `facts` value
-/// exactly as sent and is verified — and stored — against those bytes.
+/// exactly as sent and is verified — and stored — against those bytes. It is read here
+/// rather than through a body-limit layer so that an oversized one reaches this handler and
+/// its refusal is recorded like any other.
 pub async fn upload(
     State(state): State<AppState>,
     axum::Extension(ctx): axum::Extension<PeerHostContext>,
-    body: Bytes,
+    body: Body,
 ) -> Response {
-    let upload = match facts::parse_upload(&body) {
-        Ok(u) => u,
-        Err(e) => {
+    let repo = HostFactsRepo::new(&state.db);
+    let body = match read_capped(body, MAX_FACTS_BODY_BYTES).await {
+        Ok(b) => b,
+        Err(BodyError::TooLarge) => {
+            tracing::info!(host_id = %ctx.host_id, "refused an oversized facts upload");
+            return refuse(
+                &repo,
+                &ctx,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "facts upload too large",
+            )
+            .await;
+        }
+        // The connection went away mid-body: nothing was refused, the agent retries.
+        Err(BodyError::Unreadable) => {
+            return (StatusCode::BAD_REQUEST, "body could not be read").into_response()
+        }
+    };
+    // Hashing and parsing up to 4 MiB is CPU work: off the async workers.
+    let parsed = tokio::task::spawn_blocking(move || {
+        facts::parse_upload(&body).map(|u| Upload {
+            facts_hash: u.facts_hash,
+            collected_at: u.collected_at,
+            facts: Arc::from(u.facts),
+        })
+    })
+    .await;
+    let upload = match parsed {
+        Ok(Ok(u)) => u,
+        Ok(Err(e)) => {
             tracing::info!(host_id = %ctx.host_id, error = %e, "rejected a facts upload");
-            return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+            return refuse(&repo, &ctx, StatusCode::BAD_REQUEST, &e.to_string()).await;
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "facts upload parse task failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
         }
     };
     let repo = HostFactsRepo::new(&state.db);
@@ -253,7 +334,7 @@ pub async fn upload(
             &ctx.host_id,
             AGENT_SOURCE,
             &upload.facts_hash,
-            upload.facts,
+            upload.facts.clone(),
             upload.collected_at.as_deref(),
         )
         .await
@@ -308,7 +389,7 @@ pub async fn store(
     host_id: &str,
     source: &str,
     hash: &str,
-    json: &str,
+    json: Arc<str>,
     collected_at: Option<&str>,
 ) -> anyhow::Result<ReplaceOutcome> {
     let repo = HostFactsRepo::new(&state.db);
@@ -319,23 +400,32 @@ pub async fn store(
         // write is checked against: if it moved meanwhile, the write says so and this goes
         // round again.
         let previous = repo.get(tenant_id, host_id, source).await?;
-        let previous_hash = previous.as_ref().map(|p| p.facts_hash.as_str());
-        if previous_hash == Some(hash) {
+        let (previous_hash, previous_json) = previous.map(|p| (p.facts_hash, p.facts_json)).unzip();
+        if previous_hash.as_deref() == Some(hash) {
             return Ok(ReplaceOutcome::Unchanged);
         }
-        if document.is_none() {
-            document = Some(serde_json::from_str(json)?);
-        }
-        let entry = history_entry(
-            previous.as_ref().map(|p| p.facts_json.as_str()),
-            document.as_ref().expect("parsed above"),
-        );
+        // Parsing and diffing two documents of up to megabytes is CPU work: off the async
+        // workers. The parsed document comes back for the next attempt, if there is one.
+        let (parsed, entry) = {
+            let json = json.clone();
+            let parsed = document.take();
+            tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                let parsed = match parsed {
+                    Some(d) => d,
+                    None => serde_json::from_str(&json)?,
+                };
+                let entry = history_entry(previous_json.as_deref(), &parsed);
+                Ok((parsed, entry))
+            })
+            .await??
+        };
+        document = Some(parsed);
         let doc = NewFacts {
             source,
             facts_hash: hash,
-            facts_json: json,
+            facts_json: &json,
             collected_at,
-            expected_previous: previous_hash,
+            expected_previous: previous_hash.as_deref(),
             history: entry.as_deref(),
         };
         let outcome = repo.replace(tenant_id, host_id, &doc, KEEP_HISTORY).await?;
@@ -345,14 +435,9 @@ pub async fn store(
             state
                 .desired_state_cache
                 .invalidate_host(tenant_id, host_id);
-            state.facts_catalog_cache.bump(
-                tenant_id,
-                if previous.is_none() {
-                    CatalogChange::Hosts
-                } else {
-                    CatalogChange::Values
-                },
-            );
+            state
+                .facts_catalog_cache
+                .bump(tenant_id, CatalogChange::Stored);
         }
         if outcome != ReplaceOutcome::Conflict {
             return Ok(outcome);
@@ -373,49 +458,99 @@ pub async fn load_for_host(
     sources: &BTreeSet<String>,
 ) -> anyhow::Result<HostFacts> {
     let repo = HostFactsRepo::new(&state.db);
-    let mut out = HostFacts::new();
+    let mut stored = Vec::new();
     for source in sources {
-        if let Some(stored) = repo.get(tenant_id, host_id, source).await? {
-            if let Some(doc) = parse_stored(host_id, source, &stored.facts_json) {
-                out.insert(source.clone(), doc);
-            }
+        if let Some(s) = repo.get(tenant_id, host_id, source).await? {
+            stored.push((source.clone(), s.facts_json));
         }
     }
-    Ok(out)
+    if stored.is_empty() {
+        return Ok(HostFacts::new());
+    }
+    // Parsing documents of up to megabytes is CPU work: off the async workers.
+    let host_id = host_id.to_owned();
+    Ok(tokio::task::spawn_blocking(move || {
+        stored
+            .into_iter()
+            .filter_map(|(source, json)| {
+                parse_stored(&host_id, &source, &json).map(|doc| (source, doc))
+            })
+            .collect()
+    })
+    .await?)
+}
+
+/// How many rows a reader may hand a [`blocking_consumer`] ahead of it. The reader waits
+/// once this many are queued, so a fleet streamed through one holds a handful of documents,
+/// not all of them.
+const PIPE_DEPTH: usize = 4;
+
+/// A blocking thread running `consume` over the rows sent to the returned sender, and its
+/// result once the sender is dropped. For folding a streamed query whose rows are documents
+/// to parse — CPU work that has no place on an async worker, where it would stall every
+/// other request sharing it.
+fn blocking_consumer<T: Send + 'static, R: Send + 'static>(
+    consume: impl FnOnce(&mut dyn Iterator<Item = T>) -> R + Send + 'static,
+) -> (tokio::sync::mpsc::Sender<T>, tokio::task::JoinHandle<R>) {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(PIPE_DEPTH);
+    let done = tokio::task::spawn_blocking(move || {
+        consume(&mut std::iter::from_fn(move || rx.blocking_recv()))
+    });
+    (tx, done)
 }
 
 /// Every host in a tenant that holds a document from any of `sources`, with those
-/// documents parsed, handed to `f` one host at a time. One streamed query for the fleet;
-/// only one host's documents are held at once. Hosts holding none are not visited.
-pub async fn for_each_host_facts(
+/// documents parsed, folded into `acc` by `f` one host at a time. One streamed query for the
+/// fleet; only a few hosts' documents are held at once. Hosts holding none are not visited.
+///
+/// `f` runs on a blocking thread, with the parsing, which is why it owns what it folds into
+/// and hands it back.
+pub async fn fold_host_facts<S: Send + 'static>(
     state: &AppState,
     tenant_id: i64,
     sources: &BTreeSet<String>,
-    mut f: impl FnMut(&str, &HostFacts),
-) -> anyhow::Result<()> {
+    acc: S,
+    mut f: impl FnMut(&mut S, &str, &HostFacts) + Send + 'static,
+) -> anyhow::Result<S> {
     let sources: Vec<String> = sources.iter().cloned().collect();
-    // Rows arrive grouped by host: gather one host's documents, hand them over when the
-    // next host starts.
-    let mut current: Option<(String, HostFacts)> = None;
-    HostFactsRepo::new(&state.db)
-        .for_each_host_document(tenant_id, &sources, |host_id, source, json| {
-            if current.as_ref().map(|(h, _)| h.as_str()) != Some(host_id) {
-                if let Some((h, facts)) = current.take() {
-                    f(&h, &facts);
+    let (tx, done) = blocking_consumer(
+        move |rows: &mut dyn Iterator<Item = (String, String, String)>| {
+            let mut acc = acc;
+            // Rows arrive grouped by host: gather one host's documents, hand them over when the
+            // next host starts.
+            let mut current: Option<(String, HostFacts)> = None;
+            for (host_id, source, json) in rows {
+                if current.as_ref().map(|(h, _)| h.as_str()) != Some(host_id.as_str()) {
+                    if let Some((h, facts)) = current.take() {
+                        f(&mut acc, &h, &facts);
+                    }
+                    current = Some((host_id.clone(), HostFacts::new()));
                 }
-                current = Some((host_id.to_owned(), HostFacts::new()));
+                if let (Some((_, facts)), Some(doc)) =
+                    (current.as_mut(), parse_stored(&host_id, &source, &json))
+                {
+                    facts.insert(source, doc);
+                }
             }
-            if let (Some((_, facts)), Some(doc)) =
-                (current.as_mut(), parse_stored(host_id, source, json))
-            {
-                facts.insert(source.to_owned(), doc);
+            if let Some((h, facts)) = current.take() {
+                f(&mut acc, &h, &facts);
+            }
+            acc
+        },
+    );
+    let read = HostFactsRepo::new(&state.db)
+        .for_each_host_document(tenant_id, &sources, |host_id, source, json| {
+            let tx = tx.clone();
+            async move {
+                // Fails only if the consumer is gone, which `done` reports.
+                let _ = tx.send((host_id, source, json)).await;
             }
         })
-        .await?;
-    if let Some((h, facts)) = current.take() {
-        f(&h, &facts);
-    }
-    Ok(())
+        .await;
+    drop(tx);
+    let acc = done.await?;
+    read?;
+    Ok(acc)
 }
 
 fn parse_stored(host_id: &str, source: &str, json: &str) -> Option<Value> {
@@ -483,6 +618,9 @@ pub enum FactsStatus {
     /// The agent reports every fact set switched off; the inventory shown is cleared once
     /// it has said so for [`EMPTY_CLEAR_GRACE_SECS`].
     SwitchedOff,
+    /// The agent's document was refused (too large, or malformed). It does not send that
+    /// document again, so nothing is on its way until its inventory changes.
+    Refused,
 }
 
 pub fn status(h: &FactsHashes) -> FactsStatus {
@@ -498,6 +636,15 @@ pub fn status(h: &FactsHashes) -> FactsStatus {
         // not "up to date".
         (_, None) => FactsStatus::NotReported,
         (Some(held), Some(reported)) if held == reported => FactsStatus::Current,
+        // Refused while holding what it still reports: a newer hash is a new document,
+        // which the agent does send.
+        (_, Some(reported))
+            if h.refused
+                .as_ref()
+                .is_some_and(|r| r.hash.as_deref() == Some(reported)) =>
+        {
+            FactsStatus::Refused
+        }
         (None, Some(_)) => FactsStatus::Pending,
         (Some(_), Some(_)) => FactsStatus::Outdated,
     }
@@ -530,6 +677,8 @@ pub struct HostFactsView {
     pub facts_hash: Option<String>,
     /// What the agent last said it holds.
     pub reported_hash: Option<String>,
+    /// Why nothing newer is coming, when the status is `refused`.
+    pub refusal: Option<RefusalView>,
     /// When the agent collected it, by its own clock (ISO 8601).
     pub collected_at: Option<String>,
     /// When we received it.
@@ -537,6 +686,13 @@ pub struct HostFactsView {
     pub size_bytes: Option<i64>,
     /// Newest first.
     pub changes: Vec<FactsChangesView>,
+}
+
+#[derive(Serialize)]
+pub struct RefusalView {
+    /// The HTTP status the upload was refused with: 413 too large, 400 malformed.
+    pub status: u16,
+    pub at: i64,
 }
 
 /// `GET /api/hosts/:id/facts`: the host's inventory as its agent reported it, its
@@ -599,6 +755,13 @@ pub async fn host_facts(
         .collect();
 
     let status = status(&hashes);
+    let refusal = match (&status, &hashes.refused) {
+        (FactsStatus::Refused, Some(r)) => Some(RefusalView {
+            status: r.status,
+            at: r.at,
+        }),
+        _ => None,
+    };
     let (facts, unreadable, facts_hash, collected_at, received_at, size_bytes) = match stored {
         None => (None, false, None, None, None, None),
         Some(s) => {
@@ -628,6 +791,7 @@ pub async fn host_facts(
         unreadable,
         facts_hash,
         reported_hash: hashes.reported,
+        refusal,
         collected_at,
         received_at,
         size_bytes,
@@ -707,27 +871,30 @@ pub struct FactsCatalog {
 /// and parsing every inventory in the tenant buys nothing.
 const MAX_CATALOG_HOSTS: i64 = 2_000;
 
-/// How stale a catalog may be served after documents changed that hosts already had. Such
-/// changes are routine — a fleet's inventories move all day — and each would otherwise have
-/// the next groups-page load stream and parse every document again; a minute's lag in a
-/// value picker costs nothing. A host gaining or losing its document rebuilds at once.
+/// How stale a catalog may be served after documents were stored. They are stored all day
+/// — inventories move, and during a rollout hosts upload their first document one after
+/// another — and each would otherwise have the next groups-page load read and parse every
+/// document again, or throw away a build that one landed in the middle of. A minute's lag in
+/// a path or value picker costs nothing; this bounds rebuilds to one a minute per tenant
+/// however busy the fleet.
 const CATALOG_REFRESH_SECS: i64 = 60;
 
 /// What a change to a tenant's documents did to its catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatalogChange {
-    /// A host gained or lost a document: the host counts are wrong now.
-    Hosts,
-    /// A document a host already had was replaced: some paths or values may have moved.
-    Values,
+    /// A document was stored: served stale for up to [`CATALOG_REFRESH_SECS`].
+    Stored,
+    /// Hosts were deleted with their documents: rebuilt at once. An operator who just
+    /// deleted a host does not expect to find it in the picker, and deletes are rare.
+    Removed,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct CatalogGeneration {
     /// Every change.
     any: u64,
-    /// [`CatalogChange::Hosts`] changes only.
-    hosts: u64,
+    /// [`CatalogChange::Removed`] changes only.
+    removed: u64,
 }
 
 /// Built catalogs per tenant, each tagged with the tenant's generation when it was built.
@@ -738,18 +905,18 @@ pub struct CatalogCache {
     inner: std::sync::Mutex<CatalogCacheInner>,
     /// One build at a time per tenant: operators opening the groups page after a bump wait
     /// for the first rebuild instead of each reading every document again.
-    building: std::sync::Mutex<HashMap<i64, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    building: std::sync::Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 #[derive(Default)]
 struct CatalogCacheInner {
     generations: HashMap<i64, CatalogGeneration>,
     /// Generation built against, when (unix seconds), and the catalog.
-    built: HashMap<i64, (CatalogGeneration, i64, std::sync::Arc<FactsCatalog>)>,
+    built: HashMap<i64, (CatalogGeneration, i64, Arc<FactsCatalog>)>,
 }
 
 impl CatalogCache {
-    fn build_lock(&self, tenant_id: i64) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    fn build_lock(&self, tenant_id: i64) -> Arc<tokio::sync::Mutex<()>> {
         self.building
             .lock()
             .expect("catalog build lock map")
@@ -763,18 +930,17 @@ impl CatalogCache {
         let mut inner = self.inner.lock().expect("catalog cache lock");
         let g = inner.generations.entry(tenant_id).or_default();
         g.any += 1;
-        if change == CatalogChange::Hosts {
-            g.hosts += 1;
+        if change == CatalogChange::Removed {
+            g.removed += 1;
         }
     }
 
-    /// The cached catalog if it may still be served, else the generation to build against:
-    /// current, or behind only by value changes and younger than [`CATALOG_REFRESH_SECS`].
-    fn lookup(
-        &self,
-        tenant_id: i64,
-        now: i64,
-    ) -> Result<std::sync::Arc<FactsCatalog>, CatalogGeneration> {
+    /// The cached catalog if it may still be served, else the generation to build against.
+    /// Served when nothing changed since it was built; or when only documents were stored,
+    /// it is younger than [`CATALOG_REFRESH_SECS`], and it lists some host — an empty one
+    /// costs next to nothing to rebuild, and serving it would hide a tenant's first
+    /// inventory for a minute.
+    fn lookup(&self, tenant_id: i64, now: i64) -> Result<Arc<FactsCatalog>, CatalogGeneration> {
         let inner = self.inner.lock().expect("catalog cache lock");
         let current = inner
             .generations
@@ -783,8 +949,10 @@ impl CatalogCache {
             .unwrap_or_default();
         match inner.built.get(&tenant_id) {
             Some((g, at, c))
-                if g.hosts == current.hosts
-                    && (g.any == current.any || now - at < CATALOG_REFRESH_SECS) =>
+                if *g == current
+                    || (g.removed == current.removed
+                        && now - at < CATALOG_REFRESH_SECS
+                        && c.sources.iter().any(|s| s.hosts > 0)) =>
             {
                 Ok(c.clone())
             }
@@ -792,25 +960,21 @@ impl CatalogCache {
         }
     }
 
-    /// Keep a catalog built against `generation`, unless a host gained or lost a document
-    /// while it was built. One overtaken by value changes is kept: it is as fresh as any
-    /// catalog [`Self::lookup`] may serve.
+    /// Keep a catalog built against `generation`, whatever changed while it was built: it is
+    /// tagged with what it saw, and [`Self::lookup`] decides when that is too old. Builds are
+    /// one at a time per tenant, so this never replaces a newer one.
     fn keep(
         &self,
         tenant_id: i64,
         generation: CatalogGeneration,
         now: i64,
-        catalog: std::sync::Arc<FactsCatalog>,
+        catalog: Arc<FactsCatalog>,
     ) {
-        let mut inner = self.inner.lock().expect("catalog cache lock");
-        let current = inner
-            .generations
-            .get(&tenant_id)
-            .copied()
-            .unwrap_or_default();
-        if current.hosts == generation.hosts {
-            inner.built.insert(tenant_id, (generation, now, catalog));
-        }
+        self.inner
+            .lock()
+            .expect("catalog cache lock")
+            .built
+            .insert(tenant_id, (generation, now, catalog));
     }
 }
 
@@ -1009,24 +1173,42 @@ pub async fn catalog(State(state): State<AppState>, who: AuthedUser) -> Response
         sources.insert(AGENT_SOURCE.to_owned());
         let mut out = Vec::new();
         for source in sources {
-            // Folded in one document at a time, each dropped before the next is read. One row
+            // Folded in on a blocking thread, a few documents in flight at a time. One row
             // past the cap is read only to learn whether the cap left anything out.
-            let mut build = SourceBuild::new(MAX_CATALOG_HOSTS);
-            repo.for_each_document(
-                who.tenant_id,
-                &source,
-                MAX_CATALOG_HOSTS + 1,
-                |host_id, json| build.offer(host_id, &source, json),
-            )
-            .await?;
-            out.push(build.finish(source));
+            let (tx, done) = {
+                let source = source.clone();
+                blocking_consumer(move |rows: &mut dyn Iterator<Item = (String, String)>| {
+                    let mut build = SourceBuild::new(MAX_CATALOG_HOSTS);
+                    for (host_id, json) in rows {
+                        build.offer(&host_id, &source, &json);
+                    }
+                    build.finish(source)
+                })
+            };
+            let read = repo
+                .for_each_document(
+                    who.tenant_id,
+                    &source,
+                    MAX_CATALOG_HOSTS + 1,
+                    |host_id, json| {
+                        let tx = tx.clone();
+                        async move {
+                            let _ = tx.send((host_id, json)).await;
+                        }
+                    },
+                )
+                .await;
+            drop(tx);
+            let built = done.await?;
+            read?;
+            out.push(built);
         }
         anyhow::Ok(FactsCatalog { sources: out })
     }
     .await;
     match built {
         Ok(c) => {
-            let c = std::sync::Arc::new(c);
+            let c = Arc::new(c);
             state
                 .facts_catalog_cache
                 .keep(who.tenant_id, generation, now, c.clone());
@@ -1116,6 +1298,7 @@ mod tests {
             held: held.map(str::to_owned),
             reported: reported.map(str::to_owned),
             reported_since: None,
+            refused: None,
         }
     }
 
@@ -1127,6 +1310,7 @@ mod tests {
             held: held.map(str::to_owned),
             reported: Some(EMPTY_FACTS_HASH.to_owned()),
             reported_since: Some(since),
+            refused: None,
         };
         use EmptyOverInventory::*;
         assert_eq!(
@@ -1163,6 +1347,7 @@ mod tests {
             held: Some(a.clone()),
             reported: Some(reported.to_owned()),
             reported_since: Some(since),
+            refused: None,
         };
         assert!(!empty_for_long_enough(&hashes(EMPTY_FACTS_HASH, now), now));
         assert!(!empty_for_long_enough(
@@ -1196,35 +1381,52 @@ mod tests {
     }
 
     #[test]
-    fn value_changes_refresh_the_catalog_at_most_once_a_minute() {
+    fn stored_documents_rebuild_the_catalog_at_most_once_a_minute() {
         let c = CatalogCache::default();
-        let built = |c: &CatalogCache, now| {
+        let catalog = |hosts| {
+            let mut s = SourceBuild::new(10);
+            for i in 0..hosts {
+                s.offer(&format!("h{i}"), AGENT_SOURCE, "{}");
+            }
+            Arc::new(FactsCatalog {
+                sources: vec![s.finish(AGENT_SOURCE.into())],
+            })
+        };
+        let built = |c: &CatalogCache, now, hosts| {
             let Err(generation) = c.lookup(1, now) else {
                 panic!("expected a rebuild")
             };
-            c.keep(
-                1,
-                generation,
-                now,
-                std::sync::Arc::new(FactsCatalog { sources: vec![] }),
-            );
+            c.keep(1, generation, now, catalog(hosts));
         };
-        built(&c, 1_000);
+        built(&c, 1_000, 1);
         assert!(c.lookup(1, 1_000).is_ok());
 
-        // A document a host already had changed: served as is for a while...
-        c.bump(1, CatalogChange::Values);
+        // A document was stored: served as is for a while...
+        c.bump(1, CatalogChange::Stored);
         assert!(c.lookup(1, 1_000 + CATALOG_REFRESH_SECS - 1).is_ok());
         // ...then rebuilt.
         assert!(c.lookup(1, 1_000 + CATALOG_REFRESH_SECS).is_err());
 
-        // A host gained or lost one: rebuilt at once.
-        built(&c, 2_000);
-        c.bump(1, CatalogChange::Hosts);
-        assert!(c.lookup(1, 2_000).is_err());
+        // A build overtaken by a stored document while it ran is kept, tagged with what it
+        // saw, and served within the window.
+        let Err(generation) = c.lookup(1, 2_000) else {
+            panic!("expected a rebuild")
+        };
+        c.bump(1, CatalogChange::Stored);
+        c.keep(1, generation, 2_000, catalog(1));
+        assert!(c.lookup(1, 2_000 + CATALOG_REFRESH_SECS - 1).is_ok());
+
+        // A removal is not waited out.
+        c.bump(1, CatalogChange::Removed);
+        assert!(c.lookup(1, 2_001).is_err());
+
+        // Nor is anything stored over a catalog of no hosts: a tenant's first inventory.
+        built(&c, 3_000, 0);
+        c.bump(1, CatalogChange::Stored);
+        assert!(c.lookup(1, 3_001).is_err());
 
         // Tenants are separate.
-        assert!(c.lookup(2, 2_000).is_err());
+        assert!(c.lookup(2, 3_001).is_err());
     }
 
     #[test]
@@ -1250,6 +1452,26 @@ mod tests {
         assert_eq!(status(&h(Some(&a), Some(&b))), FactsStatus::Outdated);
         // Stored, but the agent never confirmed holding it.
         assert_eq!(status(&h(Some(&a), None)), FactsStatus::NotReported);
+    }
+
+    #[test]
+    fn a_refusal_holds_only_while_the_agent_reports_the_refused_document() {
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let refused = |held: Option<&str>, reported: &str, refused: &str| FactsHashes {
+            refused: Some(fleet_storage::FactsRefusal {
+                hash: Some(refused.to_owned()),
+                at: 1,
+                status: 413,
+            }),
+            ..h(held, Some(reported))
+        };
+        assert_eq!(status(&refused(None, &a, &a)), FactsStatus::Refused);
+        assert_eq!(status(&refused(Some(&b), &a, &a)), FactsStatus::Refused);
+        // The agent moved on to another document, which it does send.
+        assert_eq!(status(&refused(None, &b, &a)), FactsStatus::Pending);
+        // What was refused once has since been stored.
+        assert_eq!(status(&refused(Some(&a), &a, &a)), FactsStatus::Current);
     }
 
     #[test]

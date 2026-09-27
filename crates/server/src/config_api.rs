@@ -338,26 +338,39 @@ pub async fn preview_selector(
             return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
         }
     };
+    // The selector runs where the documents are parsed, on a blocking thread, so what it
+    // reads goes there with it and what it finds comes back.
+    let tags_by_host = std::sync::Arc::new(tags_by_host);
     let no_tags = HostTags::new();
+    let streamed = {
+        let tags_by_host = tags_by_host.clone();
+        let selector = selector.clone();
+        let no_tags = no_tags.clone();
+        crate::facts::fold_host_facts(
+            &state,
+            who.tenant_id,
+            &selector.fact_sources(),
+            (HashSet::new(), HashSet::new()),
+            move |(with_facts, matched): &mut (HashSet<String>, HashSet<String>),
+                  host_id,
+                  facts| {
+                with_facts.insert(host_id.to_owned());
+                let tags = tags_by_host.get(host_id).unwrap_or(&no_tags);
+                if selector.matches(tags, facts) {
+                    matched.insert(host_id.to_owned());
+                }
+            },
+        )
+        .await
+    };
+    let (with_facts, matched) = match streamed {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = %e, "facts load failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+        }
+    };
     let tags_of = |host_id: &str| tags_by_host.get(host_id).unwrap_or(&no_tags);
-    let mut with_facts = HashSet::new();
-    let mut matched = HashSet::new();
-    let streamed = crate::facts::for_each_host_facts(
-        &state,
-        who.tenant_id,
-        &selector.fact_sources(),
-        |host_id, facts| {
-            with_facts.insert(host_id.to_owned());
-            if selector.matches(tags_of(host_id), facts) {
-                matched.insert(host_id.to_owned());
-            }
-        },
-    )
-    .await;
-    if let Err(e) = streamed {
-        tracing::error!(error = %e, "facts load failed");
-        return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
-    }
     let no_facts = HostFacts::new();
     let matches: Vec<PreviewMatch> = hosts
         .into_iter()

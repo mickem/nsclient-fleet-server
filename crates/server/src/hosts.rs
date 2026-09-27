@@ -519,7 +519,7 @@ pub async fn delete_host(
             // Its facts went with it: the catalog's host counts and values must too.
             state
                 .facts_catalog_cache
-                .bump(who.tenant_id, crate::facts::CatalogChange::Hosts);
+                .bump(who.tenant_id, crate::facts::CatalogChange::Removed);
             crate::audit::record(
                 &state,
                 who.tenant_id,
@@ -625,7 +625,7 @@ pub async fn bulk_delete(
         // the batch — every bump only marks the tenant's catalog for a rebuild.
         state
             .facts_catalog_cache
-            .bump(who.tenant_id, crate::facts::CatalogChange::Hosts);
+            .bump(who.tenant_id, crate::facts::CatalogChange::Removed);
     }
     Json(BulkResult {
         updated: deleted,

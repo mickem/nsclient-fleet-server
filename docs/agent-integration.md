@@ -278,6 +278,10 @@ the document in rather than re-encode it after hashing.
 | `413` | body over the server's cap (4 MiB) | do not retry this document; tell the operator which sets are largest |
 | `503` | the document kept being replaced by concurrent writes | retry on the next poll |
 
+The server records a `400` or `413` against the hash the agent last reported, and the host
+page says the inventory was refused, rather than on its way, until the agent reports a
+different hash — the new document, which it does upload.
+
 `none` and the empty document's hash mean the same thing to the agent, so a host with nothing
 enabled never uploads. When a host that had an inventory has every set switched off, the
 server does not need an upload of `{}`: the reported hash already says what the document is.

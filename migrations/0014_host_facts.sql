@@ -57,3 +57,11 @@ ALTER TABLE hosts ADD COLUMN facts_reported_hash TEXT;
 -- empty report (an agent polling before its collectors ran) does not wipe and then restore
 -- the inventory, writing two history rows each time.
 ALTER TABLE hosts ADD COLUMN facts_reported_at INTEGER;
+-- The last upload the server refused (a document over the size limit, a malformed body): the
+-- agent does not retry a refused document, so without this the host would read as "inventory
+-- on its way" until its inventory next changes. `facts_refused_hash` is the hash the agent
+-- reported when it was refused; once it reports another, the refusal no longer applies.
+ALTER TABLE hosts ADD COLUMN facts_refused_hash TEXT;
+ALTER TABLE hosts ADD COLUMN facts_refused_at INTEGER;
+-- The HTTP status the upload was refused with: 400 or 413.
+ALTER TABLE hosts ADD COLUMN facts_refused_status INTEGER;

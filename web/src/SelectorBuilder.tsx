@@ -75,11 +75,17 @@ export function suggestedSource(known: KnownTags | undefined, key: string): Sour
 
 /** What the fleet's facts documents look like: source → path → what is at it. From
  *  `GET /api/facts/catalog`; feeds the fact path and value pickers the way `KnownTags`
- *  feeds the tag ones. */
-export type KnownFacts = Map<string, Map<string, CatalogPath>>;
+ *  feeds the tag ones. `truncated`: the catalog hit its caps for that source, so the
+ *  pickers show only part of what the fleet has. */
+export type KnownFacts = Map<string, { paths: Map<string, CatalogPath>; truncated: boolean }>;
 
 export function knownFactsFromCatalog(c: FactsCatalog): KnownFacts {
-  return new Map(c.sources.map((s) => [s.source, new Map(s.paths.map((p) => [p.path, p]))]));
+  return new Map(
+    c.sources.map((s) => [
+      s.source,
+      { paths: new Map(s.paths.map((p) => [p.path, p])), truncated: s.truncated },
+    ]),
+  );
 }
 
 /** The facts sources a clause can read: whatever the fleet holds, and always the agent's. */
@@ -401,7 +407,8 @@ export function ExprEditor({ expr, onChange, onRemove, known, facts }: ExprProps
 
   const factEditor = (leaf: FactLeaf) => {
     const source = leaf.facts ?? AGENT_FACTS;
-    const paths = facts?.get(source);
+    const known = facts?.get(source);
+    const paths = known?.paths;
     const at = paths?.get(leaf.path);
     const pathOptions: [string, number][] = [...(paths?.values() ?? [])]
       .map((p): [string, number] => [p.path, p.hosts])
@@ -429,99 +436,115 @@ export function ExprEditor({ expr, onChange, onRemove, known, facts }: ExprProps
     );
 
     return (
-      <Stack direction="row" spacing={1} alignItems="center" useFlexGap sx={{ flexWrap: "wrap" }}>
-        <Select
-          size="small"
-          value={leaf.test}
-          onChange={(e) => {
-            // Only the options below can be chosen; anything else (there should be nothing)
-            // is ignored rather than turned into a clause the rest of the editor cannot read.
-            const v = e.target.value as string;
-            const compound = COMPOUND_OPS.find((o) => o.id === v);
-            const test = FACT_TESTS.find((t) => t.id === v);
-            if (compound) onChange(defaultExpr(compound.id));
-            else if (test) onChange(withTest(leaf, test.id));
-          }}
-        >
-          {FACT_TESTS.map((t) => (
-            <MenuItem key={t.id} value={t.id} title={t.help}>
-              {t.label}
-            </MenuItem>
-          ))}
-          {/* A subheader, not a Divider: Select turns every child into a selectable option,
-              and a divider chosen by click has no value. */}
-          <ListSubheader>Combine</ListSubheader>
-          {COMPOUND_OPS.map((o) => (
-            <MenuItem key={o.id} value={o.id}>
-              {o.label}
-            </MenuItem>
-          ))}
-        </Select>
-        <Tooltip
-          title={
-            source === AGENT_FACTS
-              ? "The inventory the host uploads about itself. A compromised host can report " +
-                "anything here and join the group, so it will receive whatever bundles the group carries."
-              : `Facts from ${source}, not written by the host.`
-          }
-        >
+      <Stack spacing={0.5}>
+        <Stack direction="row" spacing={1} alignItems="center" useFlexGap sx={{ flexWrap: "wrap" }}>
           <Select
             size="small"
-            value={source}
-            color={source === AGENT_FACTS ? "warning" : undefined}
-            onChange={(e) => onChange({ ...leaf, facts: e.target.value })}
+            value={leaf.test}
+            onChange={(e) => {
+              // Only the options below can be chosen; anything else (there should be nothing)
+              // is ignored rather than turned into a clause the rest of the editor cannot read.
+              const v = e.target.value as string;
+              const compound = COMPOUND_OPS.find((o) => o.id === v);
+              const test = FACT_TESTS.find((t) => t.id === v);
+              if (compound) onChange(defaultExpr(compound.id));
+              else if (test) onChange(withTest(leaf, test.id));
+            }}
           >
-            {factSources(facts).map((s) => (
-              <MenuItem key={s} value={s}>
-                {factSourceLabel(s)}
+            {FACT_TESTS.map((t) => (
+              <MenuItem key={t.id} value={t.id} title={t.help}>
+                {t.label}
+              </MenuItem>
+            ))}
+            {/* A subheader, not a Divider: Select turns every child into a selectable option,
+                and a divider chosen by click has no value. */}
+            <ListSubheader>Combine</ListSubheader>
+            {COMPOUND_OPS.map((o) => (
+              <MenuItem key={o.id} value={o.id}>
+                {o.label}
               </MenuItem>
             ))}
           </Select>
-        </Tooltip>
-        <TagAutocomplete
-          value={leaf.path}
-          onChange={setPath}
-          options={pathOptions}
-          placeholder="path, e.g. software.installed"
-          minWidth="18rem"
-          note={(p) => paths?.get(p)?.kind}
-        />
-        {(leaf.test === "eq" || leaf.test === "has") && (
-          <>
-            <Typography>{leaf.test === "eq" ? "=" : "∋"}</Typography>
-            {valueBox(leaf.value, (value) => onChange({ ...leaf, value }), "value")}
-          </>
-        )}
-        {leaf.test === "in" && (
-          <>
-            <Typography>∈</Typography>
-            {leaf.values.map((v, i) => (
-              <Box key={i}>
-                {valueBox(
-                  v,
-                  (value) => {
-                    const vs = [...leaf.values];
-                    vs[i] = value;
-                    onChange({ ...leaf, values: vs });
-                  },
-                  `value ${i + 1}`,
-                )}
-              </Box>
-            ))}
-            <Button size="small" onClick={() => onChange({ ...leaf, values: [...leaf.values, ""] })}>
-              + value
-            </Button>
-            {leaf.values.length > 1 && (
-              <Button
-                size="small"
-                onClick={() => onChange({ ...leaf, values: leaf.values.slice(0, -1) })}
-              >
-                − value
+          <Tooltip
+            title={
+              source === AGENT_FACTS
+                ? "The inventory the host uploads about itself. A compromised host can report " +
+                  "anything here and join the group, so it will receive whatever bundles the group carries."
+                : `Facts from ${source}, not written by the host.`
+            }
+          >
+            <Select
+              size="small"
+              value={source}
+              color={source === AGENT_FACTS ? "warning" : undefined}
+              onChange={(e) => onChange({ ...leaf, facts: e.target.value })}
+            >
+              {factSources(facts).map((s) => (
+                <MenuItem key={s} value={s}>
+                  {factSourceLabel(s)}
+                </MenuItem>
+              ))}
+            </Select>
+          </Tooltip>
+          <TagAutocomplete
+            value={leaf.path}
+            onChange={setPath}
+            options={pathOptions}
+            placeholder="path, e.g. software.installed"
+            minWidth="18rem"
+            note={(p) => paths?.get(p)?.kind}
+          />
+          {(leaf.test === "eq" || leaf.test === "has") && (
+            <>
+              <Typography>{leaf.test === "eq" ? "=" : "∋"}</Typography>
+              {valueBox(leaf.value, (value) => onChange({ ...leaf, value }), "value")}
+            </>
+          )}
+          {leaf.test === "in" && (
+            <>
+              <Typography>∈</Typography>
+              {leaf.values.map((v, i) => (
+                <Box key={i}>
+                  {valueBox(
+                    v,
+                    (value) => {
+                      const vs = [...leaf.values];
+                      vs[i] = value;
+                      onChange({ ...leaf, values: vs });
+                    },
+                    `value ${i + 1}`,
+                  )}
+                </Box>
+              ))}
+              <Button size="small" onClick={() => onChange({ ...leaf, values: [...leaf.values, ""] })}>
+                + value
               </Button>
-            )}
-          </>
+              {leaf.values.length > 1 && (
+                <Button
+                  size="small"
+                  onClick={() => onChange({ ...leaf, values: leaf.values.slice(0, -1) })}
+                >
+                  − value
+                </Button>
+              )}
+            </>
+          )}
+          {removeBtn}
+        </Stack>
+        {at?.kind === "mixed" && (
+          <Alert severity="warning">
+            This path holds different kinds of value on different hosts — a list on some, a map
+            or a single value on others — so one test does not read the same on all of them. A
+            bracketed part such as <code>[eth0.100]</code> picks a record by id where the path is a
+            list, but a key where it is a map.
+          </Alert>
         )}
-        {removeBtn}
+        {known?.truncated && (
+          <Typography variant="caption" color="text.secondary">
+            The fleet&apos;s {factSourceLabel(source)} have more hosts or paths than the pickers
+            list, so they show only part of them. Any path can still be typed.
+          </Typography>
+        )}
       </Stack>
     );
   };

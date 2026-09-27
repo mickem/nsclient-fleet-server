@@ -259,6 +259,10 @@ async fn an_agent_with_a_newer_document_reads_as_outdated() {
 #[tokio::test]
 async fn an_upload_whose_hash_does_not_match_is_refused() {
     let (s, agent, host_id) = setup().await;
+    agent
+        .poll_with_facts(None, &sha256_hex(OS_DOC.as_bytes()))
+        .await
+        .unwrap();
     let body = format!(
         "{{\"collected_at\":\"t\",\"facts\":{OS_DOC},\"facts_hash\":\"{}\"}}",
         sha256_hex(b"something else")
@@ -269,6 +273,9 @@ async fn an_upload_whose_hash_does_not_match_is_refused() {
     assert_eq!(status, 400);
     let v = facts_view(&s, &host_id).await;
     assert!(v["facts"].is_null());
+    // Not "on its way": the agent does not send a refused document again.
+    assert_eq!(v["status"], "refused");
+    assert_eq!(v["refusal"]["status"], 400);
 }
 
 #[tokio::test]
@@ -278,13 +285,36 @@ async fn an_oversized_upload_is_refused_as_too_large() {
         "{{\"blob\":{{\"data\":\"{}\"}}}}",
         "x".repeat(fleet_server::facts::MAX_FACTS_BODY_BYTES)
     );
+    agent
+        .poll_with_facts(None, &sha256_hex(big.as_bytes()))
+        .await
+        .unwrap();
     let (status, _) = agent
         .upload_facts(facts_upload_body(&big, "t"))
         .await
         .unwrap();
     // 413 is what the agent reads as "turn a set off", and does not retry.
     assert_eq!(status, 413);
-    assert!(facts_view(&s, &host_id).await["facts"].is_null());
+    let v = facts_view(&s, &host_id).await;
+    assert!(v["facts"].is_null());
+    assert_eq!(v["status"], "refused");
+    assert_eq!(v["refusal"]["status"], 413);
+
+    // The operator switched a set off: a new document, which the agent does send. (A state
+    // report carries the hash as well as a poll, and has no poll-interval floor.)
+    agent
+        .report_state_with_facts(None, Default::default(), &sha256_hex(OS_DOC.as_bytes()))
+        .await
+        .unwrap();
+    let v = facts_view(&s, &host_id).await;
+    assert_eq!(v["status"], "pending");
+    assert!(v["refusal"].is_null());
+    let (status, _) = agent
+        .upload_facts(facts_upload_body(OS_DOC, "t"))
+        .await
+        .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(facts_view(&s, &host_id).await["status"], "current");
 }
 
 #[tokio::test]

@@ -1468,6 +1468,20 @@ pub struct FactsHashes {
     pub reported: Option<String>,
     /// When `reported` last changed (unix seconds): how long the agent has been saying it.
     pub reported_since: Option<i64>,
+    /// The last upload the server refused, if any.
+    pub refused: Option<FactsRefusal>,
+}
+
+/// An upload the server refused. The agent does not retry a refused document, so this is
+/// what stands between "on its way" and "never coming" until its inventory changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactsRefusal {
+    /// What the agent reported holding when it was refused: the refusal applies while it
+    /// still does. `None` when it had reported nothing.
+    pub hash: Option<String>,
+    pub at: i64,
+    /// The HTTP status of the refusal: 400 or 413.
+    pub status: u16,
 }
 
 pub struct FactChangeRow {
@@ -1525,6 +1539,8 @@ impl<'a> HostFactsRepo<'a> {
     pub async fn hashes(&self, tenant_id: i64, host_id: &str) -> Result<Option<FactsHashes>> {
         let row = sqlx::query(
             "SELECT h.facts_reported_hash AS reported, h.facts_reported_at AS reported_since,
+                    h.facts_refused_hash AS refused_hash, h.facts_refused_at AS refused_at,
+                    h.facts_refused_status AS refused_status,
                     f.facts_hash AS held
                FROM hosts h
                LEFT JOIN host_facts f
@@ -1536,11 +1552,40 @@ impl<'a> HostFactsRepo<'a> {
         .bind(host_id)
         .fetch_optional(&self.db.read)
         .await?;
-        Ok(row.map(|r| FactsHashes {
-            held: r.get("held"),
-            reported: r.get("reported"),
-            reported_since: r.get("reported_since"),
+        Ok(row.map(|r| {
+            let refused_at: Option<i64> = r.get("refused_at");
+            let refused_status: Option<i64> = r.get("refused_status");
+            FactsHashes {
+                held: r.get("held"),
+                reported: r.get("reported"),
+                reported_since: r.get("reported_since"),
+                refused: refused_at
+                    .zip(refused_status)
+                    .map(|(at, status)| FactsRefusal {
+                        hash: r.get("refused_hash"),
+                        at,
+                        status: u16::try_from(status).unwrap_or(0),
+                    }),
+            }
         }))
+    }
+
+    /// Record that an upload from this host was refused with `status`, against the hash the
+    /// agent last reported — the document it was sending. Refusals are rare (the agent does
+    /// not retry one), so this writes unconditionally.
+    pub async fn record_refusal(&self, tenant_id: i64, host_id: &str, status: u16) -> Result<()> {
+        sqlx::query(
+            "UPDATE hosts SET facts_refused_hash = facts_reported_hash, facts_refused_at = ?,
+                              facts_refused_status = ?
+              WHERE tenant_id = ? AND id = ?",
+        )
+        .bind(now_unix())
+        .bind(i64::from(status))
+        .bind(tenant_id)
+        .bind(host_id)
+        .execute(&self.db.write)
+        .await?;
+        Ok(())
     }
 
     /// Record the hash the agent says it holds, and since when. Returns true iff that
@@ -1803,12 +1848,19 @@ impl<'a> HostFactsRepo<'a> {
     /// `(host_id, source, json)`, grouped by host (host id order). Streamed like
     /// [`Self::for_each_document`]: one query for the whole fleet, one row in memory at a
     /// time.
-    pub async fn for_each_host_document(
+    ///
+    /// `f` is awaited per row, so it can hand the row on to a blocking thread (parsing a
+    /// document of megabytes is no work for an async worker) and wait when that falls behind.
+    pub async fn for_each_host_document<F, Fut>(
         &self,
         tenant_id: i64,
         sources: &[String],
-        mut f: impl FnMut(&str, &str, &str),
-    ) -> Result<()> {
+        mut f: F,
+    ) -> Result<()>
+    where
+        F: FnMut(String, String, String) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
         use futures_util::TryStreamExt;
         if sources.is_empty() {
             return Ok(());
@@ -1825,7 +1877,7 @@ impl<'a> HostFactsRepo<'a> {
         }
         let mut rows = query.fetch(&self.db.read);
         while let Some(row) = rows.try_next().await? {
-            f(row.get("host_id"), row.get("source"), row.get("facts_json"));
+            f(row.get("host_id"), row.get("source"), row.get("facts_json")).await;
         }
         Ok(())
     }
@@ -1835,14 +1887,18 @@ impl<'a> HostFactsRepo<'a> {
     ///
     /// Streamed: each row is dropped once `f` returns, so reading the whole fleet holds one
     /// document at a time rather than all of them — a tenant's inventories together can
-    /// run to gigabytes.
-    pub async fn for_each_document(
+    /// run to gigabytes. `f` is awaited per row, as in [`Self::for_each_host_document`].
+    pub async fn for_each_document<F, Fut>(
         &self,
         tenant_id: i64,
         source: &str,
         limit: i64,
-        mut f: impl FnMut(&str, &str),
-    ) -> Result<usize> {
+        mut f: F,
+    ) -> Result<usize>
+    where
+        F: FnMut(String, String) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
         use futures_util::TryStreamExt;
         let mut rows = sqlx::query(
             "SELECT host_id, facts_json FROM host_facts WHERE tenant_id = ? AND source = ?
@@ -1854,7 +1910,7 @@ impl<'a> HostFactsRepo<'a> {
         .fetch(&self.db.read);
         let mut n = 0;
         while let Some(row) = rows.try_next().await? {
-            f(row.get("host_id"), row.get("facts_json"));
+            f(row.get("host_id"), row.get("facts_json")).await;
             n += 1;
         }
         Ok(n)
