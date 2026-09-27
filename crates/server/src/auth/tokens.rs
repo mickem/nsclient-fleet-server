@@ -1,6 +1,5 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rand::RngCore;
-use sha2::{Digest, Sha256};
 
 /// Generate a 256-bit random token, URL-safe base64-encoded (~43 chars).
 pub fn random_token() -> String {
@@ -11,20 +10,7 @@ pub fn random_token() -> String {
 
 /// SHA-256 of a token, hex-encoded for stable string storage.
 pub fn hash_token(token: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(token.as_bytes());
-    let digest = hasher.finalize();
-    hex_encode(&digest)
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0xf) as usize] as char);
-    }
-    out
+    fleet_core::digest::sha256_hex(token.as_bytes())
 }
 
 #[cfg(test)]

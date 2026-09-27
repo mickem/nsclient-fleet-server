@@ -4,9 +4,11 @@
 //! Results are memoized per host against the tenant's `config_version` (Phase 9). Every
 //! input to the computation — tags, groups and their selectors, bundle assignments, bundle
 //! rows, host overrides — is behind a mutation path that bumps that counter, so a stale
-//! entry cannot outlive a change. See `DesiredStateCache`.
+//! entry cannot outlive a change. See `DesiredStateCache`. The per-host inputs a host
+//! writes itself (its reported tags and its facts document) invalidate that host's entry
+//! instead.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::RwLock;
 
@@ -51,9 +53,26 @@ const IDLE_TTL_SECS: i64 = 3600;
 
 struct Entry {
     config_version: i64,
-    state: DesiredState,
+    /// `None`: a tombstone. The host was invalidated and nothing has been computed for it
+    /// since; the entry is kept only to carry `generation`.
+    state: Option<DesiredState>,
+    /// Bumped by every [`DesiredStateCache::invalidate_host`]. A compute records it before
+    /// reading its inputs and may only store its result if it has not moved — see
+    /// [`CacheTicket`].
+    generation: u64,
     /// Atomic so a cache hit only needs the read lock.
     last_used: AtomicI64,
+}
+
+/// What a compute saw of a host's entry before it read its inputs. Storing the result is
+/// refused if the host was invalidated in between: that compute may have read the document
+/// or tags the invalidation was about, and caching it would pin the stale membership under
+/// a `config_version` that no longer moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheTicket {
+    /// Moved whenever the idle sweep drops entries, since the generations go with them.
+    epoch: u64,
+    generation: u64,
 }
 
 /// Memoized desired state, keyed by `(tenant_id, host_id)` and validated against the
@@ -71,6 +90,7 @@ struct Entry {
 #[derive(Default)]
 pub struct DesiredStateCache {
     entries: RwLock<HashMap<(i64, String), Entry>>,
+    epoch: AtomicU64,
     hits: AtomicU64,
     misses: AtomicU64,
 }
@@ -85,9 +105,10 @@ impl DesiredStateCache {
         // Cheap borrow-key lookup would need a custom Borrow impl; hosts poll at most a few
         // times a minute, so one key allocation here is not worth the complexity.
         let hit = map.get(&(tenant_id, host_id.to_string())).and_then(|e| {
+            let state = e.state.as_ref()?;
             (e.config_version == config_version).then(|| {
                 e.last_used.store(now_unix(), Ordering::Relaxed);
-                e.state.clone()
+                state.clone()
             })
         });
         match hit {
@@ -102,8 +123,34 @@ impl DesiredStateCache {
         }
     }
 
-    fn put(&self, tenant_id: i64, host_id: &str, config_version: i64, state: &DesiredState) {
+    /// Take before reading any input of a compute; hand to [`Self::put_if_current`].
+    fn ticket(&self, tenant_id: i64, host_id: &str) -> CacheTicket {
+        let map = self.entries.read().expect("desired-state cache lock");
+        CacheTicket {
+            // Read under the lock that `put_if_current` takes to bump it, so the two agree.
+            epoch: self.epoch.load(Ordering::Relaxed),
+            generation: map
+                .get(&(tenant_id, host_id.to_string()))
+                .map_or(0, |e| e.generation),
+        }
+    }
+
+    /// Store a computed state, unless the host was invalidated after `ticket` was taken.
+    /// Returns whether it was stored.
+    fn put_if_current(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        ticket: CacheTicket,
+        config_version: i64,
+        state: &DesiredState,
+    ) -> bool {
         let mut map = self.entries.write().expect("desired-state cache lock");
+        let key = (tenant_id, host_id.to_string());
+        let generation = map.get(&key).map_or(0, |e| e.generation);
+        if ticket.epoch != self.epoch.load(Ordering::Relaxed) || ticket.generation != generation {
+            return false;
+        }
         if map.len() >= MAX_ENTRIES {
             let cutoff = now_unix() - IDLE_TTL_SECS;
             let before = map.len();
@@ -113,6 +160,13 @@ impl DesiredStateCache {
                 // recompute; this should never happen on a single-VM fleet.
                 map.clear();
             }
+            // Whatever went took its generation with it: a later invalidation of that host
+            // would start again from 1 and could match a ticket taken before the sweep, and
+            // the stale state that compute read would be stored. Moving the epoch voids every
+            // ticket in flight instead, which costs at most one recompute each.
+            if map.len() < before {
+                self.epoch.fetch_add(1, Ordering::Relaxed);
+            }
             tracing::info!(
                 before,
                 after = map.len(),
@@ -120,22 +174,59 @@ impl DesiredStateCache {
             );
         }
         map.insert(
-            (tenant_id, host_id.to_string()),
+            key,
             Entry {
                 config_version,
-                state: state.clone(),
+                state: Some(state.clone()),
+                generation,
                 last_used: AtomicI64::new(now_unix()),
             },
         );
+        true
     }
 
-    /// Drop a host's entry. `config_version` covers every *configuration* change, but not a
-    /// host disappearing — deleting a host does not change the tenant's config.
+    /// Store unconditionally, for tests that are not about the race.
+    #[cfg(test)]
+    fn put(&self, tenant_id: i64, host_id: &str, config_version: i64, state: &DesiredState) {
+        let ticket = self.ticket(tenant_id, host_id);
+        assert!(self.put_if_current(tenant_id, host_id, ticket, config_version, state));
+    }
+
+    /// Forget a host that is gone — deleted, or cut off pending re-enrollment — entirely.
+    /// Not [`Self::invalidate_host`], whose tombstone would stay in the map for a host that
+    /// never polls again: a fleet that enrolls and deletes hosts all day would fill the map
+    /// with them.
+    ///
+    /// Dropping the entry drops its generation, as a sweep does, and for the same reason the
+    /// epoch moves with it: a revoked host keeps its row, so an operator can still edit its
+    /// tags, and that invalidation would start it again from generation 1 — possibly the
+    /// generation of a compute still in flight, whose pre-edit result would then be stored
+    /// and served once the host re-enrolls under the same id. Moving the epoch voids every
+    /// ticket in flight, at the cost of one recompute each.
+    pub fn forget_host(&self, tenant_id: i64, host_id: &str) {
+        let mut map = self.entries.write().expect("desired-state cache lock");
+        if map.remove(&(tenant_id, host_id.to_string())).is_some() {
+            // Under the write lock, so no ticket is taken between the removal and the bump.
+            self.epoch.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Drop a host's cached state because one of its own inputs — its reported tags or
+    /// facts — changed, which `config_version` does not cover. A compute already under way
+    /// for this host will not store its result. For a host that is going away, use
+    /// [`Self::forget_host`].
     pub fn invalidate_host(&self, tenant_id: i64, host_id: &str) {
-        self.entries
-            .write()
-            .expect("desired-state cache lock")
-            .remove(&(tenant_id, host_id.to_string()));
+        let mut map = self.entries.write().expect("desired-state cache lock");
+        let entry = map
+            .entry((tenant_id, host_id.to_string()))
+            .or_insert_with(|| Entry {
+                config_version: 0,
+                state: None,
+                generation: 0,
+                last_used: AtomicI64::new(now_unix()),
+            });
+        entry.state = None;
+        entry.generation += 1;
     }
 
     /// `(hits, misses)` since startup. Exposed so the cost of the lazy recompute can be
@@ -185,14 +276,17 @@ pub async fn compute_desired_state_at(
         return Ok(cached);
     }
 
+    // Before reading anything the result depends on.
+    let ticket = state.desired_state_cache.ticket(tenant_id, host_id);
     let computed = compute_uncached(state, tenant_id, host_id).await?;
 
     // Store against the version we were handed. If a bump landed while we were computing,
     // this entry is already stale-by-key and the next poll recomputes — the same outcome as
-    // having no cache, never a stale answer.
+    // having no cache, never a stale answer. A bump to this host alone (its facts or tags)
+    // is not in the version; the ticket catches that one.
     state
         .desired_state_cache
-        .put(tenant_id, host_id, config_version, &computed);
+        .put_if_current(tenant_id, host_id, ticket, config_version, &computed);
     Ok(computed)
 }
 
@@ -211,19 +305,25 @@ pub async fn compute_uncached(
         .map_for_host(tenant_id, host_id)
         .await?;
 
-    // 2. Find groups whose selector matches the host.
+    // 2. Find groups whose selector matches the host. Facts documents are loaded only for
+    //    the sources some selector reads — none at all for a tenant grouping on tags alone.
     let groups = GroupsRepo::new(&state.db).list(tenant_id).await?;
-    let matching_group_ids: Vec<String> = groups
+    let selectors: Vec<(&str, Selector)> = groups
         .iter()
         .filter_map(|g| {
             let selector_v: Value = serde_json::from_str(&g.selector_json).ok()?;
-            let selector = Selector::from_json(&selector_v).ok()?;
-            if selector.matches(&tags) {
-                Some(g.id.clone())
-            } else {
-                None
-            }
+            Some((g.id.as_str(), Selector::from_json(&selector_v).ok()?))
         })
+        .collect();
+    let sources: BTreeSet<String> = selectors
+        .iter()
+        .flat_map(|(_, s)| s.fact_sources())
+        .collect();
+    let facts = crate::facts::load_for_host(state, tenant_id, host_id, &sources).await?;
+    let matching_group_ids: Vec<String> = selectors
+        .iter()
+        .filter(|(_, s)| s.matches(&tags, &facts))
+        .map(|(id, _)| (*id).to_owned())
         .collect();
 
     // 3. Collect (bundle, priority) for those groups.
@@ -366,6 +466,88 @@ mod tests {
 
         assert!(c.get(1, "host-a", 1).is_none());
         assert_eq!(c.get(1, "host-b", 1).unwrap().state_hash, "bbb");
+    }
+
+    #[test]
+    fn a_compute_that_raced_an_invalidation_is_not_cached() {
+        let c = DesiredStateCache::new();
+        c.put(1, "host-a", 1, &ds("old"));
+        c.invalidate_host(1, "host-a");
+
+        // A compute starts, reading the host's facts...
+        let ticket = c.ticket(1, "host-a");
+        // ...a new document lands and invalidates the host...
+        c.invalidate_host(1, "host-a");
+        // ...and the compute finishes with what it read before.
+        assert!(!c.put_if_current(1, "host-a", ticket, 1, &ds("stale")));
+        assert!(c.get(1, "host-a", 1).is_none(), "the next poll recomputes");
+
+        // A compute that started after the invalidation is stored.
+        let ticket = c.ticket(1, "host-a");
+        assert!(c.put_if_current(1, "host-a", ticket, 1, &ds("fresh")));
+        assert_eq!(c.get(1, "host-a", 1).unwrap().state_hash, "fresh");
+    }
+
+    #[test]
+    fn an_invalidation_of_an_uncached_host_still_stops_a_compute_in_flight() {
+        let c = DesiredStateCache::new();
+        let ticket = c.ticket(1, "host-a");
+        c.invalidate_host(1, "host-a");
+        assert!(!c.put_if_current(1, "host-a", ticket, 1, &ds("stale")));
+    }
+
+    #[test]
+    fn a_sweep_that_drops_a_tombstone_voids_tickets_taken_before_it() {
+        let c = DesiredStateCache::new();
+        // host-a was invalidated long ago (generation 1), and a compute for it is running.
+        c.invalidate_host(1, "host-a");
+        let ticket = c.ticket(1, "host-a");
+        c.entries.read().unwrap()[&(1, "host-a".to_string())]
+            .last_used
+            .store(now_unix() - IDLE_TTL_SECS - 1, Ordering::Relaxed);
+        // The map fills up; the next store sweeps, and the idle tombstone goes.
+        for i in 0..MAX_ENTRIES {
+            c.put(1, &format!("filler-{i}"), 1, &ds("x"));
+        }
+        assert!(!c
+            .entries
+            .read()
+            .unwrap()
+            .contains_key(&(1, "host-a".to_string())));
+        // A new invalidation starts host-a from generation 1 again — the ticket's own —
+        // but the sweep moved the epoch, so the stale compute is still refused.
+        c.invalidate_host(1, "host-a");
+        assert!(!c.put_if_current(1, "host-a", ticket, 1, &ds("stale")));
+    }
+
+    #[test]
+    fn a_forgotten_host_leaves_nothing_behind() {
+        let c = DesiredStateCache::new();
+        c.put(1, "host-a", 1, &ds("aaa"));
+        c.invalidate_host(1, "host-a");
+        c.forget_host(1, "host-a");
+        c.forget_host(1, "never-cached");
+        assert_eq!(c.len(), 0);
+    }
+
+    #[test]
+    fn forgetting_a_host_voids_tickets_taken_before_it() {
+        let c = DesiredStateCache::new();
+        // host-a's tags were edited once (generation 1), and a compute for it is running.
+        c.invalidate_host(1, "host-a");
+        let ticket = c.ticket(1, "host-a");
+        // The host is revoked; its entry, and with it its generation, goes.
+        c.forget_host(1, "host-a");
+        // An operator edits the revoked host's tags: it starts again from generation 1 —
+        // the ticket's own — but forgetting moved the epoch, so the stale compute is refused.
+        c.invalidate_host(1, "host-a");
+        assert!(!c.put_if_current(1, "host-a", ticket, 1, &ds("stale")));
+        assert!(c.get(1, "host-a", 1).is_none());
+
+        // Forgetting a host that was never cached leaves other hosts' computes alone.
+        let ticket = c.ticket(1, "host-b");
+        c.forget_host(1, "never-cached");
+        assert!(c.put_if_current(1, "host-b", ticket, 1, &ds("fresh")));
     }
 
     #[test]

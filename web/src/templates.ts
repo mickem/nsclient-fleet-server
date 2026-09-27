@@ -87,6 +87,18 @@ export type TemplateField =
       when?: FieldWhen;
     }
   | {
+      /** A checklist of host fact sets. Each set is one bool key, named after the set, in
+       *  the settings section of every module that can produce it: checking a set writes
+       *  `<id> = true` into all of them (and enables the modules); unchecking removes the
+       *  keys rather than writing false, so another bundle can still turn the set on. */
+      kind: "facts";
+      id: string;
+      label: string;
+      sets: FactSet[];
+      help?: string;
+      when?: FieldWhen;
+    }
+  | {
       /** Every `name = command` entry of a section as an editable table: rename, edit,
        *  delete rows, and add rows from a list of common presets. */
       kind: "table";
@@ -149,6 +161,115 @@ export function validTableRowValue(f: TemplateField & { kind: "table" }, value: 
   return f.valuePattern ? f.valuePattern.test(value) : true;
 }
 
+/** Where a fact set is switched on: the producing module's own `facts` section. */
+export type FactTarget = {
+  /** Settings section holding the switch. */
+  section: string;
+  /** Module to enable in `[/modules]`; absent for the core's own sets. */
+  module?: string;
+  /** Which hosts read this section — shown to the operator, not used in matching. */
+  platform: string;
+};
+
+/** A fact set the agent can collect. The server holds this map because the agent does not:
+ *  a set is enabled in the module that produces it, and which module that is depends on the
+ *  platform (see "Host Facts" in the NSClient++ docs). */
+export type FactSet = {
+  /** The set id, which is also the settings key: `network.interfaces`. */
+  id: string;
+  label: string;
+  description: string;
+  /** What collecting it costs the host, as the agent documents it. */
+  cost: string;
+  targets: FactTarget[];
+};
+
+const FACTS_WINDOWS = "/settings/system/windows/facts";
+const FACTS_UNIX = "/settings/system/unix/facts";
+
+/** CheckSystem's sets: one section per platform, same keys in both. */
+function systemTargets(): FactTarget[] {
+  return [
+    { section: FACTS_WINDOWS, module: "CheckSystem", platform: "Windows" },
+    { section: FACTS_UNIX, module: "CheckSystem", platform: "Linux" },
+  ];
+}
+
+export const FACT_SETS: FactSet[] = [
+  {
+    id: "os",
+    label: "Operating system",
+    description: "Family, name, version, architecture, virtualization and domain.",
+    cost: "none — read once at start",
+    targets: systemTargets(),
+  },
+  {
+    id: "hardware",
+    label: "Hardware",
+    description: "Manufacturer, model, CPU cores and memory.",
+    cost: "none — read once at start",
+    targets: systemTargets(),
+  },
+  {
+    id: "network.interfaces",
+    label: "Network interfaces",
+    description: "One record per interface: MAC, link state, speed and addresses.",
+    cost: "low",
+    targets: systemTargets(),
+  },
+  {
+    id: "storage.volumes",
+    label: "Volumes",
+    description: "One record per volume check_drivesize sees: device, filesystem, type, size.",
+    cost: "low",
+    targets: [
+      { section: "/settings/disk/facts", module: "CheckDisk", platform: "Windows & Linux" },
+    ],
+  },
+  {
+    id: "software.installed",
+    label: "Installed software",
+    description:
+      "One record per installed program or package: name, version, publisher, architecture. " +
+      "Up to 2500 records — the largest set by far.",
+    cost: "the highest: a registry walk or a package-manager query every round",
+    targets: systemTargets(),
+  },
+  {
+    id: "agent",
+    label: "NSClient++ agent",
+    description: "Agent version, the loaded modules, and whether it is enrolled.",
+    cost: "none",
+    targets: [{ section: "/settings/facts", platform: "Windows & Linux" }],
+  },
+];
+
+const isTrue = (v: string | undefined) =>
+  v !== undefined && ["true", "1", "yes", "enabled"].includes(v.trim().toLowerCase());
+
+/** How many of a set's switches the document turns on, out of how many there are. A set
+ *  switched on for one platform only (hand-edited) reads as partial. */
+export function factSetState(ini: string, set: FactSet): "on" | "off" | "partial" {
+  const on = set.targets.filter((t) => isTrue(getIniValue(ini, t.section, set.id))).length;
+  if (on === 0) return "off";
+  return on === set.targets.length ? "on" : "partial";
+}
+
+/** Switch a set on (every platform's key, plus the producing modules) or off (the keys
+ *  removed, the modules left alone — other bundles may need them). */
+export function setFactSet(ini: string, set: FactSet, on: boolean): string {
+  let next = ini;
+  for (const t of set.targets) {
+    next = on ? setIniValue(next, t.section, set.id, "true") : removeIniKey(next, t.section, set.id);
+  }
+  if (on) {
+    for (const m of new Set(set.targets.flatMap((t) => (t.module ? [t.module] : [])))) {
+      next = setIniValue(next, "/modules", m, "enabled");
+    }
+  }
+  return next;
+}
+
 export type BundleTemplate = {
   /** Stored in bundle.toml; must match the bundle token charset [A-Za-z0-9._-]. */
   id: string;
@@ -168,7 +289,7 @@ export function templateById(id: string): BundleTemplate | undefined {
 
 /** Current value of a field as read from the INI text ("" when absent / no match). */
 export function fieldValue(ini: string, f: TemplateField): string {
-  if (f.kind === "table") return "";
+  if (f.kind === "table" || f.kind === "facts") return "";
   if (f.kind === "choice") {
     const match = f.options.find((o) =>
       Object.entries(o.set).every(([section, kv]) =>
@@ -187,14 +308,17 @@ export function fieldValue(ini: string, f: TemplateField): string {
 /** Whether a key-bound field's key exists in the document (optional fields' switch). */
 export function fieldPresent(ini: string, f: TemplateField): boolean {
   return (
-    f.kind !== "choice" && f.kind !== "table" && getIniValue(ini, f.section, f.key) !== undefined
+    f.kind !== "choice" &&
+    f.kind !== "table" &&
+    f.kind !== "facts" &&
+    getIniValue(ini, f.section, f.key) !== undefined
   );
 }
 
 /** Default written when a field appears or is switched on: the explicit default, else
  *  whatever the template's base INI carries for that key. */
 export function fieldDefault(t: BundleTemplate, f: TemplateField): string {
-  if (f.kind === "choice" || f.kind === "table") return "";
+  if (f.kind === "choice" || f.kind === "table" || f.kind === "facts") return "";
   if (f.kind === "bool") return f.default ? "true" : "false";
   if (f.kind === "select") return f.default;
   return f.default ?? getIniValue(t.ini, f.section, f.key) ?? "";
@@ -224,8 +348,8 @@ export function applyFieldChange(
   const wasVisible = new Map(t.fields.map((x) => [x.id, fieldVisible(ini, t, x)]));
 
   let next = ini;
-  if (f.kind === "table") {
-    // Rows are edited through the table helpers below, not as one value.
+  if (f.kind === "table" || f.kind === "facts") {
+    // Rows and fact sets are edited through their own helpers, not as one value.
     return ini;
   } else if (f.kind === "choice") {
     const opt = f.options.find((o) => o.value === value);
@@ -242,7 +366,9 @@ export function applyFieldChange(
   }
 
   for (const field of t.fields) {
-    if (!field.when || field.kind === "choice" || field.kind === "table") continue;
+    if (!field.when || field.kind === "choice" || field.kind === "table" || field.kind === "facts") {
+      continue;
+    }
     const visible = fieldVisible(next, t, field);
     const present = getIniValue(next, field.section, field.key) !== undefined;
     if (!visible && present) {
@@ -313,6 +439,7 @@ export const TEMPLATE_CATEGORIES = [
   "Applications & network",
   "Security & events",
   "Monitoring delivery",
+  "Inventory",
   "Extensibility",
 ];
 
@@ -1613,6 +1740,53 @@ disk_c = check_drivesize drive=C: "warn=free < 20%" "crit=free < 10%"
 `,
   },
 
+  // ----------------------------------------------------------------- Inventory
+  {
+    id: "host-inventory",
+    title: "Host inventory (facts)",
+    category: "Inventory",
+    description:
+      "Have hosts report what they are — OS, hardware, network interfaces, volumes, " +
+      "installed software — shown on each host's page. Pick the fact sets to collect; " +
+      "nothing is collected until a set is switched on. Hosts send only a hash on each " +
+      "poll, and the inventory itself only when it changed.",
+    fields: [
+      {
+        kind: "facts",
+        id: "fact_sets",
+        label: "Fact sets to collect",
+        sets: FACT_SETS,
+        help:
+          "Each set is switched on in the module that produces it, for Windows and Linux " +
+          "alike — a host simply ignores the other platform's section. Unticking a set " +
+          "removes its switch from this bundle rather than forcing it off, so another " +
+          "bundle can still enable it.",
+      },
+    ],
+    ini: `; Host inventory: which fact sets the agent collects and sends to the fleet server.
+; A set is enabled in the module that produces it; a host ignores the section of the
+; platform it is not on, so one bundle serves a mixed group. Each set is its own key,
+; so another bundle turning on software.installed adds to this one.
+[/modules]
+CheckSystem = enabled
+CheckDisk = enabled
+
+; CheckSystem on Windows hosts
+[/settings/system/windows/facts]
+os = true
+hardware = true
+network.interfaces = true
+
+; CheckSystem on Linux hosts
+[/settings/system/unix/facts]
+os = true
+hardware = true
+network.interfaces = true
+
+[/settings/disk/facts]
+storage.volumes = true
+`,
+  },
   // --------------------------------------------------------------- Extensibility
   {
     id: "external-scripts",
