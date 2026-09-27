@@ -434,8 +434,13 @@ export function ExprEditor({ expr, onChange, onRemove, known, facts }: ExprProps
           size="small"
           value={leaf.test}
           onChange={(e) => {
-            const v = e.target.value as FactTest["test"] | Compound;
-            onChange(v === "not" || v === "and" || v === "or" ? defaultExpr(v) : withTest(leaf, v));
+            // Only the options below can be chosen; anything else (there should be nothing)
+            // is ignored rather than turned into a clause the rest of the editor cannot read.
+            const v = e.target.value as string;
+            const compound = COMPOUND_OPS.find((o) => o.id === v);
+            const test = FACT_TESTS.find((t) => t.id === v);
+            if (compound) onChange(defaultExpr(compound.id));
+            else if (test) onChange(withTest(leaf, test.id));
           }}
         >
           {FACT_TESTS.map((t) => (
@@ -443,7 +448,9 @@ export function ExprEditor({ expr, onChange, onRemove, known, facts }: ExprProps
               {t.label}
             </MenuItem>
           ))}
-          <Divider />
+          {/* A subheader, not a Divider: Select turns every child into a selectable option,
+              and a divider chosen by click has no value. */}
+          <ListSubheader>Combine</ListSubheader>
           {COMPOUND_OPS.map((o) => (
             <MenuItem key={o.id} value={o.id}>
               {o.label}

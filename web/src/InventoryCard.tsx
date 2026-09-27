@@ -81,6 +81,13 @@ function fmtBps(n: number): string {
   return `${n} bps`;
 }
 
+/** A value as the API spells it: numbers unformatted, lists comma-joined. */
+function rawText(v: unknown): string {
+  if (v === undefined || v === null) return "";
+  if (Array.isArray(v)) return v.map(rawText).join(", ");
+  return typeof v === "object" ? JSON.stringify(v) : String(v);
+}
+
 type Block =
   | { kind: "values"; path: string; rows: [string, unknown][] }
   | { kind: "records"; path: string; records: Obj[] };
@@ -136,7 +143,13 @@ function RecordsTable({ records }: { records: Obj[] }) {
   }, [records]);
   const needle = filter.trim().toLowerCase();
   const matching = needle
-    ? records.filter((r) => columns.some((c) => fmtValue(c, r[c]).toLowerCase().includes(needle)))
+    ? records.filter((r) =>
+        // The shown form ("252.0 GB") and the raw one (270553174016, as the API and the
+        // history carry it), so either can be pasted in.
+        columns.some((c) =>
+          [fmtValue(c, r[c]), rawText(r[c])].some((t) => t.toLowerCase().includes(needle)),
+        ),
+      )
     : records;
   const shown = showAll ? matching : matching.slice(0, PAGE);
   return (

@@ -1542,6 +1542,24 @@ impl<'a> HostFactsRepo<'a> {
         Ok(res.rows_affected() > 0)
     }
 
+    /// Just the hash of a source's document: whether a write would change anything, without
+    /// reading the document itself.
+    pub async fn held_hash(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        source: &str,
+    ) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT facts_hash FROM host_facts WHERE tenant_id = ? AND host_id = ? AND source = ?",
+        )
+        .bind(tenant_id)
+        .bind(host_id)
+        .bind(source)
+        .fetch_optional(&self.db.read)
+        .await?)
+    }
+
     pub async fn get(
         &self,
         tenant_id: i64,

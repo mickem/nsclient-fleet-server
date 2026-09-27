@@ -300,6 +300,12 @@ pub async fn store(
     let repo = HostFactsRepo::new(&state.db);
     let mut document: Option<Value> = None;
     for _ in 0..STORE_ATTEMPTS {
+        // The hash first: an unchanged document needs no more than that.
+        if repo.held_hash(tenant_id, host_id, source).await?.as_deref() == Some(hash) {
+            return Ok(ReplaceOutcome::Unchanged);
+        }
+        // A diff follows, so now the body. Its own hash is what the write is checked against:
+        // if it moved since the line above, the write says so and this goes round again.
         let previous = repo.get(tenant_id, host_id, source).await?;
         let previous_hash = previous.as_ref().map(|p| p.facts_hash.as_str());
         if previous_hash == Some(hash) {
@@ -620,6 +626,9 @@ const MAX_CATALOG_HOSTS: i64 = 2_000;
 #[derive(Default)]
 pub struct CatalogCache {
     inner: std::sync::Mutex<CatalogCacheInner>,
+    /// One build at a time per tenant: operators opening the groups page after a bump wait
+    /// for the first rebuild instead of each reading every document again.
+    building: std::sync::Mutex<HashMap<i64, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 }
 
 #[derive(Default)]
@@ -629,6 +638,15 @@ struct CatalogCacheInner {
 }
 
 impl CatalogCache {
+    fn build_lock(&self, tenant_id: i64) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        self.building
+            .lock()
+            .expect("catalog build lock map")
+            .entry(tenant_id)
+            .or_default()
+            .clone()
+    }
+
     /// A tenant's facts changed.
     pub fn bump(&self, tenant_id: i64) {
         let mut inner = self.inner.lock().expect("catalog cache lock");
@@ -653,6 +671,44 @@ impl CatalogCache {
         if inner.generations.get(&tenant_id).copied().unwrap_or(0) == generation {
             inner.built.insert(tenant_id, (generation, catalog));
         }
+    }
+}
+
+/// One source's part of the catalog, fed a row at a time.
+struct SourceBuild {
+    acc: CatalogAcc,
+    /// Documents folded in. One row per host and source (the primary key), so this is the
+    /// host count — of hosts whose document parsed.
+    hosts: usize,
+    /// Rows offered, parsed or not.
+    seen: i64,
+    cap: i64,
+}
+
+impl SourceBuild {
+    fn new(cap: i64) -> Self {
+        Self {
+            acc: CatalogAcc::default(),
+            hosts: 0,
+            seen: 0,
+            cap,
+        }
+    }
+
+    /// Fold in one row. The caller offers at most one row past the cap; that row is only
+    /// evidence that the cap left something out, and is not read.
+    fn offer(&mut self, host_id: &str, source: &str, json: &str) {
+        self.seen += 1;
+        if self.seen > self.cap {
+            self.acc.truncated = true;
+        } else if let Some(doc) = parse_stored(host_id, source, json) {
+            self.acc.add_document(&doc);
+            self.hosts += 1;
+        }
+    }
+
+    fn finish(self, source: String) -> CatalogSource {
+        self.acc.finish(source, self.hosts)
     }
 }
 
@@ -790,6 +846,13 @@ fn walk(v: &Value, path: &str, depth: usize, local: &mut LocalPaths) {
 ///
 /// Reads every document in the tenant, so it is for opening an editor, not for a poll path.
 pub async fn catalog(State(state): State<AppState>, who: AuthedUser) -> Response {
+    if let Ok(cached) = state.facts_catalog_cache.lookup(who.tenant_id) {
+        return Json(&*cached).into_response();
+    }
+    // Stale: build it, but only one request per tenant at a time. The rest wait here and
+    // then, as a rule, find what the first one built.
+    let lock = state.facts_catalog_cache.build_lock(who.tenant_id);
+    let _building = lock.lock().await;
     let generation = match state.facts_catalog_cache.lookup(who.tenant_id) {
         Ok(cached) => return Json(&*cached).into_response(),
         Err(generation) => generation,
@@ -805,27 +868,17 @@ pub async fn catalog(State(state): State<AppState>, who: AuthedUser) -> Response
         sources.insert(AGENT_SOURCE.to_owned());
         let mut out = Vec::new();
         for source in sources {
-            let mut acc = CatalogAcc::default();
-            // One row per host and source (the primary key), so a count is the host count.
-            let mut hosts = 0;
-            // Folded in one document at a time, each dropped before the next is read.
-            let read = repo
-                .for_each_document(
-                    who.tenant_id,
-                    &source,
-                    MAX_CATALOG_HOSTS,
-                    |host_id, json| {
-                        if let Some(doc) = parse_stored(host_id, &source, json) {
-                            acc.add_document(&doc);
-                            hosts += 1;
-                        }
-                    },
-                )
-                .await?;
-            if read as i64 >= MAX_CATALOG_HOSTS {
-                acc.truncated = true;
-            }
-            out.push(acc.finish(source, hosts));
+            // Folded in one document at a time, each dropped before the next is read. One row
+            // past the cap is read only to learn whether the cap left anything out.
+            let mut build = SourceBuild::new(MAX_CATALOG_HOSTS);
+            repo.for_each_document(
+                who.tenant_id,
+                &source,
+                MAX_CATALOG_HOSTS + 1,
+                |host_id, json| build.offer(host_id, &source, json),
+            )
+            .await?;
+            out.push(build.finish(source));
         }
         anyhow::Ok(FactsCatalog { sources: out })
     }
@@ -981,6 +1034,24 @@ mod tests {
         ));
         // Long-standing, but not empty.
         assert!(!empty_for_long_enough(&hashes(&a, 0), now));
+    }
+
+    #[test]
+    fn the_catalog_is_truncated_only_when_a_row_was_left_out() {
+        let mut exact = SourceBuild::new(2);
+        exact.offer("h1", AGENT_SOURCE, r#"{"os":{}}"#);
+        exact.offer("h2", AGENT_SOURCE, "not json");
+        let exact = exact.finish(AGENT_SOURCE.into());
+        assert!(!exact.truncated, "exactly the cap is not truncated");
+        assert_eq!(exact.hosts, 1, "only documents that parsed count as hosts");
+
+        let mut over = SourceBuild::new(2);
+        for h in ["h1", "h2", "h3"] {
+            over.offer(h, AGENT_SOURCE, r#"{"os":{}}"#);
+        }
+        let over = over.finish(AGENT_SOURCE.into());
+        assert!(over.truncated);
+        assert_eq!(over.hosts, 2, "the row past the cap is not read");
     }
 
     #[test]
