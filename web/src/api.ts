@@ -168,8 +168,10 @@ export type HostFacts = {
    *  files, cloud inventories) will sit beside it. */
   source: string;
   status: FactsStatus;
-  /** The stored document; null when the host never sent one. */
+  /** The stored document; null when the host never sent one, or when it is `unreadable`. */
   facts: Record<string, unknown> | null;
+  /** A document is stored but could not be read back. */
+  unreadable: boolean;
   facts_hash: string | null;
   reported_hash: string | null;
   /** When the agent collected it, by the agent's clock (ISO 8601). */

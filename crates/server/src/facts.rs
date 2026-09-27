@@ -81,10 +81,20 @@ pub async fn advertise(
 ) -> Option<HeaderValue> {
     // No (usable) hash: an agent without facts, or a build that cannot hash. It uploads
     // nothing whatever the answer, and only the header's presence means anything to it, so
-    // the lookup — a read on every poll — is spared. A malformed value is ignored rather
+    // the lookup is spared. A malformed value is ignored rather
     // than refused: it is descriptive, and failing a poll over it would cost the host its
     // configuration.
     let Some(reported) = reported.and_then(facts::normalize_hash) else {
+        // It no longer vouches for what we hold (a downgraded agent, facts switched off in
+        // it), so forget what it last said: the page then reads "not reported" instead of
+        // "up to date" forever. One conditional write, a no-op once it is cleared — still
+        // no read on this path.
+        if let Err(e) = HostFactsRepo::new(&state.db)
+            .clear_reported_hash(tenant_id, host_id)
+            .await
+        {
+            tracing::error!(error = %e, "clear_reported_hash failed");
+        }
         return Some(HeaderValue::from_static(FACTS_HASH_NONE));
     };
     let repo = HostFactsRepo::new(&state.db);
@@ -304,12 +314,10 @@ pub async fn store(
     let repo = HostFactsRepo::new(&state.db);
     let mut document: Option<Value> = None;
     for _ in 0..STORE_ATTEMPTS {
-        // The hash first: an unchanged document needs no more than that.
-        if repo.held_hash(tenant_id, host_id, source).await?.as_deref() == Some(hash) {
-            return Ok(ReplaceOutcome::Unchanged);
-        }
-        // A diff follows, so now the body. Its own hash is what the write is checked against:
-        // if it moved since the line above, the write says so and this goes round again.
+        // Callers have already compared the cheap hash (the upload and the clear both have
+        // it from `hashes`), so this read is the one a diff needs. Its own hash is what the
+        // write is checked against: if it moved meanwhile, the write says so and this goes
+        // round again.
         let previous = repo.get(tenant_id, host_id, source).await?;
         let previous_hash = previous.as_ref().map(|p| p.facts_hash.as_str());
         if previous_hash == Some(hash) {
@@ -337,7 +345,14 @@ pub async fn store(
             state
                 .desired_state_cache
                 .invalidate_host(tenant_id, host_id);
-            state.facts_catalog_cache.bump(tenant_id);
+            state.facts_catalog_cache.bump(
+                tenant_id,
+                if previous.is_none() {
+                    CatalogChange::Hosts
+                } else {
+                    CatalogChange::Values
+                },
+            );
         }
         if outcome != ReplaceOutcome::Conflict {
             return Ok(outcome);
@@ -506,8 +521,12 @@ pub struct HostFactsView {
     /// Which source this is. Only `agent` today; imported sources will sit beside it.
     pub source: &'static str,
     pub status: FactsStatus,
-    /// The stored document, or null when the host never uploaded one.
-    pub facts: Option<Value>,
+    /// The stored document — its stored bytes, passed through rather than parsed and
+    /// re-encoded — or null when the host never uploaded one, or when it is unreadable.
+    pub facts: Option<Box<serde_json::value::RawValue>>,
+    /// A document is stored but does not parse: `facts` is null for that reason, not
+    /// because nothing was ever uploaded.
+    pub unreadable: bool,
     pub facts_hash: Option<String>,
     /// What the agent last said it holds.
     pub reported_hash: Option<String>,
@@ -579,16 +598,39 @@ pub async fn host_facts(
         })
         .collect();
 
-    let stored = stored.as_ref();
+    let status = status(&hashes);
+    let (facts, unreadable, facts_hash, collected_at, received_at, size_bytes) = match stored {
+        None => (None, false, None, None, None, None),
+        Some(s) => {
+            // Validated, not re-encoded: a document of megabytes goes out as it was stored.
+            let facts = match serde_json::value::RawValue::from_string(s.facts_json) {
+                Ok(raw) => Some(raw),
+                Err(e) => {
+                    tracing::warn!(%host_id, error = %e, "stored facts document does not parse");
+                    None
+                }
+            };
+            let unreadable = facts.is_none();
+            (
+                facts,
+                unreadable,
+                Some(s.facts_hash),
+                s.collected_at,
+                Some(s.received_at),
+                Some(s.size_bytes),
+            )
+        }
+    };
     let view = HostFactsView {
         source: AGENT_SOURCE,
-        status: status(&hashes),
-        facts: stored.and_then(|s| serde_json::from_str(&s.facts_json).ok()),
-        facts_hash: stored.map(|s| s.facts_hash.clone()),
+        status,
+        facts,
+        unreadable,
+        facts_hash,
         reported_hash: hashes.reported,
-        collected_at: stored.and_then(|s| s.collected_at.clone()),
-        received_at: stored.map(|s| s.received_at),
-        size_bytes: stored.map(|s| s.size_bytes),
+        collected_at,
+        received_at,
+        size_bytes,
         changes,
     };
     Json(view).into_response()
@@ -665,10 +707,32 @@ pub struct FactsCatalog {
 /// and parsing every inventory in the tenant buys nothing.
 const MAX_CATALOG_HOSTS: i64 = 2_000;
 
-/// Built catalogs per tenant, each tagged with the tenant's facts generation at the time
-/// it was built. Every change to a tenant's documents bumps the generation — [`store`] for
-/// a new document, the host delete handlers for documents removed with their host — so the
-/// next request rebuilds.
+/// How stale a catalog may be served after documents changed that hosts already had. Such
+/// changes are routine — a fleet's inventories move all day — and each would otherwise have
+/// the next groups-page load stream and parse every document again; a minute's lag in a
+/// value picker costs nothing. A host gaining or losing its document rebuilds at once.
+const CATALOG_REFRESH_SECS: i64 = 60;
+
+/// What a change to a tenant's documents did to its catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogChange {
+    /// A host gained or lost a document: the host counts are wrong now.
+    Hosts,
+    /// A document a host already had was replaced: some paths or values may have moved.
+    Values,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct CatalogGeneration {
+    /// Every change.
+    any: u64,
+    /// [`CatalogChange::Hosts`] changes only.
+    hosts: u64,
+}
+
+/// Built catalogs per tenant, each tagged with the tenant's generation when it was built.
+/// Every change to a tenant's documents bumps it — [`store`] for a new document, the host
+/// delete handlers for documents removed with their host.
 #[derive(Default)]
 pub struct CatalogCache {
     inner: std::sync::Mutex<CatalogCacheInner>,
@@ -679,8 +743,9 @@ pub struct CatalogCache {
 
 #[derive(Default)]
 struct CatalogCacheInner {
-    generations: HashMap<i64, u64>,
-    built: HashMap<i64, (u64, std::sync::Arc<FactsCatalog>)>,
+    generations: HashMap<i64, CatalogGeneration>,
+    /// Generation built against, when (unix seconds), and the catalog.
+    built: HashMap<i64, (CatalogGeneration, i64, std::sync::Arc<FactsCatalog>)>,
 }
 
 impl CatalogCache {
@@ -693,29 +758,58 @@ impl CatalogCache {
             .clone()
     }
 
-    /// A tenant's facts changed.
-    pub fn bump(&self, tenant_id: i64) {
+    /// A tenant's documents changed.
+    pub fn bump(&self, tenant_id: i64, change: CatalogChange) {
         let mut inner = self.inner.lock().expect("catalog cache lock");
-        *inner.generations.entry(tenant_id).or_default() += 1;
-        inner.built.remove(&tenant_id);
-    }
-
-    /// The cached catalog if it is still current, else the generation to build against.
-    fn lookup(&self, tenant_id: i64) -> Result<std::sync::Arc<FactsCatalog>, u64> {
-        let inner = self.inner.lock().expect("catalog cache lock");
-        let generation = inner.generations.get(&tenant_id).copied().unwrap_or(0);
-        match inner.built.get(&tenant_id) {
-            Some((g, c)) if *g == generation => Ok(c.clone()),
-            _ => Err(generation),
+        let g = inner.generations.entry(tenant_id).or_default();
+        g.any += 1;
+        if change == CatalogChange::Hosts {
+            g.hosts += 1;
         }
     }
 
-    /// Keep a catalog built against `generation`. One built while a document landed is
-    /// already out of date and is not kept.
-    fn keep(&self, tenant_id: i64, generation: u64, catalog: std::sync::Arc<FactsCatalog>) {
+    /// The cached catalog if it may still be served, else the generation to build against:
+    /// current, or behind only by value changes and younger than [`CATALOG_REFRESH_SECS`].
+    fn lookup(
+        &self,
+        tenant_id: i64,
+        now: i64,
+    ) -> Result<std::sync::Arc<FactsCatalog>, CatalogGeneration> {
+        let inner = self.inner.lock().expect("catalog cache lock");
+        let current = inner
+            .generations
+            .get(&tenant_id)
+            .copied()
+            .unwrap_or_default();
+        match inner.built.get(&tenant_id) {
+            Some((g, at, c))
+                if g.hosts == current.hosts
+                    && (g.any == current.any || now - at < CATALOG_REFRESH_SECS) =>
+            {
+                Ok(c.clone())
+            }
+            _ => Err(current),
+        }
+    }
+
+    /// Keep a catalog built against `generation`, unless a host gained or lost a document
+    /// while it was built. One overtaken by value changes is kept: it is as fresh as any
+    /// catalog [`Self::lookup`] may serve.
+    fn keep(
+        &self,
+        tenant_id: i64,
+        generation: CatalogGeneration,
+        now: i64,
+        catalog: std::sync::Arc<FactsCatalog>,
+    ) {
         let mut inner = self.inner.lock().expect("catalog cache lock");
-        if inner.generations.get(&tenant_id).copied().unwrap_or(0) == generation {
-            inner.built.insert(tenant_id, (generation, catalog));
+        let current = inner
+            .generations
+            .get(&tenant_id)
+            .copied()
+            .unwrap_or_default();
+        if current.hosts == generation.hosts {
+            inner.built.insert(tenant_id, (generation, now, catalog));
         }
     }
 }
@@ -892,14 +986,15 @@ fn walk(v: &Value, path: &str, depth: usize, local: &mut LocalPaths) {
 ///
 /// Reads every document in the tenant, so it is for opening an editor, not for a poll path.
 pub async fn catalog(State(state): State<AppState>, who: AuthedUser) -> Response {
-    if let Ok(cached) = state.facts_catalog_cache.lookup(who.tenant_id) {
+    let now = now_unix();
+    if let Ok(cached) = state.facts_catalog_cache.lookup(who.tenant_id, now) {
         return Json(&*cached).into_response();
     }
     // Stale: build it, but only one request per tenant at a time. The rest wait here and
     // then, as a rule, find what the first one built.
     let lock = state.facts_catalog_cache.build_lock(who.tenant_id);
     let _building = lock.lock().await;
-    let generation = match state.facts_catalog_cache.lookup(who.tenant_id) {
+    let generation = match state.facts_catalog_cache.lookup(who.tenant_id, now) {
         Ok(cached) => return Json(&*cached).into_response(),
         Err(generation) => generation,
     };
@@ -934,7 +1029,7 @@ pub async fn catalog(State(state): State<AppState>, who: AuthedUser) -> Response
             let c = std::sync::Arc::new(c);
             state
                 .facts_catalog_cache
-                .keep(who.tenant_id, generation, c.clone());
+                .keep(who.tenant_id, generation, now, c.clone());
             Json(&*c).into_response()
         }
         Err(e) => {
@@ -1098,6 +1193,38 @@ mod tests {
         let over = over.finish(AGENT_SOURCE.into());
         assert!(over.truncated);
         assert_eq!(over.hosts, 2, "the row past the cap is not read");
+    }
+
+    #[test]
+    fn value_changes_refresh_the_catalog_at_most_once_a_minute() {
+        let c = CatalogCache::default();
+        let built = |c: &CatalogCache, now| {
+            let Err(generation) = c.lookup(1, now) else {
+                panic!("expected a rebuild")
+            };
+            c.keep(
+                1,
+                generation,
+                now,
+                std::sync::Arc::new(FactsCatalog { sources: vec![] }),
+            );
+        };
+        built(&c, 1_000);
+        assert!(c.lookup(1, 1_000).is_ok());
+
+        // A document a host already had changed: served as is for a while...
+        c.bump(1, CatalogChange::Values);
+        assert!(c.lookup(1, 1_000 + CATALOG_REFRESH_SECS - 1).is_ok());
+        // ...then rebuilt.
+        assert!(c.lookup(1, 1_000 + CATALOG_REFRESH_SECS).is_err());
+
+        // A host gained or lost one: rebuilt at once.
+        built(&c, 2_000);
+        c.bump(1, CatalogChange::Hosts);
+        assert!(c.lookup(1, 2_000).is_err());
+
+        // Tenants are separate.
+        assert!(c.lookup(2, 2_000).is_err());
     }
 
     #[test]

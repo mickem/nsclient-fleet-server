@@ -794,11 +794,6 @@ impl<'a> HostTagsRepo<'a> {
         Ok(res.rows_affected() > 0)
     }
 
-    /// Every tag on a host, keyed by tag key, with each value carrying its source.
-    ///
-    /// The source is part of the result and not an afterthought: selector evaluation needs
-    /// it to tell an operator's assertion from a claim the host made about itself. This
-    /// used to return bare strings, which is what let a host tag its way into any group.
     /// Every host's tags in a tenant, keyed by host id, in one query. For evaluating a
     /// selector across the fleet without a round trip per host.
     pub async fn maps_for_tenant(
@@ -824,6 +819,11 @@ impl<'a> HostTagsRepo<'a> {
         Ok(out)
     }
 
+    /// Every tag on a host, keyed by tag key, with each value carrying its source.
+    ///
+    /// The source is part of the result and not an afterthought: selector evaluation needs
+    /// it to tell an operator's assertion from a claim the host made about itself. This
+    /// used to return bare strings, which is what let a host tag its way into any group.
     pub async fn map_for_host(&self, tenant_id: i64, host_id: &str) -> Result<HostTags> {
         let rows = sqlx::query(
             "SELECT key, value, source FROM host_tags WHERE tenant_id = ? AND host_id = ?",
@@ -1567,24 +1567,6 @@ impl<'a> HostFactsRepo<'a> {
         Ok(res.rows_affected() > 0)
     }
 
-    /// Just the hash of a source's document: whether a write would change anything, without
-    /// reading the document itself.
-    pub async fn held_hash(
-        &self,
-        tenant_id: i64,
-        host_id: &str,
-        source: &str,
-    ) -> Result<Option<String>> {
-        Ok(sqlx::query_scalar(
-            "SELECT facts_hash FROM host_facts WHERE tenant_id = ? AND host_id = ? AND source = ?",
-        )
-        .bind(tenant_id)
-        .bind(host_id)
-        .bind(source)
-        .fetch_optional(&self.db.read)
-        .await?)
-    }
-
     pub async fn get(
         &self,
         tenant_id: i64,
@@ -1741,6 +1723,22 @@ impl<'a> HostFactsRepo<'a> {
 
         tx.commit().await?;
         Ok(ReplaceOutcome::Stored)
+    }
+
+    /// The agent stopped reporting a hash — a build without facts, or facts switched off in
+    /// it — so it no longer vouches for the document we hold. Forget what it last said.
+    /// Conditional, so the common case (nothing to forget) dirties nothing.
+    pub async fn clear_reported_hash(&self, tenant_id: i64, host_id: &str) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE hosts SET facts_reported_hash = NULL, facts_reported_at = ?
+              WHERE tenant_id = ? AND id = ? AND facts_reported_hash IS NOT NULL",
+        )
+        .bind(now_unix())
+        .bind(tenant_id)
+        .bind(host_id)
+        .execute(&self.db.write)
+        .await?;
+        Ok(res.rows_affected() > 0)
     }
 
     /// The agent sent again the document we already hold: keep the document, record when it

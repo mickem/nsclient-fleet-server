@@ -39,6 +39,60 @@ async fn facts_view(s: &TestServer, host_id: &str) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn an_agent_that_stops_sending_a_hash_is_no_longer_up_to_date() {
+    let (s, agent, host_id) = setup().await;
+    agent
+        .upload_facts(facts_upload_body(OS_DOC, "t"))
+        .await
+        .unwrap();
+    assert_eq!(facts_view(&s, &host_id).await["status"], "current");
+    // Downgraded, or facts switched off in the agent: it polls without a hash.
+    agent.fetch_desired_state(None).await.unwrap();
+    let v = facts_view(&s, &host_id).await;
+    assert_eq!(v["status"], "not_reported");
+    assert!(v["reported_hash"].is_null());
+    // What we hold is still shown.
+    assert_eq!(v["facts"]["os"]["family"], "linux");
+}
+
+#[tokio::test]
+async fn a_stored_document_that_does_not_parse_is_said_to_be_unreadable() {
+    let (s, agent, host_id) = setup().await;
+    agent
+        .upload_facts(facts_upload_body(OS_DOC, "t"))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE host_facts SET facts_json = '{not json' WHERE host_id = ?")
+        .bind(&host_id)
+        .execute(&s.db.write)
+        .await
+        .unwrap();
+    let v = facts_view(&s, &host_id).await;
+    assert!(v["facts"].is_null());
+    assert_eq!(v["unreadable"], true);
+    assert!(v["facts_hash"].is_string(), "the row is still there");
+}
+
+#[tokio::test]
+async fn the_view_passes_the_stored_document_through_verbatim() {
+    let (s, agent, host_id) = setup().await;
+    agent
+        .upload_facts(facts_upload_body(OS_DOC, "t"))
+        .await
+        .unwrap();
+    let body = s
+        .cookie_jar
+        .get(format!("{}/api/hosts/{host_id}/facts", s.base_url))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains(&format!("\"facts\":{OS_DOC}")), "{body}");
+}
+
+#[tokio::test]
 async fn a_host_with_nothing_enabled_is_answered_and_never_asked_for_more() {
     let (s, agent, host_id) = setup().await;
 

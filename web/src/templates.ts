@@ -1740,7 +1740,6 @@ disk_c = check_drivesize drive=C: "warn=free < 20%" "crit=free < 10%"
 `,
   },
 
-  // --------------------------------------------------------------- Extensibility
   // ----------------------------------------------------------------- Inventory
   {
     id: "host-inventory",
@@ -1788,6 +1787,7 @@ network.interfaces = true
 storage.volumes = true
 `,
   },
+  // --------------------------------------------------------------- Extensibility
   {
     id: "external-scripts",
     title: "External scripts",

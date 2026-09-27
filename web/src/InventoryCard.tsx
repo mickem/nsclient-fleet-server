@@ -376,7 +376,12 @@ export function InventoryCard({
                     "once it has stayed off for ten minutes"}
               </Typography>
             )}
-            {sets.length === 0 ? (
+            {facts.unreadable ? (
+              <Alert severity="warning">
+                An inventory is stored for this host but could not be read back. It is replaced the
+                next time the host&apos;s inventory changes.
+              </Alert>
+            ) : sets.length === 0 ? (
               <Typography variant="body2" color="text.secondary">
                 {
                   // By status, not by whether a document is stored: an empty one stored after
