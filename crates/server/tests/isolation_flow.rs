@@ -5,8 +5,6 @@ mod common;
 
 use common::{complete_exchange, start, TestServer};
 
-use sha2::{Digest, Sha256};
-
 fn fresh_client() -> reqwest::Client {
     reqwest::Client::builder()
         .cookie_store(true)
@@ -33,9 +31,7 @@ async fn signup_and_login(s: &TestServer, c: &reqwest::Client, slug: &str, email
     let t = tenants.get_by_slug(slug).await.unwrap().unwrap();
     let u = users.find_by_email(email).await.unwrap().unwrap();
     let token = format!("magic-{slug}-XXXXXXXX");
-    let mut h = Sha256::new();
-    h.update(token.as_bytes());
-    let hash: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let hash = fleet_core::digest::sha256_hex(token.as_bytes());
     links
         .create(&hash, t.id, u.id, fleet_core::time::now_unix() + 600)
         .await

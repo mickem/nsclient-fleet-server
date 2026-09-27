@@ -5,39 +5,9 @@
 
 mod common;
 
-use common::{complete_exchange, start, TestServer};
+use common::{signup_login, start, TestServer};
 
 use fleet_core::encbundle::BundleKey;
-use sha2::{Digest, Sha256};
-
-async fn signup_login(s: &TestServer, slug: &str, email: &str) {
-    s.cookie_jar
-        .post(format!("{}/api/auth/signup", s.base_url))
-        .json(&serde_json::json!({
-            "email": email,
-            "tenant_slug": slug,
-            "tenant_name": slug.to_uppercase(),
-            "turnstile_token": "",
-        }))
-        .send()
-        .await
-        .unwrap();
-
-    let tenants = fleet_storage::TenantRepo::new(&s.db);
-    let users = fleet_storage::UserRepo::new(&s.db);
-    let links = fleet_storage::MagicLinkRepo::new(&s.db);
-    let t = tenants.get_by_slug(slug).await.unwrap().unwrap();
-    let u = users.find_by_email(email).await.unwrap().unwrap();
-    let token = format!("magic-{slug}-XXXXXXXX");
-    let mut h = Sha256::new();
-    h.update(token.as_bytes());
-    let hash: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
-    links
-        .create(&hash, t.id, u.id, fleet_core::time::now_unix() + 600)
-        .await
-        .unwrap();
-    let _ = complete_exchange(&s.cookie_jar, &s.base_url, &token).await;
-}
 
 async fn enroll_a_host(s: &TestServer) -> (fleet_agent_sim::EnrolledAgent, String) {
     let r = s
@@ -127,10 +97,7 @@ async fn encrypted_bundle_end_to_end() {
     assert_eq!(bundle["format"], "enc-v1");
     assert_eq!(bundle["key_fingerprint"], key.fingerprint_hex().as_str());
     // The sha256 the server signs is over the ciphertext.
-    let ct_sha: String = Sha256::digest(&blob)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let ct_sha = fleet_core::digest::sha256_hex(&blob);
     assert_eq!(expected_sha, ct_sha);
 
     // 4. The server cannot read it: config extraction and compose-from refuse.

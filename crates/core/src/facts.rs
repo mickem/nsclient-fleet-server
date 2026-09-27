@@ -86,10 +86,23 @@ pub enum UploadError {
     Malformed(String),
     #[error("facts_hash must be 64 hex characters")]
     BadHash,
+    /// Carries the declared hash, which is well-formed by now.
     #[error("facts must be a JSON object")]
-    NotAnObject,
+    NotAnObject(String),
+    /// Carries the declared hash.
     #[error("facts_hash does not match the facts document")]
-    HashMismatch,
+    HashMismatch(String),
+}
+
+impl UploadError {
+    /// The hash the body declared for its document, when it got far enough to say one:
+    /// what a refusal of it is recorded against.
+    pub fn declared_hash(&self) -> Option<&str> {
+        match self {
+            Self::NotAnObject(h) | Self::HashMismatch(h) => Some(h),
+            Self::Malformed(_) | Self::BadHash => None,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -113,10 +126,10 @@ pub fn parse_upload(body: &[u8]) -> Result<FactsUpload<'_>, UploadError> {
     let facts_hash = normalize_hash(&raw.facts_hash).ok_or(UploadError::BadHash)?;
     let facts = raw.facts.get();
     if !facts.starts_with('{') {
-        return Err(UploadError::NotAnObject);
+        return Err(UploadError::NotAnObject(facts_hash));
     }
     if sha256_hex(facts.as_bytes()) != facts_hash {
-        return Err(UploadError::HashMismatch);
+        return Err(UploadError::HashMismatch(facts_hash));
     }
     let collected_at = raw
         .collected_at
@@ -405,13 +418,19 @@ mod tests {
     #[test]
     fn upload_with_the_wrong_hash_is_refused() {
         let body = upload(r#"{"os":{}}"#, EMPTY_FACTS_HASH);
-        assert_eq!(parse_upload(&body).unwrap_err(), UploadError::HashMismatch);
+        let e = parse_upload(&body).unwrap_err();
+        assert_eq!(e, UploadError::HashMismatch(EMPTY_FACTS_HASH.into()));
+        // What a refusal of it is recorded against.
+        assert_eq!(e.declared_hash(), Some(EMPTY_FACTS_HASH));
     }
 
     #[test]
     fn upload_shapes_are_checked() {
         let body = upload("[]", &sha256_hex(b"[]"));
-        assert_eq!(parse_upload(&body).unwrap_err(), UploadError::NotAnObject);
+        assert_eq!(
+            parse_upload(&body).unwrap_err(),
+            UploadError::NotAnObject(sha256_hex(b"[]"))
+        );
         let body = upload("{}", "short");
         assert_eq!(parse_upload(&body).unwrap_err(), UploadError::BadHash);
         assert!(matches!(

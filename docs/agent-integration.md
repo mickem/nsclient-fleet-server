@@ -276,11 +276,13 @@ the document in rather than re-encode it after hashing.
 | `200` + `X-Facts-Hash: <hash>` | stored (or already held) | nothing more until the document changes |
 | `400` | not an object, malformed, or the hash does not match the bytes | a bug: log it |
 | `413` | body over the server's cap (4 MiB) | do not retry this document; tell the operator which sets are largest |
-| `503` | the document kept being replaced by concurrent writes | retry on the next poll |
+| `503` | the document kept being replaced by concurrent writes, or the body could not be read | retry on the next poll |
 
-The server records a `400` or `413` against the hash the agent last reported, and the host
-page says the inventory was refused, rather than on its way, until the agent reports a
-different hash — the new document, which it does upload.
+The server reads an oversized body to the end (up to four times the cap) before answering
+`413`, so the agent sees the refusal rather than a reset connection. It records a `400` or
+`413` against the refused document's hash — the one the body declared, or else the one the
+agent last reported. The host page then says the inventory was refused, rather than on its
+way, until the agent reports a different hash: the new document, which it does upload.
 
 `none` and the empty document's hash mean the same thing to the agent, so a host with nothing
 enabled never uploads. When a host that had an inventory has every set switched off, the

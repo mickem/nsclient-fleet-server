@@ -1570,15 +1570,23 @@ impl<'a> HostFactsRepo<'a> {
         }))
     }
 
-    /// Record that an upload from this host was refused with `status`, against the hash the
-    /// agent last reported — the document it was sending. Refusals are rare (the agent does
-    /// not retry one), so this writes unconditionally.
-    pub async fn record_refusal(&self, tenant_id: i64, host_id: &str, status: u16) -> Result<()> {
+    /// Record that an upload from this host was refused with `status`, against `hash` — the
+    /// refused document's own, when the body said it — or else the hash the agent last
+    /// reported, which is the document it was sending. Refusals are rare (the agent does not
+    /// retry one), so this writes unconditionally.
+    pub async fn record_refusal(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        status: u16,
+        hash: Option<&str>,
+    ) -> Result<()> {
         sqlx::query(
-            "UPDATE hosts SET facts_refused_hash = facts_reported_hash, facts_refused_at = ?,
-                              facts_refused_status = ?
+            "UPDATE hosts SET facts_refused_hash = COALESCE(?, facts_reported_hash),
+                              facts_refused_at = ?, facts_refused_status = ?
               WHERE tenant_id = ? AND id = ?",
         )
+        .bind(hash)
         .bind(now_unix())
         .bind(i64::from(status))
         .bind(tenant_id)

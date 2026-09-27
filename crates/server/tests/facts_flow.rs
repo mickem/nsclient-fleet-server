@@ -263,19 +263,42 @@ async fn an_upload_whose_hash_does_not_match_is_refused() {
         .poll_with_facts(None, &sha256_hex(OS_DOC.as_bytes()))
         .await
         .unwrap();
+    // Bytes that are not the ones the agent hashed: refused, and recorded against the hash
+    // the body declared.
     let body = format!(
-        "{{\"collected_at\":\"t\",\"facts\":{OS_DOC},\"facts_hash\":\"{}\"}}",
-        sha256_hex(b"something else")
+        "{{\"collected_at\":\"t\",\"facts\":{OS_DOC_2},\"facts_hash\":\"{}\"}}",
+        sha256_hex(OS_DOC.as_bytes())
     );
     let (status, _) = agent.upload_facts(body).await.unwrap();
-    assert_eq!(status, 400);
-    let (status, _) = agent.upload_facts("[]".into()).await.unwrap();
     assert_eq!(status, 400);
     let v = facts_view(&s, &host_id).await;
     assert!(v["facts"].is_null());
     // Not "on its way": the agent does not send a refused document again.
     assert_eq!(v["status"], "refused");
     assert_eq!(v["refusal"]["status"], 400);
+
+    // A body that declares no hash at all: recorded against the one the agent reported.
+    let (status, _) = agent.upload_facts("[]".into()).await.unwrap();
+    assert_eq!(status, 400);
+    assert_eq!(facts_view(&s, &host_id).await["status"], "refused");
+}
+
+#[tokio::test]
+async fn a_refusal_is_keyed_on_the_refused_document() {
+    let (s, agent, host_id) = setup().await;
+    agent
+        .poll_with_facts(None, &sha256_hex(OS_DOC.as_bytes()))
+        .await
+        .unwrap();
+    // A refused body naming another document than the one the agent reports: that
+    // document was refused, not the one still to come.
+    let body = format!(
+        "{{\"collected_at\":\"t\",\"facts\":{OS_DOC},\"facts_hash\":\"{}\"}}",
+        sha256_hex(b"something else")
+    );
+    let (status, _) = agent.upload_facts(body).await.unwrap();
+    assert_eq!(status, 400);
+    assert_eq!(facts_view(&s, &host_id).await["status"], "pending");
 }
 
 #[tokio::test]

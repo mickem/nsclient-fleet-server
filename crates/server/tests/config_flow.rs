@@ -3,40 +3,9 @@
 
 mod common;
 
-use common::{complete_exchange, start, TestServer};
+use common::{signup_login, start, TestServer};
 
 use std::collections::BTreeMap;
-
-use sha2::{Digest, Sha256};
-
-async fn signup_login(s: &TestServer, slug: &str, email: &str) {
-    s.cookie_jar
-        .post(format!("{}/api/auth/signup", s.base_url))
-        .json(&serde_json::json!({
-            "email": email,
-            "tenant_slug": slug,
-            "tenant_name": slug.to_uppercase(),
-            "turnstile_token": "",
-        }))
-        .send()
-        .await
-        .unwrap();
-
-    let tenants = fleet_storage::TenantRepo::new(&s.db);
-    let users = fleet_storage::UserRepo::new(&s.db);
-    let links = fleet_storage::MagicLinkRepo::new(&s.db);
-    let t = tenants.get_by_slug(slug).await.unwrap().unwrap();
-    let u = users.find_by_email(email).await.unwrap().unwrap();
-    let token = format!("magic-{slug}-XXXXXXXX");
-    let mut h = Sha256::new();
-    h.update(token.as_bytes());
-    let hash: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
-    links
-        .create(&hash, t.id, u.id, fleet_core::time::now_unix() + 600)
-        .await
-        .unwrap();
-    let _ = complete_exchange(&s.cookie_jar, &s.base_url, &token).await;
-}
 
 async fn enroll_a_host(s: &TestServer) -> (fleet_agent_sim::EnrolledAgent, String) {
     let r = s

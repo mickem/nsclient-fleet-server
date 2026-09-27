@@ -19,7 +19,7 @@
 use axum::{
     body::{Body, Bytes},
     extract::{Path, State},
-    http::{HeaderName, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -89,13 +89,18 @@ pub async fn advertise(
     let Some(reported) = reported.and_then(facts::normalize_hash) else {
         // It no longer vouches for what we hold (a downgraded agent, facts switched off in
         // it), so forget what it last said: the page then reads "not reported" instead of
-        // "up to date" forever. One conditional write, a no-op once it is cleared — still
-        // no read on this path.
-        if let Err(e) = HostFactsRepo::new(&state.db)
-            .clear_reported_hash(tenant_id, host_id)
-            .await
-        {
-            tracing::error!(error = %e, "clear_reported_hash failed");
+        // "up to date" forever. Checked on the read pool first, so a fleet of agents that
+        // never sent a hash costs one read per poll and never queues on the single write
+        // connection; the write happens once, when an agent stops sending one.
+        let repo = HostFactsRepo::new(&state.db);
+        match repo.hashes(tenant_id, host_id).await {
+            Ok(Some(h)) if h.reported.is_some() => {
+                if let Err(e) = repo.clear_reported_hash(tenant_id, host_id).await {
+                    tracing::error!(error = %e, "clear_reported_hash failed");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::error!(error = %e, "facts hash lookup failed"),
         }
         return Some(HeaderValue::from_static(FACTS_HASH_NONE));
     };
@@ -202,35 +207,70 @@ struct Upload {
 }
 
 enum BodyError {
-    TooLarge,
+    /// Over the limit. `drained`: the rest was read and discarded, so the refusal reaches
+    /// the client; otherwise the connection has to be closed after it.
+    TooLarge {
+        drained: bool,
+    },
     Unreadable,
 }
 
-/// The whole body, or `TooLarge` as soon as it passes `limit` — without reading the rest.
-async fn read_capped(body: Body, limit: usize) -> Result<Bytes, BodyError> {
+/// How much of an oversized body is read and discarded so that the client, still writing
+/// it, sees the 413 rather than a connection reset — which it would take for a network
+/// error, and resend the document on every poll. Past this, the connection is closed.
+const MAX_DRAINED_BYTES: usize = 4 * MAX_FACTS_BODY_BYTES;
+
+/// The whole body, if it is no larger than `limit`. A larger one is drained (up to
+/// [`MAX_DRAINED_BYTES`]) without being kept; a `Content-Length` that already says it is
+/// too large skips the buffering, and one past the drain limit skips the reading.
+async fn read_capped(headers: &HeaderMap, body: Body, limit: usize) -> Result<Bytes, BodyError> {
+    let declared = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    if declared.is_some_and(|n| n > MAX_DRAINED_BYTES) {
+        return Err(BodyError::TooLarge { drained: false });
+    }
     let mut stream = body.into_data_stream();
     let mut buf = Vec::new();
+    let mut seen = declared.filter(|&n| n > limit).map_or(0, |_| limit + 1);
+    let mut keep = seen == 0;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| BodyError::Unreadable)?;
-        if buf.len() + chunk.len() > limit {
-            return Err(BodyError::TooLarge);
+        seen += chunk.len();
+        if seen > MAX_DRAINED_BYTES {
+            return Err(BodyError::TooLarge { drained: false });
         }
-        buf.extend_from_slice(&chunk);
+        if keep && seen > limit {
+            keep = false;
+            buf = Vec::new();
+        }
+        if keep {
+            buf.extend_from_slice(&chunk);
+        }
     }
-    Ok(Bytes::from(buf))
+    if keep {
+        Ok(Bytes::from(buf))
+    } else {
+        Err(BodyError::TooLarge { drained: true })
+    }
 }
 
 /// Refuse an upload, and record that it was: the agent does not retry a refused document,
 /// so without the record the host would read as "inventory on its way" until its inventory
 /// next changes.
+///
+/// `hash`: the refused document's own, when the body said it; otherwise the refusal is
+/// recorded against the hash the agent last reported, which is the document it was sending.
 async fn refuse(
     repo: &HostFactsRepo<'_>,
     ctx: &PeerHostContext,
     status: StatusCode,
+    hash: Option<&str>,
     message: &str,
 ) -> Response {
     if let Err(e) = repo
-        .record_refusal(ctx.tenant_id, &ctx.host_id, status.as_u16())
+        .record_refusal(ctx.tenant_id, &ctx.host_id, status.as_u16(), hash)
         .await
     {
         tracing::error!(error = %e, "recording a facts refusal failed");
@@ -255,24 +295,34 @@ pub fn with_header(mut response: Response, value: Option<HeaderValue>) -> Respon
 pub async fn upload(
     State(state): State<AppState>,
     axum::Extension(ctx): axum::Extension<PeerHostContext>,
+    headers: HeaderMap,
     body: Body,
 ) -> Response {
     let repo = HostFactsRepo::new(&state.db);
-    let body = match read_capped(body, MAX_FACTS_BODY_BYTES).await {
+    let body = match read_capped(&headers, body, MAX_FACTS_BODY_BYTES).await {
         Ok(b) => b,
-        Err(BodyError::TooLarge) => {
+        Err(BodyError::TooLarge { drained }) => {
             tracing::info!(host_id = %ctx.host_id, "refused an oversized facts upload");
-            return refuse(
+            let mut response = refuse(
                 &repo,
                 &ctx,
                 StatusCode::PAYLOAD_TOO_LARGE,
+                None,
                 "facts upload too large",
             )
             .await;
+            if !drained {
+                // Unread body left on the connection: it cannot carry another request.
+                response
+                    .headers_mut()
+                    .insert(header::CONNECTION, HeaderValue::from_static("close"));
+            }
+            return response;
         }
-        // The connection went away mid-body: nothing was refused, the agent retries.
+        // The connection failed mid-body: nothing was refused. 503 is the status the agent
+        // retries on its next poll; a 400 would tell it never to send this document again.
         Err(BodyError::Unreadable) => {
-            return (StatusCode::BAD_REQUEST, "body could not be read").into_response()
+            return (StatusCode::SERVICE_UNAVAILABLE, "body could not be read").into_response()
         }
     };
     // Hashing and parsing up to 4 MiB is CPU work: off the async workers.
@@ -288,14 +338,20 @@ pub async fn upload(
         Ok(Ok(u)) => u,
         Ok(Err(e)) => {
             tracing::info!(host_id = %ctx.host_id, error = %e, "rejected a facts upload");
-            return refuse(&repo, &ctx, StatusCode::BAD_REQUEST, &e.to_string()).await;
+            return refuse(
+                &repo,
+                &ctx,
+                StatusCode::BAD_REQUEST,
+                e.declared_hash(),
+                &e.to_string(),
+            )
+            .await;
         }
         Err(e) => {
             tracing::error!(error = %e, "facts upload parse task failed");
             return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
         }
     };
-    let repo = HostFactsRepo::new(&state.db);
     let hashes = match repo.hashes(ctx.tenant_id, &ctx.host_id).await {
         Ok(Some(h)) => h,
         Ok(None) => return (StatusCode::NOT_FOUND, "host not found").into_response(),
@@ -512,6 +568,10 @@ pub async fn fold_host_facts<S: Send + 'static>(
     acc: S,
     mut f: impl FnMut(&mut S, &str, &HostFacts) + Send + 'static,
 ) -> anyhow::Result<S> {
+    if sources.is_empty() {
+        // A tags-only selector: nothing to read, no thread to start.
+        return Ok(acc);
+    }
     let sources: Vec<String> = sources.iter().cloned().collect();
     let (tx, done) = blocking_consumer(
         move |rows: &mut dyn Iterator<Item = (String, String, String)>| {

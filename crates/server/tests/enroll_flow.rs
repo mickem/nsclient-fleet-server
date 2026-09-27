@@ -3,8 +3,6 @@ mod common;
 use common::{complete_exchange, start, TestServer};
 
 async fn signup_and_login(s: &TestServer) {
-    use sha2::{Digest, Sha256};
-
     // Signup creates the tenant + tenant secrets
     s.cookie_jar
         .post(format!("{}/api/auth/signup", s.base_url))
@@ -29,9 +27,7 @@ async fn signup_and_login(s: &TestServer) {
         .unwrap()
         .unwrap();
     let token = "test-magic-link-XXXXXXXX";
-    let mut h = Sha256::new();
-    h.update(token.as_bytes());
-    let hash: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let hash = fleet_core::digest::sha256_hex(token.as_bytes());
     links
         .create(&hash, t.id, u.id, fleet_core::time::now_unix() + 600)
         .await

@@ -7,8 +7,6 @@ use common::{complete_exchange, start_with, TestServer};
 
 use std::collections::BTreeMap;
 
-use sha2::{Digest, Sha256};
-
 const FLEET_SIZE: usize = 50;
 
 async fn signup_login(s: &TestServer) {
@@ -34,9 +32,7 @@ async fn signup_login(s: &TestServer) {
         .unwrap()
         .unwrap();
     let token = "magic-fleet-XXXXXXXX";
-    let mut h = Sha256::new();
-    h.update(token.as_bytes());
-    let hash: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let hash = fleet_core::digest::sha256_hex(token.as_bytes());
     links
         .create(&hash, t.id, u.id, fleet_core::time::now_unix() + 600)
         .await

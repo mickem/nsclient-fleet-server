@@ -44,7 +44,9 @@ export function GroupsPage({ me }: { me: Me }) {
   // The tags the fleet reports right now, so the selector editor can offer them. Derived
   // from the host list, which already carries every host's tags for the hosts page.
   const [known, setKnown] = useState<KnownTags>(() => new Map());
-  // Likewise the paths the fleet's facts documents have, from the facts catalog.
+  // Likewise the paths the fleet's facts documents have, from the facts catalog. Fetched
+  // when an editor opens (below), not with the list: the catalog reads the fleet's
+  // documents, and the list should not wait on that.
   const [facts, setFacts] = useState<KnownFacts>(() => new Map());
   // Which editor is open lives in the URL — /groups/new, or /groups/:id for the card
   // being edited — so the "Groups" sidebar entry closes it and a refresh reopens it.
@@ -66,13 +68,25 @@ export function GroupsPage({ me }: { me: Me }) {
         (hosts) => setKnown(knownTagsFromHosts(hosts)),
         () => {},
       ),
-      apiGet<FactsCatalog>("/api/facts/catalog").then(
-        (c) => setFacts(knownFactsFromCatalog(c)),
-        () => {},
-      ),
     ]).finally(() => setRefreshing(false));
   };
   useEffect(refresh, []);
+
+  // Each time an editor opens, so its pickers reflect the fleet as it is then.
+  const editorOpen = creating || editingId !== undefined;
+  useEffect(() => {
+    if (!editorOpen) return;
+    let live = true;
+    apiGet<FactsCatalog>("/api/facts/catalog").then(
+      (c) => {
+        if (live) setFacts(knownFactsFromCatalog(c));
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [editorOpen]);
 
   return (
     <Box>
