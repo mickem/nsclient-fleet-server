@@ -76,7 +76,7 @@ pub fn sign_client_cert(
 
     Ok(IssuedCert {
         cert_pem,
-        serial_hex: hex(&serial_bytes),
+        serial_hex: fleet_core::digest::hex(&serial_bytes),
         fingerprint_sha256_hex: fleet_core::digest::sha256_hex(der.as_ref()),
         not_before_unix,
         not_after_unix,
@@ -101,18 +101,6 @@ fn random_serial() -> [u8; 16] {
     rand::Rng::fill(&mut rand::thread_rng(), &mut bytes);
     bytes[0] = (bytes[0] & 0x7f) | 0x01;
     bytes
-}
-
-/// Plain hex of the serial's bytes. The fingerprint goes through the shared digest helper;
-/// the serial is not a digest, so it keeps this one.
-fn hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push(HEX[(b >> 4) as usize] as char);
-        s.push(HEX[(b & 0xf) as usize] as char);
-    }
-    s
 }
 
 #[cfg(test)]

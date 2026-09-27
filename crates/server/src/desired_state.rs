@@ -64,6 +64,17 @@ struct Entry {
     last_used: AtomicI64,
 }
 
+/// What a compute saw of a host's entry before it read its inputs. Storing the result is
+/// refused if the host was invalidated in between: that compute may have read the document
+/// or tags the invalidation was about, and caching it would pin the stale membership under
+/// a `config_version` that no longer moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheTicket {
+    /// Moved whenever the idle sweep drops entries, since the generations go with them.
+    epoch: u64,
+    generation: u64,
+}
+
 /// Memoized desired state, keyed by `(tenant_id, host_id)` and validated against the
 /// tenant's `config_version`.
 ///
@@ -76,17 +87,6 @@ struct Entry {
 /// change a computed input. If you add a mutation that touches tags, groups, selectors,
 /// bundle assignments, bundle rows, or host overrides and do not bump it, agents will be
 /// served stale configuration until something else bumps the counter.
-/// What a compute saw of a host's entry before it read its inputs. Storing the result is
-/// refused if the host was invalidated in between: that compute may have read the document
-/// or tags the invalidation was about, and caching it would pin the stale membership under
-/// a `config_version` that no longer moves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CacheTicket {
-    /// Bumped when the whole map is reclaimed, which also forgets every generation.
-    epoch: u64,
-    generation: u64,
-}
-
 #[derive(Default)]
 pub struct DesiredStateCache {
     entries: RwLock<HashMap<(i64, String), Entry>>,

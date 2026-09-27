@@ -292,7 +292,8 @@ function ChangeEntry({ entry }: { entry: FactsChanges }) {
       {entry.initial ? (
         <Typography variant="body2">First inventory received.</Typography>
       ) : (
-        shown.map((c) => <ChangeLine key={`${c.kind}:${c.path}`} c={c} />)
+        // Index as well: record ids are clipped in paths, so two long ids can share one.
+        shown.map((c, i) => <ChangeLine key={`${i}:${c.kind}:${c.path}`} c={c} />)
       )}
       {hidden > 0 && (
         <Button size="small" onClick={() => setAll(true)}>

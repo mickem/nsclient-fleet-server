@@ -799,6 +799,31 @@ impl<'a> HostTagsRepo<'a> {
     /// The source is part of the result and not an afterthought: selector evaluation needs
     /// it to tell an operator's assertion from a claim the host made about itself. This
     /// used to return bare strings, which is what let a host tag its way into any group.
+    /// Every host's tags in a tenant, keyed by host id, in one query. For evaluating a
+    /// selector across the fleet without a round trip per host.
+    pub async fn maps_for_tenant(
+        &self,
+        tenant_id: i64,
+    ) -> Result<std::collections::HashMap<String, HostTags>> {
+        let rows =
+            sqlx::query("SELECT host_id, key, value, source FROM host_tags WHERE tenant_id = ?")
+                .bind(tenant_id)
+                .fetch_all(&self.db.read)
+                .await?;
+        let mut out: std::collections::HashMap<String, HostTags> = Default::default();
+        for r in rows {
+            out.entry(r.get("host_id"))
+                .or_default()
+                .entry(r.get("key"))
+                .or_default()
+                .push(TagValue {
+                    value: r.get("value"),
+                    source: TagSource::from_db(&r.get::<String, _>("source")),
+                });
+        }
+        Ok(out)
+    }
+
     pub async fn map_for_host(&self, tenant_id: i64, host_id: &str) -> Result<HostTags> {
         let rows = sqlx::query(
             "SELECT key, value, source FROM host_tags WHERE tenant_id = ? AND host_id = ?",
@@ -1774,6 +1799,37 @@ impl<'a> HostFactsRepo<'a> {
                 changes_json: r.get("changes_json"),
             })
             .collect())
+    }
+
+    /// Hand every document a tenant holds from any of `sources` to `f`, as
+    /// `(host_id, source, json)`, grouped by host (host id order). Streamed like
+    /// [`Self::for_each_document`]: one query for the whole fleet, one row in memory at a
+    /// time.
+    pub async fn for_each_host_document(
+        &self,
+        tenant_id: i64,
+        sources: &[String],
+        mut f: impl FnMut(&str, &str, &str),
+    ) -> Result<()> {
+        use futures_util::TryStreamExt;
+        if sources.is_empty() {
+            return Ok(());
+        }
+        let placeholders = vec!["?"; sources.len()].join(", ");
+        let sql = format!(
+            "SELECT host_id, source, facts_json FROM host_facts
+              WHERE tenant_id = ? AND source IN ({placeholders})
+              ORDER BY host_id, source"
+        );
+        let mut query = sqlx::query(&sql).bind(tenant_id);
+        for s in sources {
+            query = query.bind(s);
+        }
+        let mut rows = query.fetch(&self.db.read);
+        while let Some(row) = rows.try_next().await? {
+            f(row.get("host_id"), row.get("source"), row.get("facts_json"));
+        }
+        Ok(())
     }
 
     /// Hand each of a tenant's documents from one source to `f`, as `(host_id, json)`, at

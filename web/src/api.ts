@@ -206,9 +206,11 @@ export type FactTest =
 /** The facts source the host uploads itself. A leaf on it is host-controlled. */
 export const AGENT_FACTS = "agent";
 
-/** `GET /api/facts/catalog`: the paths the fleet's facts have, for the selector pickers. */
-/** `mixed`: different kinds on different hosts, so no one test suits every host. */
+/** What sits at a fact path. `mixed`: different kinds on different hosts, so no one test
+ *  suits every host. */
 export type FactPathKind = "scalar" | "list" | "map" | "mixed";
+/** One path of `GET /api/facts/catalog`: the paths the fleet's facts have, for the
+ *  selector pickers. */
 export type CatalogPath = {
   path: string;
   kind: FactPathKind;

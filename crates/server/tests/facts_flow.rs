@@ -618,6 +618,34 @@ async fn a_fact_selector_serves_a_bundle_once_the_document_says_so() {
 }
 
 #[tokio::test]
+async fn the_preview_reads_hosts_with_and_without_documents() {
+    let (s, agent, with_doc) = setup().await;
+    agent
+        .upload_facts(facts_upload_body(SQL_DOC, "t"))
+        .await
+        .unwrap();
+    let _second = enroll_a_host(&s).await;
+    let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM hosts WHERE id != ?")
+        .bind(&with_doc)
+        .fetch_all(&s.db.read)
+        .await
+        .unwrap();
+    let without_doc = &ids[0];
+
+    let has = serde_json::json!(
+        { "op": "fact", "path": "software.installed", "test": "has", "value": "sqlserver" }
+    );
+    let matched = preview(&s, has.clone()).await;
+    assert_eq!(matched.len(), 1);
+    assert_eq!(matched[0]["id"], with_doc.as_str());
+
+    // The host that never uploaded is still evaluated — here, matched by the fact's absence.
+    let matched = preview(&s, serde_json::json!({ "op": "not", "expr": has })).await;
+    assert_eq!(matched.len(), 1);
+    assert_eq!(matched[0]["id"], without_doc.as_str());
+}
+
+#[tokio::test]
 async fn a_group_with_a_bad_fact_path_is_refused() {
     let (s, _agent, _host_id) = setup().await;
     let r = s

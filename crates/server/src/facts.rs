@@ -79,6 +79,14 @@ pub async fn advertise(
     host_id: &str,
     reported: Option<&str>,
 ) -> Option<HeaderValue> {
+    // No (usable) hash: an agent without facts, or a build that cannot hash. It uploads
+    // nothing whatever the answer, and only the header's presence means anything to it, so
+    // the lookup — a read on every poll — is spared. A malformed value is ignored rather
+    // than refused: it is descriptive, and failing a poll over it would cost the host its
+    // configuration.
+    let Some(reported) = reported.and_then(facts::normalize_hash) else {
+        return Some(HeaderValue::from_static(FACTS_HASH_NONE));
+    };
     let repo = HostFactsRepo::new(&state.db);
     let hashes = match repo.hashes(tenant_id, host_id).await {
         Ok(Some(h)) => h,
@@ -89,50 +97,46 @@ pub async fn advertise(
         }
     };
     let mut advertised = hashes.held.clone();
-    // Written only when it moved, so a steady-state poll stays a read. A malformed value is
-    // ignored rather than refused: it is descriptive, and failing a poll over it would cost
-    // the host its configuration.
-    if let Some(reported) = reported.and_then(facts::normalize_hash) {
-        if hashes.reported.as_deref() != Some(reported.as_str()) {
-            if let Err(e) = repo.set_reported_hash(tenant_id, host_id, &reported).await {
-                tracing::error!(error = %e, "set_reported_hash failed");
+    // Written only when it moved, so a steady-state poll stays a read.
+    if hashes.reported.as_deref() != Some(reported.as_str()) {
+        if let Err(e) = repo.set_reported_hash(tenant_id, host_id, &reported).await {
+            tracing::error!(error = %e, "set_reported_hash failed");
+        }
+    }
+    match empty_over_inventory(&hashes, &reported, now_unix()) {
+        EmptyOverInventory::NotApplicable => {}
+        EmptyOverInventory::Due => {
+            // The operator switched every fact set off, and the agent has said so for
+            // the whole grace period. The hash alone says what the document is — `{}` —
+            // so clear what we hold rather than wait for an upload of it.
+            match store(
+                state,
+                tenant_id,
+                host_id,
+                AGENT_SOURCE,
+                EMPTY_FACTS_HASH,
+                "{}",
+                None,
+            )
+            .await
+            {
+                Ok(ReplaceOutcome::Stored | ReplaceOutcome::Unchanged) => {
+                    tracing::info!(%host_id, "host has no fact set enabled any more; cleared its inventory");
+                    advertised = Some(EMPTY_FACTS_HASH.to_owned());
+                }
+                // Not cleared: keep answering with what we do hold, and try again on
+                // the next poll.
+                Ok(outcome) => {
+                    tracing::warn!(%host_id, ?outcome, "clearing host facts did not take")
+                }
+                Err(e) => tracing::error!(error = %e, "clearing host facts failed"),
             }
         }
-        match empty_over_inventory(&hashes, &reported, now_unix()) {
-            EmptyOverInventory::NotApplicable => {}
-            EmptyOverInventory::Due => {
-                // The operator switched every fact set off, and the agent has said so for
-                // the whole grace period. The hash alone says what the document is — `{}` —
-                // so clear what we hold rather than wait for an upload of it.
-                match store(
-                    state,
-                    tenant_id,
-                    host_id,
-                    AGENT_SOURCE,
-                    EMPTY_FACTS_HASH,
-                    "{}",
-                    None,
-                )
-                .await
-                {
-                    Ok(ReplaceOutcome::Stored | ReplaceOutcome::Unchanged) => {
-                        tracing::info!(%host_id, "host has no fact set enabled any more; cleared its inventory");
-                        advertised = Some(EMPTY_FACTS_HASH.to_owned());
-                    }
-                    // Not cleared: keep answering with what we do hold, and try again on
-                    // the next poll.
-                    Ok(outcome) => {
-                        tracing::warn!(%host_id, ?outcome, "clearing host facts did not take")
-                    }
-                    Err(e) => tracing::error!(error = %e, "clearing host facts failed"),
-                }
-            }
-            EmptyOverInventory::Pending => {
-                // Answer as if the clear had happened, so the agent does not upload `{}` in
-                // the meantime; if it goes back to its old document before the grace period
-                // is up, the answer is the held hash again and nothing moved.
-                advertised = Some(EMPTY_FACTS_HASH.to_owned());
-            }
+        EmptyOverInventory::Pending => {
+            // Answer as if the clear had happened, so the agent does not upload `{}` in
+            // the meantime; if it goes back to its old document before the grace period
+            // is up, the answer is the held hash again and nothing moved.
+            advertised = Some(EMPTY_FACTS_HASH.to_owned());
         }
     }
     HeaderValue::from_str(advertised.as_deref().unwrap_or(FACTS_HASH_NONE)).ok()
@@ -365,6 +369,40 @@ pub async fn load_for_host(
     Ok(out)
 }
 
+/// Every host in a tenant that holds a document from any of `sources`, with those
+/// documents parsed, handed to `f` one host at a time. One streamed query for the fleet;
+/// only one host's documents are held at once. Hosts holding none are not visited.
+pub async fn for_each_host_facts(
+    state: &AppState,
+    tenant_id: i64,
+    sources: &BTreeSet<String>,
+    mut f: impl FnMut(&str, &HostFacts),
+) -> anyhow::Result<()> {
+    let sources: Vec<String> = sources.iter().cloned().collect();
+    // Rows arrive grouped by host: gather one host's documents, hand them over when the
+    // next host starts.
+    let mut current: Option<(String, HostFacts)> = None;
+    HostFactsRepo::new(&state.db)
+        .for_each_host_document(tenant_id, &sources, |host_id, source, json| {
+            if current.as_ref().map(|(h, _)| h.as_str()) != Some(host_id) {
+                if let Some((h, facts)) = current.take() {
+                    f(&h, &facts);
+                }
+                current = Some((host_id.to_owned(), HostFacts::new()));
+            }
+            if let (Some((_, facts)), Some(doc)) =
+                (current.as_mut(), parse_stored(host_id, source, json))
+            {
+                facts.insert(source.to_owned(), doc);
+            }
+        })
+        .await?;
+    if let Some((h, facts)) = current.take() {
+        f(&h, &facts);
+    }
+    Ok(())
+}
+
 fn parse_stored(host_id: &str, source: &str, json: &str) -> Option<Value> {
     match serde_json::from_str(json) {
         Ok(v) => Some(v),
@@ -521,7 +559,15 @@ pub async fn host_facts(
     let changes = changes
         .into_iter()
         .filter_map(|row| {
-            let entry: HistoryEntry = serde_json::from_str(&row.changes_json).ok()?;
+            // Left out rather than failing the page — but said, as a stored document that
+            // no longer parses is.
+            let entry: HistoryEntry = match serde_json::from_str(&row.changes_json) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(%host_id, history_id = row.id, error = %e, "stored facts history entry does not parse");
+                    return None;
+                }
+            };
             Some(FactsChangesView {
                 id: row.id,
                 source: row.source,

@@ -6,9 +6,10 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use fleet_core::selector::Selector;
+use fleet_core::selector::{HostFacts, HostTags, Selector};
 use fleet_storage::{GroupsRepo, HostOverridesRepo, HostRepo, HostTagsRepo, TenantRepo};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use crate::auth::AuthedUser;
 use crate::AppState;
@@ -324,34 +325,56 @@ pub async fn preview_selector(
             return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
         }
     };
-    let sources = selector.fact_sources();
-    let tags_repo = HostTagsRepo::new(&state.db);
-    let mut matches = Vec::new();
-    for h in hosts {
-        // One host's documents at a time, like its tags: a tenant's inventories together can
-        // run to gigabytes, and a tags-only selector reads none.
-        let facts = match crate::facts::load_for_host(&state, who.tenant_id, &h.id, &sources).await
-        {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::error!(error = %e, "facts load failed");
-                return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
-            }
-        };
-        let tags = match tags_repo.map_for_host(who.tenant_id, &h.id).await {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::error!(error = %e, "tags map failed");
-                return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
-            }
-        };
-        if selector.matches(&tags, &facts) {
-            matches.push(PreviewMatch {
-                id: h.id,
-                hostname: h.hostname,
-            });
+    // Two queries for the whole fleet rather than two per host: every host's tags at once
+    // (small), and the facts documents the selector reads streamed one host at a time
+    // (large, so never all held together).
+    let tags_by_host = match HostTagsRepo::new(&state.db)
+        .maps_for_tenant(who.tenant_id)
+        .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!(error = %e, "tags load failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
         }
+    };
+    let no_tags = HostTags::new();
+    let tags_of = |host_id: &str| tags_by_host.get(host_id).unwrap_or(&no_tags);
+    let mut with_facts = HashSet::new();
+    let mut matched = HashSet::new();
+    let streamed = crate::facts::for_each_host_facts(
+        &state,
+        who.tenant_id,
+        &selector.fact_sources(),
+        |host_id, facts| {
+            with_facts.insert(host_id.to_owned());
+            if selector.matches(tags_of(host_id), facts) {
+                matched.insert(host_id.to_owned());
+            }
+        },
+    )
+    .await;
+    if let Err(e) = streamed {
+        tracing::error!(error = %e, "facts load failed");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
     }
+    let no_facts = HostFacts::new();
+    let matches: Vec<PreviewMatch> = hosts
+        .into_iter()
+        .filter(|h| {
+            if with_facts.contains(&h.id) {
+                matched.contains(&h.id)
+            } else {
+                // Holds none of the documents read: a selector can still match it on tags,
+                // or on a fact's absence.
+                selector.matches(tags_of(&h.id), &no_facts)
+            }
+        })
+        .map(|h| PreviewMatch {
+            id: h.id,
+            hostname: h.hostname,
+        })
+        .collect();
     Json(matches).into_response()
 }
 
