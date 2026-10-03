@@ -10,7 +10,7 @@ import {
   TextField,
 } from "@mui/material";
 import { apiGetBytes, apiUpload, BundleView } from "./api";
-import { TOKEN_RE } from "./BundleEditor";
+import { TOKEN_RE } from "./bundlezip";
 import { decryptBundle, encryptBundle, recalledKey } from "./crypto";
 
 type Props = {

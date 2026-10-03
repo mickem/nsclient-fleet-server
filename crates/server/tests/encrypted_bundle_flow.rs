@@ -501,16 +501,15 @@ async fn rename_keeps_assignments_and_reseals_encrypted_versions() {
             .unwrap()
             .to_string()
     };
-    let (new_plain_id, new_enc_id) = (id_of("1"), id_of("2"));
-    // Every version gets a new id, plain ones included: the desired-state hash covers ids,
-    // not names, so that is what tells hosts already in sync that something changed.
-    assert_ne!(new_plain_id, plain_id);
-    assert_ne!(new_enc_id, enc_id);
+    let new_enc_id = id_of("2");
+    // A plain version is renamed in place — same id, same bytes; only an encrypted one,
+    // whose ciphertext had to change, moves to a new id.
+    assert_eq!(id_of("1"), plain_id);
     assert_eq!(
         renamed.iter().find(|b| b["version"] == "1").unwrap()["sha256"],
-        plain["sha256"],
-        "a plain version keeps its bytes"
+        plain["sha256"]
     );
+    assert_ne!(new_enc_id, enc_id);
 
     // Nothing is left under the old name, and the replaced ciphertext is gone from disk.
     let list: Vec<serde_json::Value> = s
@@ -524,12 +523,37 @@ async fn rename_keeps_assignments_and_reseals_encrypted_versions() {
         .unwrap();
     assert!(list.iter().all(|b| b["name"] != "app"));
     let dir = s._tempdir.path().join("bundles").join("1");
-    for old in [&plain_id, &enc_id] {
-        assert!(!dir.join(format!("{old}.zip")).exists());
+    assert!(!dir.join(format!("{enc_id}.zip")).exists());
+    for id in [&plain_id, &new_enc_id] {
+        assert!(dir.join(format!("{id}.zip")).exists());
     }
-    for new in [&new_plain_id, &new_enc_id] {
-        assert!(dir.join(format!("{new}.zip")).exists());
-    }
+
+    // The audit entry says which id each version had and has.
+    let meta: String = sqlx::query_scalar(
+        "SELECT metadata_json FROM audit_log WHERE action = 'bundle.renamed' ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(&s.db.read)
+    .await
+    .unwrap();
+    let meta: serde_json::Value = serde_json::from_str(&meta).unwrap();
+    let ids: Vec<(String, String)> = meta["versions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| {
+            (
+                v["old_id"].as_str().unwrap().to_string(),
+                v["new_id"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            (plain_id.clone(), plain_id.clone()),
+            (enc_id.clone(), new_enc_id.clone())
+        ]
+    );
 
     // The group still carries both versions, with their priorities.
     let carried: Vec<serde_json::Value> = s
@@ -551,7 +575,7 @@ async fn rename_keeps_assignments_and_reseals_encrypted_versions() {
         })
         .collect();
     ids.sort();
-    let mut want = vec![(new_plain_id.clone(), 100), (new_enc_id.clone(), 200)];
+    let mut want = vec![(plain_id.clone(), 100), (new_enc_id.clone(), 200)];
     want.sort();
     assert_eq!(ids, want);
 
@@ -645,4 +669,217 @@ async fn renaming_a_plain_bundle_reaches_hosts_already_in_sync() {
         .unwrap()
         .expect("a host in sync before the rename must be sent the renamed state, not a 304");
     assert_eq!(after.bundles[0]["name"], "baseline");
+}
+
+/// Upload a plain bundle, put it in a group the host is in, and return its id.
+async fn assigned_plain_bundle(s: &TestServer, host_id: &str, name: &str, bytes: &[u8]) -> String {
+    let r = upload_bundle(s, name, "1", None, bytes.to_vec()).await;
+    assert_eq!(r.status(), 200);
+    let id = r.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let g: serde_json::Value = s
+        .cookie_jar
+        .post(format!("{}/api/groups", s.base_url))
+        .json(&serde_json::json!({
+            "name": format!("g-{name}"),
+            "selector": { "clauses": [{"op": "eq", "key": "role", "value": "db"}] }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let a = s
+        .cookie_jar
+        .post(format!(
+            "{}/api/groups/{}/bundles",
+            s.base_url,
+            g["id"].as_str().unwrap()
+        ))
+        .json(&serde_json::json!({"bundle_id": id, "priority": 100}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(a.status(), 204);
+    let t = s
+        .cookie_jar
+        .put(format!("{}/api/hosts/{}/tags/role", s.base_url, host_id))
+        .json(&serde_json::json!({"value": "db"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(t.status(), 204);
+    id
+}
+
+/// A plain version is re-signed over the digest recorded at upload, never over whatever is
+/// on disk now: bytes changed since then must still fail the agent's check after a rename,
+/// not come out of it validly signed.
+#[tokio::test]
+async fn a_rename_never_vouches_for_bytes_changed_on_disk() {
+    let s = start().await;
+    signup_login(&s, "acme", "alice@example.com").await;
+    let (agent, host_id) = enroll_a_host(&s).await;
+    let id = assigned_plain_bundle(&s, &host_id, "base", b"PK\x03\x04-original").await;
+
+    let stored = s
+        ._tempdir
+        .path()
+        .join("bundles")
+        .join("1")
+        .join(format!("{id}.zip"));
+    std::fs::write(&stored, b"PK\x03\x04-tampered").unwrap();
+
+    let r = rename_bundle(&s, "base", "baseline", vec![]).await;
+    assert_eq!(r.status(), 200, "{:?}", r.text().await);
+
+    s.agent_limits.forget_last_poll(&host_id);
+    let ds = agent.fetch_desired_state(None).await.unwrap().unwrap();
+    let b = &ds.bundles[0];
+    assert_eq!(b["name"], "baseline");
+    let err = agent
+        .fetch_bundle_verified(ds.descriptor(b).unwrap(), b["signature"].as_str().unwrap())
+        .await
+        .expect_err("bytes changed on disk must not verify after a rename");
+    assert!(err.to_string().to_lowercase().contains("sha"), "{err}");
+}
+
+/// A re-sealed version must be the same content sealed with the same key, as far as the
+/// server can tell — and a refused rename leaves everything as it was.
+#[tokio::test]
+async fn a_resealed_version_must_match_the_original() {
+    let s = start().await;
+    signup_login(&s, "acme", "alice@example.com").await;
+    let key = BundleKey::generate();
+    let r = s
+        .cookie_jar
+        .put(format!("{}/api/bundle-key", s.base_url))
+        .json(&serde_json::json!({ "fingerprint": key.fingerprint_hex() }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let zip = b"PK\x03\x04-secret".to_vec();
+    let r = upload_bundle(
+        &s,
+        "app",
+        "1",
+        Some("enc-v1"),
+        key.encrypt("app", "1", &zip),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let id = r.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let other_key = BundleKey::generate();
+    let mut longer = zip.clone();
+    longer.push(b'!');
+    for (what, parts) in [
+        (
+            "another key",
+            vec![(id.clone(), other_key.encrypt("web", "1", &zip))],
+        ),
+        (
+            "different content",
+            vec![(id.clone(), key.encrypt("web", "1", &longer))],
+        ),
+        (
+            "the same version twice",
+            vec![
+                (id.clone(), key.encrypt("web", "1", &zip)),
+                (id.clone(), key.encrypt("web", "1", &zip)),
+            ],
+        ),
+    ] {
+        let r = rename_bundle(&s, "app", "web", parts).await;
+        assert_eq!(r.status(), 400, "{what}: {:?}", r.text().await);
+    }
+
+    let list: Vec<serde_json::Value> = s
+        .cookie_jar
+        .get(format!("{}/api/bundles", s.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["id"], id.as_str());
+    assert_eq!(list[0]["name"], "app");
+    let dir = s._tempdir.path().join("bundles").join("1");
+    let files: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+    assert_eq!(
+        files.len(),
+        1,
+        "nothing a refused rename stored is left behind"
+    );
+}
+
+/// `from` is matched exactly as stored, so a bundle whose name predates validation — the
+/// kind most worth renaming — can be renamed.
+#[tokio::test]
+async fn a_bundle_with_a_legacy_name_can_be_renamed() {
+    let s = start().await;
+    signup_login(&s, "acme", "alice@example.com").await;
+    let r = upload_bundle(&s, "legacy", "1", None, b"PK\x03\x04-x".to_vec()).await;
+    assert_eq!(r.status(), 200);
+    sqlx::query("UPDATE bundles SET name = 'my bundle' WHERE name = 'legacy'")
+        .execute(&s.db.write)
+        .await
+        .unwrap();
+
+    let r = rename_bundle(&s, "my bundle", "my-bundle", vec![]).await;
+    assert_eq!(r.status(), 200, "{:?}", r.text().await);
+    let renamed: Vec<serde_json::Value> = r.json().await.unwrap();
+    assert_eq!(renamed[0]["name"], "my-bundle");
+}
+
+/// The transaction itself refuses a picture of the bundle that is no longer true: a
+/// version saved under the old name after the caller read them would be left behind, and a
+/// name taken meanwhile is reported as that rather than as "changed".
+#[tokio::test]
+async fn the_rename_transaction_refuses_a_stale_picture() {
+    let s = start().await;
+    signup_login(&s, "acme", "alice@example.com").await;
+    for v in ["1", "2"] {
+        let r = upload_bundle(&s, "app", v, None, format!("PK\x03\x04-{v}").into_bytes()).await;
+        assert_eq!(r.status(), 200);
+    }
+    let r = upload_bundle(&s, "taken", "1", None, b"PK\x03\x04-t".to_vec()).await;
+    assert_eq!(r.status(), 200);
+    let repo = fleet_storage::BundlesRepo::new(&s.db);
+    let versions = repo.list_by_name(1, "app").await.unwrap();
+    let only_first = vec![fleet_storage::RenamedInPlace {
+        id: versions[0].id.clone(),
+        signature: "sig".into(),
+    }];
+
+    assert_eq!(
+        repo.rename(1, "app", "web", &only_first, &[])
+            .await
+            .unwrap(),
+        fleet_storage::RenameOutcome::Changed
+    );
+    assert_eq!(
+        repo.rename(1, "app", "taken", &only_first, &[])
+            .await
+            .unwrap(),
+        fleet_storage::RenameOutcome::NameTaken
+    );
+    let still: Vec<String> = repo
+        .list_by_name(1, "app")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|b| b.signature)
+        .collect();
+    assert_eq!(still.len(), 2, "a refused rename changes nothing");
+    assert!(still.iter().all(|sig| sig != "sig"));
 }

@@ -467,10 +467,23 @@ export function BundlesPage({ me }: { me: Me }) {
                         </Button>
                       ))}
                     {canWriteConfig(me.role) && (
-                      <Tooltip title="Rename this bundle (all its versions)">
-                        <IconButton size="small" onClick={() => setRenaming(b.name)}>
-                          <DriveFileRenameOutlineIcon fontSize="small" />
-                        </IconButton>
+                      <Tooltip
+                        title={
+                          editing?.name === b.name
+                            ? "Close the editor first: a rename changes the bundle the open " +
+                              "edit would be saved against"
+                            : "Rename this bundle (all its versions)"
+                        }
+                      >
+                        <span>
+                          <IconButton
+                            size="small"
+                            disabled={editing?.name === b.name}
+                            onClick={() => setRenaming(b.name)}
+                          >
+                            <DriveFileRenameOutlineIcon fontSize="small" />
+                          </IconButton>
+                        </span>
                       </Tooltip>
                     )}
                     {canWriteConfig(me.role) && (

@@ -22,7 +22,7 @@ import {
   BundleConfigView,
   BundleView,
 } from "./api";
-import { buildBundleZip, CarriedEntries, readBundleZip } from "./bundlezip";
+import { buildBundleZip, CarriedEntries, readBundleZip, TOKEN_RE } from "./bundlezip";
 import { decryptBundle, encryptBundle, recalledKey } from "./crypto";
 import { ConfigObject, iniToJson, jsonToIni, suggestNextVersion } from "./ini";
 import { TemplateForm } from "./TemplateForm";
@@ -48,9 +48,6 @@ const NEW_BUNDLE_TEMPLATE = `; Bundle configuration (NSClient INI).
 
 `;
 
-/** Mirrors the server's `valid_bundle_token` — also what keeps the client-built manifest's
- *  quoting and the encryption AAD unambiguous. */
-export const TOKEN_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
 export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props) {
   const [loading, setLoading] = useState(editBundle !== null);

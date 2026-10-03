@@ -391,15 +391,27 @@ pub async fn compute_uncached(
     //    anyone who can read the hash can try candidate passwords against it until one
     //    matches. Under HMAC with a key derived from MASTER_KEY the value still changes
     //    exactly when the content does, and tells a reader nothing about what is in it.
+    //
+    //    Each bundle contributes everything the agent is handed about it — the whole signed
+    //    descriptor plus its priority — not just id and digest. A change to any of it is a
+    //    change the agent has to see: a rename keeps id and bytes but changes the name and
+    //    the signature, and an agent kept on 304 would hold a signature that no longer
+    //    matches what we would serve. Every field is length-prefixed, so no value can shift
+    //    bytes into its neighbour (names uploaded before validation can hold anything).
     let mut msg = Vec::new();
-    msg.extend_from_slice(canonical_string(&merged).as_bytes());
+    let mut field = |bytes: &[u8]| {
+        msg.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        msg.extend_from_slice(bytes);
+    };
+    field(canonical_string(&merged).as_bytes());
     for b in &bundles {
-        msg.extend_from_slice(b"|");
-        msg.extend_from_slice(b.id.as_bytes());
-        msg.extend_from_slice(b"|");
-        msg.extend_from_slice(b.sha256.as_bytes());
-        msg.extend_from_slice(b"|");
-        msg.extend_from_slice(&b.priority.to_le_bytes());
+        field(b.id.as_bytes());
+        field(b.name.as_bytes());
+        field(b.version.as_bytes());
+        field(b.format.as_bytes());
+        field(b.sha256.as_bytes());
+        field(b.signature.as_bytes());
+        field(&b.priority.to_le_bytes());
     }
     let tag = state.config.master_key.mac(STATE_HASH_INFO, &msg);
     let state_hash = tag.iter().map(|b| format!("{b:02x}")).collect();

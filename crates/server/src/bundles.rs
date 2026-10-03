@@ -17,8 +17,8 @@ use ed25519_dalek::{Signer, SigningKey};
 use fleet_core::digest::sha256_hex;
 use fleet_core::encbundle;
 use fleet_storage::{
-    BundleAssignmentsRepo, BundlesRepo, GroupsRepo, RenamedBundle, TenantBundleKeysRepo,
-    TenantRepo, TenantSecretsRepo,
+    BundleAssignmentsRepo, BundlesRepo, GroupsRepo, MovedBundle, RenameOutcome, RenamedInPlace,
+    TenantBundleKeysRepo, TenantRepo, TenantSecretsRepo,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -765,11 +765,12 @@ pub async fn delete_bundle(
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// Best-effort removal of stored bytes no row points at.
-async fn discard_bundle_bytes(state: &AppState, tenant_id: i64, ids: &[String]) {
+/// Best-effort removal of stored bytes no row points at (any more). `why` says which in
+/// the log when a file cannot be removed.
+async fn discard_bundle_bytes(state: &AppState, tenant_id: i64, ids: &[String], why: &str) {
     for id in ids {
         if let Err(e) = state.bundle_store.delete(tenant_id, id).await {
-            tracing::error!(error = %e, bundle_id = %id, "orphaned bundle bytes not removed");
+            tracing::error!(error = %e, bundle_id = %id, "{why}: bundle bytes not removed");
         }
     }
 }
@@ -777,19 +778,199 @@ async fn discard_bundle_bytes(state: &AppState, tenant_id: i64, ids: &[String]) 
 /// Multipart part name prefix of a re-sealed encrypted version: `sealed:<bundle id>`.
 const SEALED_PART_PREFIX: &str = "sealed:";
 
-/// `POST /api/bundles/rename` — rename every version of a bundle. Multipart parts:
-///   - `from`, `to` (text): the current and the new name.
+/// Longest `from`/`to` part we read. Names are at most 128 bytes; anything longer is not a
+/// name, and is not buffered to find that out.
+const MAX_NAME_PART: usize = 1024;
+
+/// Read a small text part, refusing one longer than `max` bytes without buffering it.
+async fn read_small_text(
+    field: &mut axum::extract::multipart::Field<'_>,
+    max: usize,
+) -> Option<String> {
+    let mut buf = Vec::new();
+    loop {
+        match field.chunk().await {
+            Ok(Some(chunk)) => {
+                if buf.len() + chunk.len() > max {
+                    return None;
+                }
+                buf.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(_) => return None,
+        }
+    }
+    String::from_utf8(buf).ok()
+}
+
+/// What a rename needs once it knows which bundle it is renaming.
+struct RenamePlan {
+    from: String,
+    to: String,
+    versions: Vec<fleet_storage::BundleRow>,
+    signing_key: SigningKey,
+}
+
+// result_large_err: the Err is a ready-to-send Response by design, as in persist_bundle.
+#[allow(clippy::result_large_err)]
+async fn plan_rename(
+    state: &AppState,
+    who: &AuthedUser,
+    from: Option<String>,
+    to: Option<String>,
+) -> std::result::Result<RenamePlan, Response> {
+    // `from` is matched exactly as stored: a bundle uploaded before names were validated
+    // is the one most worth renaming, and must not be refused for the name it has.
+    let from = match from {
+        Some(f) if !f.is_empty() => f,
+        _ => return Err((StatusCode::BAD_REQUEST, "missing 'from'").into_response()),
+    };
+    let to = match to.as_deref().map(str::trim) {
+        Some(t) if valid_bundle_token(t) => t.to_string(),
+        _ => return Err((StatusCode::BAD_REQUEST, BUNDLE_TOKEN_RULE).into_response()),
+    };
+    if from == to {
+        return Err((StatusCode::BAD_REQUEST, "the new name is the current name").into_response());
+    }
+    let bundles = BundlesRepo::new(&state.db);
+    let internal = |e: anyhow::Error| {
+        tracing::error!(error = %e, "bundle rename lookup failed");
+        (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response()
+    };
+    if !bundles
+        .list_by_name(who.tenant_id, &to)
+        .await
+        .map_err(internal)?
+        .is_empty()
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("a bundle named '{to}' already exists"),
+        )
+            .into_response());
+    }
+    let versions = bundles
+        .list_by_name(who.tenant_id, &from)
+        .await
+        .map_err(internal)?;
+    if versions.is_empty() {
+        return Err((StatusCode::NOT_FOUND, "bundle not found").into_response());
+    }
+    let signing_key = load_tenant_signing_key(state, who.tenant_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "bundle signing key unavailable");
+            (StatusCode::INTERNAL_SERVER_ERROR, "sign failed").into_response()
+        })?;
+    Ok(RenamePlan {
+        from,
+        to,
+        versions,
+        signing_key,
+    })
+}
+
+/// Read one re-sealed version, check that it is, as far as the server can tell, the same
+/// content sealed with the same key, store it under a new id, and describe the move.
+// result_large_err: the Err is a ready-to-send Response by design.
+#[allow(clippy::result_large_err)]
+async fn take_sealed_part(
+    state: &AppState,
+    tenant_id: i64,
+    plan: &RenamePlan,
+    version: &fleet_storage::BundleRow,
+    field: &mut axum::extract::multipart::Field<'_>,
+) -> std::result::Result<MovedBundle, Response> {
+    let bad = |msg: String| Err((StatusCode::BAD_REQUEST, msg).into_response());
+    // AES-GCM output is exactly as long as its input, so a version re-sealed from the same
+    // plaintext is exactly as long as the original. Bounding the read by that keeps memory
+    // to one version at a time and needs no tier check: the original already passed one.
+    let expected = usize::try_from(version.size_bytes).unwrap_or(0);
+    let mut bytes = Vec::with_capacity(expected);
+    loop {
+        match field.chunk().await {
+            Ok(Some(chunk)) => {
+                if bytes.len() + chunk.len() > expected {
+                    return bad(format!(
+                        "version {}: the re-sealed bundle is larger than the original",
+                        version.version
+                    ));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(e) => return bad(format!("version {}: unreadable part: {e}", version.version)),
+        }
+    }
+    if bytes.len() != expected {
+        return bad(format!(
+            "version {}: the re-sealed bundle is not the same size as the original",
+            version.version
+        ));
+    }
+    let fingerprint = match encbundle::parse_header(&bytes) {
+        Ok(h) => h.fingerprint_hex(),
+        Err(e) => {
+            return bad(format!(
+                "version {}: not a valid encrypted bundle: {e}",
+                version.version
+            ))
+        }
+    };
+    // A rename never changes which key opens a bundle: agents provisioned with the old one
+    // would stop opening it, and the old ciphertext is about to be deleted.
+    if version.key_fingerprint.as_deref() != Some(fingerprint.as_str()) {
+        return bad(format!(
+            "version {} is sealed with key {}; it must be re-sealed with the same key",
+            version.version,
+            version.key_fingerprint.as_deref().unwrap_or("?")
+        ));
+    }
+    let new_id = fleet_core::bundlesig::new_bundle_id();
+    let sha = sha256_hex(&bytes);
+    let signature = sign_descriptor(
+        &plan.signing_key,
+        &fleet_core::bundlesig::BundleDescriptor {
+            tenant_id,
+            bundle_id: &new_id,
+            name: &plan.to,
+            version: &version.version,
+            format: &version.format,
+            sha256_hex: &sha,
+        },
+    );
+    if let Err(e) = state.bundle_store.put(tenant_id, &new_id, &bytes).await {
+        tracing::error!(error = %e, "bundle store put failed");
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "store failed").into_response());
+    }
+    Ok(MovedBundle {
+        old_id: version.id.clone(),
+        new_id,
+        sha256: sha,
+        size_bytes: bytes.len() as i64,
+        signature,
+        key_fingerprint: Some(fingerprint),
+    })
+}
+
+/// `POST /api/bundles/rename` — rename every version of a bundle. Multipart parts, in order:
+///   - `from`, `to` (text): the current name, exactly as stored, and the new one.
 ///   - `sealed:<id>` (file), one per encrypted version of `from`: that version's plaintext
-///     re-encrypted under (`to`, its version). The AAD binds the name, so an encrypted
-///     version renamed without new ciphertext would no longer open on any agent — and only
-///     the browser holds the key to produce it.
+///     re-encrypted under (`to`, its version), with the same key. The AAD binds the name,
+///     so an encrypted version renamed without new ciphertext would no longer open on any
+///     agent — and only the browser holds the key to produce it.
 ///
-/// Every version moves to a new id with its group assignments, so every group carries the
-/// same versions as before — and every host's desired-state hash changes, which is what
-/// gets the new name to hosts that are already in sync (the hash covers bundle ids, not
-/// names). A plain version keeps its bytes: the zip's bundle.toml keeps the name it was
-/// built with, which agents never read and the next edit rewrites.
-/// All or nothing: a rename that would leave some versions behind is refused.
+/// Plain versions are renamed in place: same id, same bytes, re-signed over the sha256 the
+/// row recorded at upload. The bytes are never read, so whatever is on disk is never
+/// vouched for anew — a file changed since upload still fails the agent's digest check.
+/// The zip's bundle.toml keeps the name it was built with; agents never read it, and the
+/// next edit rewrites it. Encrypted versions move to new ids with their group assignments.
+/// Either way every group carries the same versions as before, and every host carrying the
+/// bundle gets a new desired-state hash (it covers the whole signed descriptor).
+///
+/// Sealed parts are streamed: each is checked and stored as it arrives, so a rename holds
+/// one version in memory at a time. All or nothing: a rename that would leave some versions
+/// behind is refused, and anything stored for it is removed again.
 pub async fn rename(
     State(state): State<AppState>,
     who: AuthedUser,
@@ -800,217 +981,178 @@ pub async fn rename(
     }
     let mut from: Option<String> = None;
     let mut to: Option<String> = None;
-    let mut sealed: std::collections::HashMap<String, Vec<u8>> = Default::default();
+    let mut plan: Option<RenamePlan> = None;
+    let mut moved: Vec<MovedBundle> = Vec::new();
+    // Every early return from here on has to take back what was stored for this rename.
+    macro_rules! fail {
+        ($resp:expr) => {{
+            let written: Vec<String> = moved.iter().map(|m| m.new_id.clone()).collect();
+            discard_bundle_bytes(&state, who.tenant_id, &written, "abandoned rename").await;
+            return $resp;
+        }};
+    }
+
     loop {
-        let field = match form.next_field().await {
+        let mut field = match form.next_field().await {
             Ok(Some(f)) => f,
             Ok(None) => break,
-            Err(e) => return (StatusCode::BAD_REQUEST, format!("bad form: {e}")).into_response(),
+            Err(e) => fail!((StatusCode::BAD_REQUEST, format!("bad form: {e}")).into_response()),
         };
         let part = field.name().unwrap_or("").to_string();
-        if part == "from" {
-            from = field.text().await.ok();
-        } else if part == "to" {
-            to = field.text().await.ok();
-        } else if let Some(id) = part.strip_prefix(SEALED_PART_PREFIX) {
-            let Ok(bytes) = field.bytes().await else {
-                return (StatusCode::BAD_REQUEST, "unreadable sealed part").into_response();
+        if part == "from" || part == "to" {
+            if plan.is_some() {
+                fail!((
+                    StatusCode::BAD_REQUEST,
+                    "'from' and 'to' must come before sealed parts"
+                )
+                    .into_response());
+            }
+            let Some(text) = read_small_text(&mut field, MAX_NAME_PART).await else {
+                return (StatusCode::BAD_REQUEST, "name part too long or not UTF-8")
+                    .into_response();
             };
-            sealed.insert(id.to_string(), bytes.to_vec());
+            if part == "from" {
+                from = Some(text);
+            } else {
+                to = Some(text);
+            }
+        } else if let Some(id) = part.strip_prefix(SEALED_PART_PREFIX) {
+            if plan.is_none() {
+                match plan_rename(&state, &who, from.take(), to.take()).await {
+                    Ok(p) => plan = Some(p),
+                    Err(resp) => return resp,
+                }
+            }
+            let p = plan.as_ref().expect("planned above");
+            let Some(version) = p
+                .versions
+                .iter()
+                .find(|b| b.id == id && b.format != encbundle::FORMAT_PLAIN)
+            else {
+                fail!((
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "sealed part for '{id}', which is not an encrypted version of '{}'",
+                        p.from
+                    ),
+                )
+                    .into_response());
+            };
+            if moved.iter().any(|m| m.old_id == version.id) {
+                fail!((
+                    StatusCode::BAD_REQUEST,
+                    format!("version {} was sent twice", version.version)
+                )
+                    .into_response());
+            }
+            match take_sealed_part(&state, who.tenant_id, p, version, &mut field).await {
+                Ok(m) => moved.push(m),
+                Err(resp) => fail!(resp),
+            }
         }
     }
-    let (from, to) = match (from.as_deref().map(str::trim), to.as_deref().map(str::trim)) {
-        (Some(f), Some(t)) if valid_bundle_token(f) && valid_bundle_token(t) => {
-            (f.to_string(), t.to_string())
-        }
-        _ => return (StatusCode::BAD_REQUEST, BUNDLE_TOKEN_RULE).into_response(),
+    let plan = match plan {
+        Some(p) => p,
+        None => match plan_rename(&state, &who, from, to).await {
+            Ok(p) => p,
+            Err(resp) => return resp,
+        },
     };
-    if from == to {
-        return (StatusCode::BAD_REQUEST, "the new name is the current name").into_response();
+
+    // Every encrypted version needs new ciphertext.
+    if let Some(missing) = plan
+        .versions
+        .iter()
+        .find(|b| b.format != encbundle::FORMAT_PLAIN && !moved.iter().any(|m| m.old_id == b.id))
+    {
+        fail!((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "version {} is encrypted: re-seal it under the new name in the browser",
+                missing.version
+            ),
+        )
+            .into_response());
     }
+    let in_place: Vec<RenamedInPlace> = plan
+        .versions
+        .iter()
+        .filter(|b| b.format == encbundle::FORMAT_PLAIN)
+        .map(|b| RenamedInPlace {
+            id: b.id.clone(),
+            signature: sign_descriptor(
+                &plan.signing_key,
+                &fleet_core::bundlesig::BundleDescriptor {
+                    tenant_id: who.tenant_id,
+                    bundle_id: &b.id,
+                    name: &plan.to,
+                    version: &b.version,
+                    format: &b.format,
+                    sha256_hex: &b.sha256,
+                },
+            ),
+        })
+        .collect();
 
     let bundles = BundlesRepo::new(&state.db);
-    let all = match bundles.list(who.tenant_id).await {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::error!(error = %e, "bundle list failed");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
-        }
-    };
-    if all.iter().any(|b| b.name == to) {
-        return (
+    match bundles
+        .rename(who.tenant_id, &plan.from, &plan.to, &in_place, &moved)
+        .await
+    {
+        Ok(RenameOutcome::Renamed) => {}
+        Ok(RenameOutcome::NameTaken) => fail!((
             StatusCode::CONFLICT,
-            format!("a bundle named '{to}' already exists"),
+            format!("a bundle named '{}' already exists", plan.to),
         )
-            .into_response();
-    }
-    let versions: Vec<_> = all.into_iter().filter(|b| b.name == from).collect();
-    if versions.is_empty() {
-        return (StatusCode::NOT_FOUND, "bundle not found").into_response();
-    }
-
-    // Every encrypted version needs new ciphertext, and nothing else may be sent: a part for
-    // a plain or unknown id is a client that has a different picture of this bundle.
-    for b in &versions {
-        if b.format != encbundle::FORMAT_PLAIN && !sealed.contains_key(&b.id) {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "version {} is encrypted: re-seal it under the new name in the browser",
-                    b.version
-                ),
-            )
-                .into_response();
-        }
-    }
-    if let Some(id) = sealed.keys().find(|id| {
-        !versions
-            .iter()
-            .any(|b| &b.id == *id && b.format != encbundle::FORMAT_PLAIN)
-    }) {
-        return (
-            StatusCode::BAD_REQUEST,
-            format!("sealed part for '{id}', which is not an encrypted version of '{from}'"),
+            .into_response()),
+        Ok(RenameOutcome::Changed) => fail!((
+            StatusCode::CONFLICT,
+            "the bundle changed while it was being renamed — reload and try again",
         )
-            .into_response();
-    }
-
-    let tenant = match TenantRepo::new(&state.db).get(who.tenant_id).await {
-        Ok(Some(t)) => t,
-        _ => return (StatusCode::INTERNAL_SERVER_ERROR, "tenant missing").into_response(),
-    };
-    let limits = fleet_core::tier::effective(&tenant.tier, tenant.tier_overrides_json.as_deref());
-    let max = (limits.max_bundle_mb as usize) * 1024 * 1024;
-
-    // Each version's bytes under its new name: the stored zip for a plain version, the
-    // browser's new ciphertext for an encrypted one. Everything after that is one path.
-    let mut renamed = Vec::new();
-    let mut fresh: Vec<Vec<u8>> = Vec::new();
-    for b in &versions {
-        let (bytes, key_fingerprint) = if b.format == encbundle::FORMAT_PLAIN {
-            match state.bundle_store.get(who.tenant_id, &b.id).await {
-                Ok(bytes) => (bytes, None),
-                Err(e) => {
-                    tracing::error!(error = %e, bundle_id = %b.id, "bundle bytes missing");
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "bundle bytes missing")
-                        .into_response();
-                }
-            }
-        } else {
-            let bytes = sealed.remove(&b.id).unwrap_or_default();
-            if bytes.len() > max {
-                return (
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    format!("bundle exceeds tier limit ({} MB)", limits.max_bundle_mb),
-                )
-                    .into_response();
-            }
-            match encbundle::parse_header(&bytes) {
-                Ok(h) => {
-                    let fingerprint = h.fingerprint_hex();
-                    (bytes, Some(fingerprint))
-                }
-                Err(e) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        format!("version {}: not a valid encrypted bundle: {e}", b.version),
-                    )
-                        .into_response();
-                }
-            }
-        };
-        let new_id = fleet_core::bundlesig::new_bundle_id();
-        let sha = sha256_hex(&bytes);
-        let descriptor = fleet_core::bundlesig::BundleDescriptor {
-            tenant_id: who.tenant_id,
-            bundle_id: &new_id,
-            name: &to,
-            version: &b.version,
-            format: &b.format,
-            sha256_hex: &sha,
-        };
-        let signature = match sign_with_tenant_key(&state, who.tenant_id, &descriptor).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(error = %e, "bundle sign failed");
-                return (StatusCode::INTERNAL_SERVER_ERROR, "sign failed").into_response();
-            }
-        };
-        renamed.push(RenamedBundle {
-            old_id: b.id.clone(),
-            new_id,
-            sha256: sha,
-            size_bytes: bytes.len() as i64,
-            signature,
-            key_fingerprint,
-        });
-        fresh.push(bytes);
-    }
-
-    // New bytes first, rows second: until the transaction commits nothing points at them,
-    // and if it does not they are removed again.
-    let new_ids: Vec<String> = renamed.iter().map(|r| r.new_id.clone()).collect();
-    for (r, bytes) in renamed.iter().zip(&fresh) {
-        if let Err(e) = state
-            .bundle_store
-            .put(who.tenant_id, &r.new_id, bytes)
-            .await
-        {
-            tracing::error!(error = %e, "bundle store put failed");
-            discard_bundle_bytes(&state, who.tenant_id, &new_ids).await;
-            return (StatusCode::INTERNAL_SERVER_ERROR, "store failed").into_response();
-        }
-    }
-
-    match bundles.rename(who.tenant_id, &from, &to, &renamed).await {
-        Ok(true) => {}
-        Ok(false) => {
-            discard_bundle_bytes(&state, who.tenant_id, &new_ids).await;
-            return (
-                StatusCode::CONFLICT,
-                "the bundle changed while it was being renamed — reload and try again",
-            )
-                .into_response();
-        }
+            .into_response()),
         Err(e) => {
             tracing::error!(error = %e, "bundle rename failed");
-            discard_bundle_bytes(&state, who.tenant_id, &new_ids).await;
-            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+            fail!((StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response())
         }
     }
 
-    // The old bytes: after the commit, as for delete — an orphaned file is the direction
-    // to fail in.
-    for r in &renamed {
-        if let Err(e) = state.bundle_store.delete(who.tenant_id, &r.old_id).await {
-            tracing::error!(error = %e, bundle_id = %r.old_id, "bundle bytes could not be removed");
-        }
-    }
+    // The replaced ciphertext, after the commit (which bumped config_version, so nothing
+    // serves the old ids any more): as for delete, an orphaned file is the direction to
+    // fail in.
+    let replaced: Vec<String> = moved.iter().map(|m| m.old_id.clone()).collect();
+    discard_bundle_bytes(&state, who.tenant_id, &replaced, "renamed bundle").await;
 
-    // Names are part of every desired-state document that carries these bundles.
-    crate::config_api::bump_config_version(&state, who.tenant_id).await;
-
-    let mut version_list: Vec<&str> = versions.iter().map(|b| b.version.as_str()).collect();
-    version_list.sort_unstable();
+    // Which id each version had and has, so earlier audit entries — uploads and assignments,
+    // recorded by id — still lead to what the hosts run.
+    let mut version_map: Vec<serde_json::Value> = plan
+        .versions
+        .iter()
+        .map(|b| {
+            let new_id = moved
+                .iter()
+                .find(|m| m.old_id == b.id)
+                .map_or(b.id.as_str(), |m| m.new_id.as_str());
+            serde_json::json!({
+                "version": b.version, "format": b.format, "old_id": b.id, "new_id": new_id,
+            })
+        })
+        .collect();
+    version_map.sort_by(|a, b| a["version"].as_str().cmp(&b["version"].as_str()));
     crate::audit::record(
         &state,
         who.tenant_id,
         Some(who.user_id),
         "bundle.renamed",
         "bundle",
-        &to,
-        Some(&serde_json::json!({ "from": from, "to": to, "versions": version_list })),
+        &plan.to,
+        Some(&serde_json::json!({ "from": plan.from, "to": plan.to, "versions": version_map })),
     )
     .await;
 
-    match bundles.list(who.tenant_id).await {
-        Ok(rows) => Json(
-            rows.into_iter()
-                .filter(|b| b.name == to)
-                .map(BundleView::from)
-                .collect::<Vec<_>>(),
-        )
-        .into_response(),
+    match bundles.list_by_name(who.tenant_id, &plan.to).await {
+        Ok(rows) => {
+            Json(rows.into_iter().map(BundleView::from).collect::<Vec<_>>()).into_response()
+        }
         Err(_) => StatusCode::NO_CONTENT.into_response(),
     }
 }
@@ -1344,16 +1486,11 @@ pub async fn set_bundle_key(
     .into_response()
 }
 
-/// Sign a bundle's descriptor with the tenant's Ed25519 key.
-///
-/// The descriptor, not the bytes: a signature over the digest alone binds nothing about
-/// *which* bundle those bytes are, so an old signed blob could be re-advertised under a new
-/// name, version or id and still verify. See [`fleet_core::bundlesig`].
-pub(crate) async fn sign_with_tenant_key(
+/// The tenant's Ed25519 bundle-signing key, unwrapped from the master key.
+pub(crate) async fn load_tenant_signing_key(
     state: &AppState,
     tenant_id: i64,
-    descriptor: &fleet_core::bundlesig::BundleDescriptor<'_>,
-) -> Result<String> {
+) -> Result<SigningKey> {
     let secrets = TenantSecretsRepo::new(&state.db)
         .get_by_tenant(tenant_id)
         .await?
@@ -1363,12 +1500,34 @@ pub(crate) async fn sign_with_tenant_key(
         &secrets.bundle_signing_key_encrypted,
     )?;
     let key_pem = std::str::from_utf8(&key_bytes).context("bundle key utf8")?;
-    let signing_key =
-        SigningKey::from_pkcs8_pem(key_pem).map_err(|e| anyhow!("ed25519 key parse: {e}"))?;
+    SigningKey::from_pkcs8_pem(key_pem).map_err(|e| anyhow!("ed25519 key parse: {e}"))
+}
+
+/// Sign a bundle's descriptor, base64.
+///
+/// The descriptor, not the bytes: a signature over the digest alone binds nothing about
+/// *which* bundle those bytes are, so an old signed blob could be re-advertised under a new
+/// name, version or id and still verify. See [`fleet_core::bundlesig`].
+pub(crate) fn sign_descriptor(
+    key: &SigningKey,
+    descriptor: &fleet_core::bundlesig::BundleDescriptor<'_>,
+) -> String {
     // Ed25519 hashes internally, so the descriptor is signed directly rather than digested
     // first — one fewer step for an agent implementation to get wrong.
-    let signature = signing_key.sign(&descriptor.to_signing_bytes());
-    Ok(STANDARD.encode(signature.to_bytes()))
+    STANDARD.encode(key.sign(&descriptor.to_signing_bytes()).to_bytes())
+}
+
+/// Load the tenant key and sign one descriptor. For paths that sign once; loading the key
+/// decrypts it, so a path signing many loads it once and uses [`sign_descriptor`].
+pub(crate) async fn sign_with_tenant_key(
+    state: &AppState,
+    tenant_id: i64,
+    descriptor: &fleet_core::bundlesig::BundleDescriptor<'_>,
+) -> Result<String> {
+    Ok(sign_descriptor(
+        &load_tenant_signing_key(state, tenant_id).await?,
+        descriptor,
+    ))
 }
 
 #[cfg(test)]

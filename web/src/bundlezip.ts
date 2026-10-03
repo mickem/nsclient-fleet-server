@@ -9,6 +9,10 @@
 
 import { strToU8, unzipSync, zipSync } from "fflate";
 
+/** A bundle name, version or template id. Mirrors the server's `valid_bundle_token` — also
+ *  what keeps the manifest's quoting and the encryption AAD unambiguous. */
+export const TOKEN_RE = /^[A-Za-z0-9._-]{1,128}$/;
+
 /** Zip entries other than the manifest and config: `[path, bytes]`, e.g. scripts. */
 export type CarriedEntries = [string, Uint8Array][];
 
