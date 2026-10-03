@@ -310,6 +310,7 @@ async fn serve(shutdown: Shutdown, env_file_vars: &[String]) -> anyhow::Result<(
     tokio::spawn(fleet_server::housekeeping::run(
         db.clone(),
         cfg.session_idle_ttl_secs,
+        state.bundle_store.clone(),
     ));
 
     backfill_all(&state, &db).await?;

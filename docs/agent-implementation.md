@@ -163,7 +163,8 @@ Notes:
   agent unpacks and applies the bundles in ascending priority, then merges this
   last so it wins, and says so with `"host_override_last": true` in every state
   report (see `crates/server/src/desired_state.rs`).
-- `state_hash` covers the merged config **and** the bundle set. Store it only
+- `state_hash` covers the merged config **and** every bundle entry in full (id, name,
+  version, format, sha256, signature, priority). Store it only
   after a successful apply, and echo it as `current_hash` on subsequent polls.
 - Add jitter to the sleep to avoid thundering-herd across a fleet.
 

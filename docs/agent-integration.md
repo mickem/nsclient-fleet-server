@@ -60,8 +60,10 @@ never hardcode a poll interval.
   alone (`{}` when there is none). Merge it **after** every bundle, so it wins over them,
   and report `"host_override_last": true` on every state report so the server knows you
   do — without it, the console warns that the override is not in force on this host.
-- `state_hash` covers the bundle set (ids, digests, priorities) and the merged config.
-  Persist it only after a fully successful apply.
+- `state_hash` covers the merged config and, for every bundle, everything the entry
+  carries: id, name, version, format, sha256, signature and priority. A bundle renamed or
+  re-signed without new bytes still changes it, so the agent is told. Persist it only
+  after a fully successful apply.
 
 **`429 Too Many Requests`** — the agent polled faster than the tier's floor or exceeded
 its per-host request budget. Honor the `Retry-After` header, then resume the normal

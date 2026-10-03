@@ -1144,6 +1144,153 @@ impl<'a> BundlesRepo<'a> {
         .await?;
         Ok(rows.into_iter().map(map_bundle).collect())
     }
+
+    /// Every version of one bundle, oldest first.
+    pub async fn list_by_name(&self, tenant_id: i64, name: &str) -> Result<Vec<BundleRow>> {
+        let rows = sqlx::query(
+            "SELECT id, tenant_id, name, version, sha256, size_bytes, signature, uploaded_at, format, key_fingerprint
+             FROM bundles WHERE tenant_id = ? AND name = ? ORDER BY uploaded_at, id",
+        )
+        .bind(tenant_id)
+        .bind(name)
+        .fetch_all(&self.db.read)
+        .await?;
+        Ok(rows.into_iter().map(map_bundle).collect())
+    }
+
+    /// Rename every version of bundle `from` to `to`, in one transaction that also bumps
+    /// the tenant's `config_version`.
+    ///
+    /// `in_place` versions keep their id and bytes; only the name and the signature over
+    /// the new identity change. That is every plain version: agents take the name from the
+    /// signed desired state, and the desired-state hash covers the whole descriptor, so
+    /// hosts in sync are told about the new name without the bytes being touched.
+    ///
+    /// `moved` versions had to change bytes — encrypted ones bind the name into their AAD —
+    /// so each becomes a new row under a new id whose bytes the caller has already stored,
+    /// and the old row's group assignments move to it before the old row goes. Overwriting
+    /// bytes in place would leave a window, or after a failed write a permanent state, where
+    /// a row's signature and its bytes disagree.
+    ///
+    /// The version bump is in the transaction so no poll can see the new rows under the old
+    /// version, and it lands before the caller deletes any replaced bytes: a cached state
+    /// still naming an old id is never served after its file is gone.
+    ///
+    /// Changes nothing unless every version the caller read is still there under `from`,
+    /// nothing else is (a version saved under the old name meanwhile would be left behind),
+    /// and `to` is still free.
+    pub async fn rename(
+        &self,
+        tenant_id: i64,
+        from: &str,
+        to: &str,
+        in_place: &[RenamedInPlace],
+        moved: &[MovedBundle],
+    ) -> Result<RenameOutcome> {
+        let mut tx = self.db.write.begin().await?;
+        let taken: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM bundles WHERE tenant_id = ? AND name = ?")
+                .bind(tenant_id)
+                .bind(to)
+                .fetch_one(&mut *tx)
+                .await?;
+        if taken > 0 {
+            return Ok(RenameOutcome::NameTaken);
+        }
+        for r in in_place {
+            let res = sqlx::query(
+                "UPDATE bundles SET name = ?, signature = ?
+                 WHERE tenant_id = ? AND id = ? AND name = ?",
+            )
+            .bind(to)
+            .bind(&r.signature)
+            .bind(tenant_id)
+            .bind(&r.id)
+            .bind(from)
+            .execute(&mut *tx)
+            .await?;
+            if res.rows_affected() != 1 {
+                return Ok(RenameOutcome::Changed);
+            }
+        }
+        for r in moved {
+            let res = sqlx::query(
+                "INSERT INTO bundles (id, tenant_id, name, version, sha256, size_bytes, signature,
+                                      uploaded_at, format, key_fingerprint)
+                 SELECT ?, tenant_id, ?, version, ?, ?, ?, uploaded_at, format, ?
+                 FROM bundles WHERE tenant_id = ? AND id = ? AND name = ?",
+            )
+            .bind(&r.new_id)
+            .bind(to)
+            .bind(&r.sha256)
+            .bind(r.size_bytes)
+            .bind(&r.signature)
+            .bind(&r.key_fingerprint)
+            .bind(tenant_id)
+            .bind(&r.old_id)
+            .bind(from)
+            .execute(&mut *tx)
+            .await?;
+            if res.rows_affected() != 1 {
+                return Ok(RenameOutcome::Changed);
+            }
+            sqlx::query(
+                "UPDATE bundle_assignments SET bundle_id = ? WHERE tenant_id = ? AND bundle_id = ?",
+            )
+            .bind(&r.new_id)
+            .bind(tenant_id)
+            .bind(&r.old_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("DELETE FROM bundles WHERE tenant_id = ? AND id = ?")
+                .bind(tenant_id)
+                .bind(&r.old_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        let left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM bundles WHERE tenant_id = ? AND name = ?")
+                .bind(tenant_id)
+                .bind(from)
+                .fetch_one(&mut *tx)
+                .await?;
+        if left > 0 {
+            return Ok(RenameOutcome::Changed);
+        }
+        sqlx::query("UPDATE tenants SET config_version = config_version + 1 WHERE id = ?")
+            .bind(tenant_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(RenameOutcome::Renamed)
+    }
+}
+
+/// A bundle version renamed in place: same id and bytes, a signature over the new name.
+#[derive(Debug, Clone)]
+pub struct RenamedInPlace {
+    pub id: String,
+    pub signature: String,
+}
+
+/// A bundle version whose bytes changed with its name, stored under a new id.
+#[derive(Debug, Clone)]
+pub struct MovedBundle {
+    pub old_id: String,
+    pub new_id: String,
+    pub sha256: String,
+    pub size_bytes: i64,
+    pub signature: String,
+    pub key_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameOutcome {
+    Renamed,
+    /// `to` was taken by the time the transaction ran.
+    NameTaken,
+    /// A version was deleted, renamed or added under `from` since the caller read them.
+    Changed,
 }
 
 fn map_bundle(r: sqlx::sqlite::SqliteRow) -> BundleRow {
