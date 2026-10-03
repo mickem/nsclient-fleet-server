@@ -4,6 +4,7 @@ pub mod bundlesig;
 pub mod digest;
 pub mod encbundle;
 pub mod facts;
+pub mod facts_import;
 pub mod host;
 pub mod merge;
 pub mod selector;

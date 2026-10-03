@@ -7,6 +7,11 @@ import {
   Card,
   CardContent,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
   Grid,
   Stack,
   Table,
@@ -23,7 +28,7 @@ import KeyOffIcon from "@mui/icons-material/KeyOff";
 import { ConfirmDeleteHostDialog } from "./ConfirmDeleteHostDialog";
 import { HostStatusChip, LocalConfigChip } from "./HostStatusChip";
 import { HostConfigCard } from "./HostConfigCard";
-import { InventoryCard } from "./InventoryCard";
+import { InventoryCard, SourceFactsCard } from "./InventoryCard";
 import { RefreshButton } from "./RefreshButton";
 import {
   apiGet,
@@ -74,6 +79,7 @@ export function HostDetailPage({ me }: Props) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [revoked, setRevoked] = useState<RevokeHostResponse | null>(null);
   const [revoking, setRevoking] = useState(false);
+  const [sourceToDelete, setSourceToDelete] = useState<string | null>(null);
 
   // Returns void, not the promise: `useEffect` below takes this directly, and a returned
   // promise would be mistaken for a cleanup function.
@@ -222,7 +228,25 @@ export function HostDetailPage({ me }: Props) {
         <Grid size={12}>
           <InventoryCard facts={facts} error={factsError} />
         </Grid>
+        {(facts?.others ?? []).map((doc) => (
+          <Grid size={12} key={doc.source}>
+            <SourceFactsCard
+              doc={doc}
+              onDelete={canWriteConfig(me.role) ? () => setSourceToDelete(doc.source) : undefined}
+            />
+          </Grid>
+        ))}
       </Grid>
+      <ConfirmDeleteSourceDialog
+        hostId={host.id}
+        hostname={host.hostname}
+        source={sourceToDelete}
+        onClose={() => setSourceToDelete(null)}
+        onDeleted={() => {
+          setSourceToDelete(null);
+          refresh();
+        }}
+      />
     </Box>
   );
 }
@@ -413,5 +437,66 @@ function TagsCard({
         </Typography>
       </CardContent>
     </Card>
+  );
+}
+
+/** Confirms removing one non-agent facts document (an import) from a host. */
+function ConfirmDeleteSourceDialog({
+  hostId,
+  hostname,
+  source,
+  onClose,
+  onDeleted,
+}: {
+  hostId: string;
+  hostname: string | null;
+  /** The source to remove; null keeps the dialog closed. */
+  source: string | null;
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const close = () => {
+    setError(null);
+    onClose();
+  };
+  const confirm = async () => {
+    if (!source) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await apiSend("DELETE", `/api/hosts/${hostId}/facts/${encodeURIComponent(source)}`);
+      onDeleted();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog open={source !== null} onClose={busy ? undefined : close}>
+      <DialogTitle>Remove {source}?</DialogTitle>
+      <DialogContent>
+        <DialogContentText>
+          The <strong>{source}</strong> facts document is removed from{" "}
+          <strong>{hostname ?? hostId}</strong>. Groups whose selectors read it are re-evaluated
+          for this host. Importing the file again restores it.
+        </DialogContentText>
+        {error && (
+          <Alert severity="error" sx={{ mt: 1 }}>
+            {error}
+          </Alert>
+        )}
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={close} disabled={busy}>
+          Cancel
+        </Button>
+        <Button color="error" variant="contained" onClick={confirm} disabled={busy}>
+          {busy ? "Removing…" : "Remove"}
+        </Button>
+      </DialogActions>
+    </Dialog>
   );
 }

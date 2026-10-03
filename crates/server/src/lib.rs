@@ -12,6 +12,7 @@ pub mod csrf;
 pub mod desired_state;
 pub mod env_file;
 pub mod facts;
+pub mod facts_import;
 pub mod hosts;
 pub mod housekeeping;
 pub mod https;
@@ -232,6 +233,28 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hosts/:id/desired", get(hosts::desired))
         .route("/api/hosts/:id/facts", get(facts::host_facts))
         .route("/api/facts/catalog", get(facts::catalog))
+        // An import carries up to 10 000 documents in one body: these two routes get their
+        // own limit rather than raising axum's 2 MiB default for every JSON route.
+        .route(
+            "/api/facts/import/resolve",
+            post(facts_import::resolve).layer(axum::extract::DefaultBodyLimit::max(
+                facts_import::MAX_IMPORT_BODY_BYTES,
+            )),
+        )
+        .route(
+            "/api/facts/import",
+            post(facts_import::commit).layer(axum::extract::DefaultBodyLimit::max(
+                facts_import::MAX_IMPORT_BODY_BYTES,
+            )),
+        )
+        .route(
+            "/api/facts/sources/:source",
+            axum::routing::delete(facts_import::delete_source),
+        )
+        .route(
+            "/api/hosts/:id/facts/:source",
+            axum::routing::delete(facts_import::delete_host_source),
+        )
         .route(
             "/api/hosts/:id/revoke-certs",
             post(hosts::revoke_host_certs),

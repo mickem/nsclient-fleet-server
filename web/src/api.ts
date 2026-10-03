@@ -202,7 +202,106 @@ export type HostFacts = {
   size_bytes: number | null;
   /** Newest first. */
   changes: FactsChanges[];
+  /** Every other source's document for this host (imports: `import:cmdb`, …), sorted by
+   *  source. Absent from servers older than facts import. */
+  others?: SourceFacts[];
 };
+
+/** One non-agent facts document of a host. Imported sources have no agent to compare
+ *  with, so there is no status, reported hash or refusal. */
+export type SourceFacts = {
+  source: string;
+  facts: Record<string, unknown> | null;
+  unreadable: boolean;
+  facts_hash: string;
+  collected_at: string | null;
+  received_at: number;
+  size_bytes: number;
+  /** Newest first. */
+  changes: FactsChanges[];
+};
+
+// --- Facts import (POST /api/facts/import/resolve, POST /api/facts/import) -------------
+
+/** How one key column is matched against a host. */
+export type ImportKeyTarget =
+  | { kind: "host"; field: "id" | "hostname" }
+  /** Any tag key; manual and agent tags both match. */
+  | { kind: "tag"; key: string }
+  /** A selector path into any source's document; scalar values only (a list matches on
+   *  each element). */
+  | { kind: "fact"; source: string; path: string };
+
+/** Applied to both sides of every key comparison. */
+export type ImportNormalize = {
+  trim: boolean;
+  case_insensitive: boolean;
+  /** Compare only the part before the first `.`. */
+  short_hostname: boolean;
+};
+
+export type ImportRow = {
+  /** Raw cell text, positional with `ImportRequest.keys`. */
+  keys: string[];
+  facts: Record<string, unknown>;
+  /** Explicit host, skipping matching. */
+  host_id?: string;
+};
+
+export type ImportRequest = {
+  /** Stored as source `import:<name>`. */
+  name: string;
+  keys: ImportKeyTarget[];
+  normalize?: ImportNormalize;
+  collected_at?: string;
+  rows: ImportRow[];
+  /** Row indices to drop. Applied in resolve too, before duplicate detection, so skipping
+   *  a row hands its host to the next row that matches it. */
+  skip?: number[];
+};
+
+/** The commit body: the resolve body plus what to drop and whether to prune. */
+export type ImportCommitRequest = ImportRequest & { skip: number[]; prune: boolean };
+
+export type ImportRowResult =
+  | { index: number; status: "matched"; host_id: string; hostname: string | null }
+  | { index: number; status: "ambiguous"; host_ids: string[] }
+  | { index: number; status: "unmatched" }
+  /** Resolves to the same host as row `of`. */
+  | { index: number; status: "duplicate"; host_id: string; of: number }
+  /** Listed in `skip`; not matched at all. */
+  | { index: number; status: "skipped" };
+
+export type ImportRowStatus = ImportRowResult["status"];
+
+export type ImportAbsentHost = {
+  id: string;
+  hostname: string | null;
+  /** The host currently holds a document under this import's source. */
+  has_source: boolean;
+};
+
+export type ImportResolveResponse = {
+  source: string;
+  rows: ImportRowResult[];
+  /** Tenant hosts no row resolved to; capped (see `absent_total`). */
+  absent: ImportAbsentHost[];
+  absent_total: number;
+  stats: Record<ImportRowStatus, number>;
+};
+
+export type ImportCommitResponse = {
+  source: string;
+  stored: number;
+  unchanged: number;
+  skipped: number;
+  pruned: number;
+  /** Rows whose host was deleted while the import ran. Absent from older servers. */
+  failed?: number;
+};
+
+/** The 409 body of a commit with rows that no longer resolve cleanly. */
+export type ImportConflict = { error: string; rows: ImportRowResult[] };
 
 export type CreateHostResponse = {
   host_id: string;

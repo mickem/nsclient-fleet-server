@@ -18,8 +18,18 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
+import DeleteIcon from "@mui/icons-material/Delete";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
-import { FactChange, FactsChanges, FactsStatus, fmtAgo, fmtBytes, fmtTime, HostFacts } from "./api";
+import {
+  FactChange,
+  FactsChanges,
+  FactsStatus,
+  fmtAgo,
+  fmtBytes,
+  fmtTime,
+  HostFacts,
+  SourceFacts,
+} from "./api";
 
 // The host's inventory ("facts"), as its agent last uploaded it. The document is generic:
 // sections of scalars, lists of records (each with an `id`), and plain string lists. It is
@@ -423,6 +433,77 @@ export function InventoryCard({
             )}
           </>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** History of one document, collapsed until asked for. */
+function History({ history }: { history: FactsChanges[] }) {
+  const [show, setShow] = useState(false);
+  if (history.length === 0) return null;
+  return (
+    <Box sx={{ mt: 2 }}>
+      <Stack direction="row" alignItems="center" spacing={1}>
+        <Typography variant="h6">Recent changes</Typography>
+        <Button size="small" onClick={() => setShow((v) => !v)}>
+          {show ? "Hide" : `Show ${history.length}`}
+        </Button>
+      </Stack>
+      {show && history.map((e) => <ChangeEntry key={e.id} entry={e} />)}
+    </Box>
+  );
+}
+
+/** A facts document from a source other than the agent — an import such as
+ *  `import:cmdb`. Rendered like the agent's inventory, without the agent status (there is
+ *  no agent to compare with). `onDelete`, when given, offers removing the document. */
+export function SourceFactsCard({ doc, onDelete }: { doc: SourceFacts; onDelete?: () => void }) {
+  const keys = doc.facts ? Object.keys(doc.facts).sort() : [];
+  // An imported document is often flat (`owner`, `site`, …): its top-level values go in
+  // one table, and only what nests gets a section of its own.
+  const values: [string, unknown][] = [];
+  const sets: string[] = [];
+  for (const k of keys) {
+    const v = doc.facts![k];
+    if (isObj(v) || isRecordList(v)) sets.push(k);
+    else values.push([k, Array.isArray(v) && v.length === 0 ? "—" : v]);
+  }
+  return (
+    <Card variant="outlined">
+      <CardContent>
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+          <Typography variant="h5" sx={{ flexGrow: 1, fontFamily: "monospace" }}>
+            {doc.source}
+          </Typography>
+          {onDelete && (
+            <Button size="small" color="error" startIcon={<DeleteIcon />} onClick={onDelete}>
+              Remove
+            </Button>
+          )}
+        </Stack>
+        <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1.5 }}>
+          {doc.collected_at && <>collected {fmtCollected(doc.collected_at)} · </>}
+          received {fmtAgo(doc.received_at)} · {fmtBytes(doc.size_bytes)}
+        </Typography>
+        {doc.unreadable ? (
+          <Alert severity="warning">
+            A document is stored under this source but could not be read back. Import it again
+            to replace it.
+          </Alert>
+        ) : keys.length === 0 ? (
+          <Typography variant="body2" color="text.secondary">
+            The document is empty.
+          </Typography>
+        ) : (
+          <Box>
+            {values.length > 0 && <ValuesTable rows={values} />}
+            {sets.map((name) => (
+              <FactSetSection key={name} name={name} value={doc.facts![name]} />
+            ))}
+          </Box>
+        )}
+        <History history={doc.changes} />
       </CardContent>
     </Card>
   );
