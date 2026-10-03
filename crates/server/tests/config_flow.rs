@@ -1199,3 +1199,79 @@ async fn bulk_tags_and_bulk_delete() {
             .unwrap();
     assert_eq!(audited, 2, "one audit record per deleted host");
 }
+
+/// The override reads back as it was written, so it can be edited instead of retyped; the
+/// read is audited without the content; and a patch that is not an object — which would
+/// replace the host's whole configuration — is refused.
+#[tokio::test]
+async fn an_override_reads_back_and_the_read_is_audited() {
+    let s = start().await;
+    signup_login(&s, "eta", "eli@example.com").await;
+    let (_agent, host_id) = enroll_a_host(&s).await;
+    let url = format!("{}/api/hosts/{}/override", s.base_url, host_id);
+
+    let r = s.cookie_jar.get(&url).send().await.unwrap();
+    assert_eq!(r.status(), 404, "nothing to read yet");
+
+    let patch = serde_json::json!({
+        "settings": { "mysql": { "password": "p4ss" }, "fleet demo": { "greeting": null } }
+    });
+    let r = s
+        .cookie_jar
+        .put(&url)
+        .json(&serde_json::json!({ "patch": patch }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+
+    let r = s.cookie_jar.get(&url).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(
+        body["patch"], patch,
+        "nulls (removals) survive the round trip"
+    );
+
+    let audit: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT action, metadata_json FROM audit_log WHERE action LIKE 'host.override.%' ORDER BY id",
+    )
+    .fetch_all(&s.db.read)
+    .await
+    .unwrap();
+    assert!(audit.iter().any(|(a, _)| a == "host.override.read"));
+    assert!(
+        audit
+            .iter()
+            .all(|(_, m)| !m.as_deref().unwrap_or("").contains("p4ss")),
+        "the audit log never carries override content: {audit:?}"
+    );
+
+    for bad in [
+        serde_json::json!("oops"),
+        serde_json::json!([1]),
+        serde_json::Value::Null,
+    ] {
+        let r = s
+            .cookie_jar
+            .put(&url)
+            .json(&serde_json::json!({ "patch": bad }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400, "patch {bad} must be refused");
+    }
+    let body: serde_json::Value = s
+        .cookie_jar
+        .get(&url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        body["patch"], patch,
+        "a refused write leaves the override alone"
+    );
+}

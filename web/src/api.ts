@@ -99,6 +99,9 @@ export type HostView = {
    *  render that as unknown, never as "no". The agent sends only this fact; no local
    *  configuration is ever uploaded. */
   local_config_present: boolean | null;
+  /** Whether the host's agent applies the host override after its bundles (so the
+   *  override wins). `false`: an older agent, on which bundles win; `null`: not reported. */
+  host_override_last: boolean | null;
   created_at: number;
   /** All tags, manual and agent-reported. Present on the list view too, so the hosts page
    *  can filter and bulk-select by tag without a request per row. */
@@ -123,6 +126,9 @@ export type DesiredBundleView = {
   priority: number;
   format: BundleFormat;
 };
+
+/** `GET /api/hosts/:id/override` — config writers only. `null` leaves remove a key. */
+export type HostOverrideView = { patch: Record<string, unknown>; priority: number };
 
 export type DesiredStateView = {
   state_hash: string;

@@ -264,6 +264,7 @@ impl<'a> HostRepo<'a> {
             current_state_hash: None,
             bootstrap_expires_at: None,
             local_config_present: None,
+            host_override_last: None,
             created_at: now,
         })
     }
@@ -271,7 +272,7 @@ impl<'a> HostRepo<'a> {
     pub async fn get(&self, tenant_id: i64, host_id: &str) -> Result<Option<Host>> {
         let row = sqlx::query(
             "SELECT id, tenant_id, hostname, os, enrolled_at, last_seen_at, current_state_hash,
-                    bootstrap_expires_at, local_config_present, created_at
+                    bootstrap_expires_at, local_config_present, host_override_last, created_at
              FROM hosts WHERE tenant_id = ? AND id = ?",
         )
         .bind(tenant_id)
@@ -285,7 +286,7 @@ impl<'a> HostRepo<'a> {
     pub async fn list(&self, tenant_id: i64) -> Result<Vec<Host>> {
         let rows = sqlx::query(
             "SELECT id, tenant_id, hostname, os, enrolled_at, last_seen_at, current_state_hash,
-                    bootstrap_expires_at, local_config_present, created_at
+                    bootstrap_expires_at, local_config_present, host_override_last, created_at
              FROM hosts WHERE tenant_id = ? ORDER BY created_at DESC",
         )
         .bind(tenant_id)
@@ -340,6 +341,7 @@ impl<'a> HostRepo<'a> {
             current_state_hash: None,
             bootstrap_expires_at: Some(bootstrap_expires_at),
             local_config_present: None,
+            host_override_last: None,
             created_at: now,
         })
     }
@@ -584,6 +586,29 @@ impl<'a> HostRepo<'a> {
         .bind(tenant_id)
         .bind(host_id)
         .bind(i64::from(present))
+        .execute(&self.db.write)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Record whether the host's agent applies the host override last. Same shape as
+    /// [`Self::set_local_config_present`]: true iff the stored answer changed, and an
+    /// unchanged answer is not a write.
+    pub async fn set_host_override_last(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        last: bool,
+    ) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE hosts SET host_override_last = ?
+              WHERE tenant_id = ? AND id = ?
+                AND (host_override_last IS NULL OR host_override_last != ?)",
+        )
+        .bind(i64::from(last))
+        .bind(tenant_id)
+        .bind(host_id)
+        .bind(i64::from(last))
         .execute(&self.db.write)
         .await?;
         Ok(res.rows_affected() > 0)
@@ -1947,6 +1972,9 @@ fn map_host(r: sqlx::sqlite::SqliteRow) -> Host {
         bootstrap_expires_at: r.get("bootstrap_expires_at"),
         local_config_present: r
             .get::<Option<i64>, _>("local_config_present")
+            .map(|v| v != 0),
+        host_override_last: r
+            .get::<Option<i64>, _>("host_override_last")
             .map(|v| v != 0),
         created_at: r.get("created_at"),
     }

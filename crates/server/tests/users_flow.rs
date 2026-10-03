@@ -252,6 +252,34 @@ async fn the_permission_matrix_is_enforced_by_the_server() {
     .await;
     assert_eq!(code, 403, "add_hosts must not delete the host it created");
 
+    // A host override reads back only for those who may write one: it is where per-host
+    // credentials live, and reading it is not "reading the fleet".
+    let code = status(
+        owner
+            .put(format!("{}/api/hosts/{}/override", s.base_url, host_id))
+            .json(&serde_json::json!({ "patch": { "settings": { "x": { "secret": "s3" } } } }))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(code, 204);
+    for (name, c, want) in [
+        ("owner", &owner, 200),
+        ("admin", &admin, 200),
+        ("add_hosts", &adder, 403),
+        ("view_only", &viewer, 403),
+    ] {
+        let code = status(
+            c.get(format!("{}/api/hosts/{}/override", s.base_url, host_id))
+                .send()
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(code, want, "{name} reading a host override");
+    }
+
     // User management: admins only, and the listing is not readable by anyone else.
     for (name, c, want) in [
         ("owner", &owner, 200),

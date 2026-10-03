@@ -246,7 +246,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/api/hosts/:id/override",
-            axum::routing::put(config_api::put_override),
+            axum::routing::put(config_api::put_override).get(config_api::get_override),
         )
         .route(
             "/api/hosts/:id/override",

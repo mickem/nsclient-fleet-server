@@ -412,6 +412,11 @@ pub async fn put_override(
     if !host_belongs_to(&state, who.tenant_id, &host_id).await {
         return (StatusCode::NOT_FOUND, "host not found").into_response();
     }
+    // A merge patch that is not an object replaces the whole document it is applied to:
+    // a stray string here would wipe every setting the host's bundles give it.
+    if !body.patch.is_object() {
+        return (StatusCode::BAD_REQUEST, "patch must be a JSON object").into_response();
+    }
     let patch_str = match serde_json::to_string(&body.patch) {
         Ok(s) => s,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid patch").into_response(),
@@ -452,6 +457,71 @@ pub async fn put_override(
     )
     .await;
     StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Serialize)]
+pub struct OverrideView {
+    pub patch: serde_json::Value,
+    pub priority: i64,
+}
+
+/// `GET /api/hosts/:id/override` — the override itself, so it can be edited rather than
+/// retyped. Overrides are where per-host credentials live, so this is for those who may
+/// write them anyway, and every read is audited (without the content). Elsewhere — the
+/// host view, the audit log — only the fact that an override exists is ever shown.
+pub async fn get_override(
+    State(state): State<AppState>,
+    who: AuthedUser,
+    Path(host_id): Path<String>,
+) -> Response {
+    if !who.role.can_write_config() {
+        return crate::auth::forbidden("read host overrides");
+    }
+    if !host_belongs_to(&state, who.tenant_id, &host_id).await {
+        return (StatusCode::NOT_FOUND, "host not found").into_response();
+    }
+    let stored = match HostOverridesRepo::new(&state.db)
+        .get(who.tenant_id, &host_id)
+        .await
+    {
+        Ok(Some(o)) => o,
+        Ok(None) => return (StatusCode::NOT_FOUND, "no override").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "override get failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+        }
+    };
+    let patch = state
+        .config
+        .master_key
+        .decrypt(
+            fleet_core::aead::Purpose::HostOverride {
+                tenant_id: who.tenant_id,
+                host_id: &host_id,
+            },
+            &stored.patch_encrypted,
+        )
+        .ok()
+        .and_then(|plain| serde_json::from_slice::<serde_json::Value>(&plain).ok());
+    let Some(patch) = patch else {
+        tracing::error!(%host_id, "stored override could not be decrypted or parsed");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "override unreadable").into_response();
+    };
+    crate::audit::record(
+        &state,
+        who.tenant_id,
+        Some(who.user_id),
+        "host.override.read",
+        "host",
+        &host_id,
+        None,
+    )
+    .await;
+    Json(OverrideView {
+        patch,
+        priority: stored.priority,
+    })
+    .into_response()
 }
 
 pub async fn delete_override(

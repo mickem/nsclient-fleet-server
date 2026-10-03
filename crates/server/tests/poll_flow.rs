@@ -509,3 +509,57 @@ async fn cache_speedup_profile() {
         uncached.as_secs_f64() / cached.as_secs_f64(),
     );
 }
+
+/// Whether the host's agent lets the host override win over its bundles. Unknown until a
+/// report arrives; then silence is a real "no" — every agent older than the field merged the
+/// override first — and the field turns it into a "yes".
+#[tokio::test]
+async fn a_host_reports_whether_its_override_outranks_bundles() {
+    let s = start().await;
+    signup_login(&s, "theta", "tess@example.com").await;
+    let mut agent = enroll_a_host(&s).await;
+
+    let published = || async {
+        let hosts: serde_json::Value = s
+            .cookie_jar
+            .get(format!("{}/api/hosts", s.base_url))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        hosts[0]["host_override_last"].clone()
+    };
+
+    assert_eq!(
+        published().await,
+        serde_json::Value::Null,
+        "unknown before any report"
+    );
+
+    agent
+        .report_state(Some(TEST_HASH), BTreeMap::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        published().await,
+        serde_json::json!(false),
+        "an older agent: bundles win"
+    );
+
+    agent.host_override_last = true;
+    agent
+        .report_state(Some(TEST_HASH), BTreeMap::new())
+        .await
+        .unwrap();
+    assert_eq!(published().await, serde_json::json!(true));
+
+    // A downgrade is seen too.
+    agent.host_override_last = false;
+    agent
+        .report_state(Some(TEST_HASH), BTreeMap::new())
+        .await
+        .unwrap();
+    assert_eq!(published().await, serde_json::json!(false));
+}
