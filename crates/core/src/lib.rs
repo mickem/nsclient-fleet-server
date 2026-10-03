@@ -1,4 +1,5 @@
 pub mod aead;
+pub mod alert;
 pub mod api_key;
 pub mod bundlesig;
 pub mod digest;

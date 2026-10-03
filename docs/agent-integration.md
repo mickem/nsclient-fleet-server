@@ -20,6 +20,9 @@ loop:
                                         local_config_present, facts_hash }
   X-Facts-Hash on either answer ≠ <f> → POST /agent/v1/facts   (see §3)
   POST /agent/v1/renew   (when cert has < 14 days left)
+
+independently, when a check returns WARNING or CRITICAL:
+  POST /agent/v1/alert-context { alerts: [ { command, status, lines, context, ... } ] }
 ```
 
 The server never pushes. Every change an operator makes (tags, groups, assignments,
@@ -300,8 +303,118 @@ or whether the host has nothing enabled. Each stored document is compared with t
 one, matching list records by their `id`, and the differences are kept as a bounded history:
 the last 100 entries per host and source, one per stored document, each listing up to 200
 changes and counting any beyond that.
+## 4. Alert context
 
-## 4. Certificate lifecycle
+Optional, and independent of everything above: when a check returns **WARNING** or
+**CRITICAL**, the agent may post what it knows about that failure. The server stores it and,
+where a tenant has configured a model provider, has a language model write a plain-language
+description of the problem for whoever picks up the alert.
+
+```
+POST {mtls_url}/agent/v1/alert-context
+{
+  "alerts": [
+    {
+      "command": "check_drivesize",
+      "alias": "disk_c",
+      "arguments": ["drive=C:", "critical=used>90%"],
+      "source": "scheduler",
+      "status": "critical",
+      "lines": [
+        {
+          "message": "C:\\ used 95.2% > 90%",
+          "perf": [
+            { "alias": "C:\\ used", "value": 95.2, "unit": "%",
+              "warning": 80, "critical": 90, "minimum": 0, "maximum": 100 }
+          ]
+        }
+      ],
+      "context": [
+        {
+          "name": "largest-directories",
+          "command": "du -sh C:\\*",
+          "output": "12G  C:\\inetpub\\logs\n3G  C:\\Windows\\Temp",
+          "truncated": false
+        }
+      ],
+      "host_facts": { "os": "Windows Server 2022" },
+      "observed_at": 1758240000
+    }
+  ]
+}
+```
+
+Only `command`, `status` and the `alerts` envelope are required. `status` is `warning` or
+`critical` and nothing else — an OK result has no error to describe, and an UNKNOWN one means
+the check did not run, which belongs in the state report's `errors`.
+
+The response says what happened to the batch, so a malformed agent build is visible from the
+agent's own log rather than only from ours:
+
+```
+{ "accepted": 3, "rejected": 0 }
+```
+
+### 4.1 What to put in `context`
+
+This is the part that earns the feature. A check result says *that* the disk is full; the
+context commands say *why*, and they are the difference between a description worth reading
+and a restatement of the check's own message. Run the commands an engineer would run next —
+the largest directories under the full drive, the top processes by CPU, the tail of the
+service's log, the last few entries of the relevant event log — and send what they printed.
+
+Keep them cheap and bounded: they run on a host that is already in trouble, and a context
+command that is itself expensive makes the situation worse. Set `error` instead of `output`
+when the context command failed, so a reader does not mistake an error message for evidence.
+
+### 4.2 Batching, and why it matters
+
+Alert reports come out of the **same per-host request budget** as polling and state reports
+(10/minute on the free tier — see §1.1). A host whose checks are mostly failing can easily
+produce more alerts than that in a minute, so send them **in one request**, not one at a
+time. Up to 32 alerts per report, 512 KiB per body.
+
+### 4.3 What the server does with a repeat
+
+The server identifies a *problem*, not an execution: `(command, arguments, status)` is
+hashed into a fingerprint, and a report matching one already on file for that host updates
+it in place — newest evidence, `last_seen_at` refreshed, `occurrences` incremented — rather
+than adding a row.
+
+The practical consequence for an agent: **just send it every time.** There is no need to
+remember what was already reported, to de-duplicate locally, or to rate-limit per check. A
+disk that stays full for a week is one row with `occurrences` in the thousands, and it costs
+exactly one model call, not thousands. Note that a check crossing from `warning` to
+`critical` is a *different* fingerprint, and is treated as the new problem it is.
+
+### 4.4 Limits
+
+Everything is clamped rather than refused, so an over-long field costs detail and not the
+alert. The exceptions are an empty `command` and a non-finite `value`, which drop that one
+alert from the batch and are counted in `rejected`.
+
+| field | limit |
+|---|---|
+| alerts per report | 32 |
+| request body | 512 KiB |
+| `arguments` | 32, 512 chars each |
+| `lines` | 20, 2048 chars each |
+| `perf` per line | 32 |
+| `context` | 8 items, 8192 chars of `output` each |
+| `host_facts` | 32 entries, 256 chars per value |
+| alerts retained per host | 200 (oldest dropped) |
+| retention | 30 days since last seen |
+
+### 4.5 What happens to it
+
+The document is encrypted at rest under the server's master key, bound to the tenant and
+host that sent it. Where the tenant has enabled enrichment, it is rendered into a prompt —
+with obvious credentials stripped, and the evidence fenced and labelled as untrusted data —
+and a model is asked to describe the problem. See
+[LLM enrichment](llm-enrichment.md) for the provider options and the privacy posture. An
+agent needs to know none of this; it is the same POST either way.
+
+## 5. Certificate lifecycle
 
 Client certs live 90 days. When the current cert is within **14 days** of expiry:
 
@@ -328,7 +441,7 @@ bootstrap token ("Add host") and the agent re-enrolls.
 refreshes `last_seen_at`, and returns `403` if the cert was revoked) — useful at
 startup before entering the loop.
 
-## 5. Error handling summary
+## 6. Error handling summary
 
 | Response | Meaning | Agent behavior |
 |---|---|---|
