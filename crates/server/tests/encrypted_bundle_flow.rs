@@ -448,6 +448,16 @@ async fn rename_keeps_assignments_and_reseals_encrypted_versions() {
         .unwrap();
     assert_eq!(t.status(), 204);
 
+    // The host is in sync before the rename: polling with its current hash is a 304.
+    s.agent_limits.forget_last_poll(&host_id);
+    let before = agent.fetch_desired_state(None).await.unwrap().unwrap();
+    s.agent_limits.forget_last_poll(&host_id);
+    assert!(agent
+        .fetch_desired_state(Some(&before.state_hash))
+        .await
+        .unwrap()
+        .is_none());
+
     // Refusals change nothing: an encrypted version without new ciphertext, a name in use,
     // a name that does not exist, a part for a version that is not encrypted.
     let r = rename_bundle(&s, "app", "web", vec![]).await;
@@ -485,12 +495,22 @@ async fn rename_keeps_assignments_and_reseals_encrypted_versions() {
     let renamed: Vec<serde_json::Value> = r.json().await.unwrap();
     assert_eq!(renamed.len(), 2);
     assert!(renamed.iter().all(|b| b["name"] == "web"));
-    let new_enc_id = renamed.iter().find(|b| b["version"] == "2").unwrap()["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert_ne!(new_enc_id, enc_id, "re-sealed bytes get a new id");
-    assert!(renamed.iter().any(|b| b["id"] == plain_id.as_str()));
+    let id_of = |version: &str| {
+        renamed.iter().find(|b| b["version"] == version).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let (new_plain_id, new_enc_id) = (id_of("1"), id_of("2"));
+    // Every version gets a new id, plain ones included: the desired-state hash covers ids,
+    // not names, so that is what tells hosts already in sync that something changed.
+    assert_ne!(new_plain_id, plain_id);
+    assert_ne!(new_enc_id, enc_id);
+    assert_eq!(
+        renamed.iter().find(|b| b["version"] == "1").unwrap()["sha256"],
+        plain["sha256"],
+        "a plain version keeps its bytes"
+    );
 
     // Nothing is left under the old name, and the replaced ciphertext is gone from disk.
     let list: Vec<serde_json::Value> = s
@@ -504,8 +524,12 @@ async fn rename_keeps_assignments_and_reseals_encrypted_versions() {
         .unwrap();
     assert!(list.iter().all(|b| b["name"] != "app"));
     let dir = s._tempdir.path().join("bundles").join("1");
-    assert!(!dir.join(format!("{enc_id}.zip")).exists());
-    assert!(dir.join(format!("{new_enc_id}.zip")).exists());
+    for old in [&plain_id, &enc_id] {
+        assert!(!dir.join(format!("{old}.zip")).exists());
+    }
+    for new in [&new_plain_id, &new_enc_id] {
+        assert!(dir.join(format!("{new}.zip")).exists());
+    }
 
     // The group still carries both versions, with their priorities.
     let carried: Vec<serde_json::Value> = s
@@ -527,14 +551,20 @@ async fn rename_keeps_assignments_and_reseals_encrypted_versions() {
         })
         .collect();
     ids.sort();
-    let mut want = vec![(plain_id.clone(), 100), (new_enc_id.clone(), 200)];
+    let mut want = vec![(new_plain_id.clone(), 100), (new_enc_id.clone(), 200)];
     want.sort();
     assert_eq!(ids, want);
 
-    // The agent sees the new name, the signatures verify against it, and the re-sealed
-    // version opens under it.
+    // The host that was in sync is told something changed — polling with its old hash is
+    // no longer a 304 — and sees the new name; the signatures verify against it, and the
+    // re-sealed version opens under it.
     s.agent_limits.forget_last_poll(&host_id);
-    let ds = agent.fetch_desired_state(None).await.unwrap().unwrap();
+    let ds = agent
+        .fetch_desired_state(Some(&before.state_hash))
+        .await
+        .unwrap()
+        .expect("a rename must change the desired-state hash");
+    assert_ne!(ds.state_hash, before.state_hash);
     assert_eq!(ds.bundles.len(), 2);
     agent.bundle_encryption_keys = vec![key.to_b64()];
     for b in &ds.bundles {
@@ -553,4 +583,66 @@ async fn rename_keeps_assignments_and_reseals_encrypted_versions() {
             assert_eq!(bytes, plain_zip);
         }
     }
+}
+
+/// A bundle whose versions are all plain: the case where renaming in place left the
+/// desired-state hash untouched (it covers ids, not names), so a host already in sync kept
+/// getting 304s and never heard of the new name.
+#[tokio::test]
+async fn renaming_a_plain_bundle_reaches_hosts_already_in_sync() {
+    let s = start().await;
+    signup_login(&s, "acme", "alice@example.com").await;
+    let (agent, host_id) = enroll_a_host(&s).await;
+
+    let r = upload_bundle(&s, "base", "1", None, b"PK\x03\x04-base".to_vec()).await;
+    assert_eq!(r.status(), 200);
+    let bundle: serde_json::Value = r.json().await.unwrap();
+    let g: serde_json::Value = s
+        .cookie_jar
+        .post(format!("{}/api/groups", s.base_url))
+        .json(&serde_json::json!({
+            "name": "all",
+            "selector": { "clauses": [{"op": "eq", "key": "role", "value": "db"}] }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let a = s
+        .cookie_jar
+        .post(format!(
+            "{}/api/groups/{}/bundles",
+            s.base_url,
+            g["id"].as_str().unwrap()
+        ))
+        .json(&serde_json::json!({"bundle_id": bundle["id"], "priority": 100}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(a.status(), 204);
+    let t = s
+        .cookie_jar
+        .put(format!("{}/api/hosts/{}/tags/role", s.base_url, host_id))
+        .json(&serde_json::json!({"value": "db"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(t.status(), 204);
+
+    s.agent_limits.forget_last_poll(&host_id);
+    let before = agent.fetch_desired_state(None).await.unwrap().unwrap();
+    assert_eq!(before.bundles[0]["name"], "base");
+
+    let r = rename_bundle(&s, "base", "baseline", vec![]).await;
+    assert_eq!(r.status(), 200, "{:?}", r.text().await);
+
+    s.agent_limits.forget_last_poll(&host_id);
+    let after = agent
+        .fetch_desired_state(Some(&before.state_hash))
+        .await
+        .unwrap()
+        .expect("a host in sync before the rename must be sent the renamed state, not a 304");
+    assert_eq!(after.bundles[0]["name"], "baseline");
 }

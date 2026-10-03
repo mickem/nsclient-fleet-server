@@ -17,8 +17,8 @@ use ed25519_dalek::{Signer, SigningKey};
 use fleet_core::digest::sha256_hex;
 use fleet_core::encbundle;
 use fleet_storage::{
-    BundleAssignmentsRepo, BundlesRepo, GroupsRepo, RenamedBundle, ResealedBundle,
-    TenantBundleKeysRepo, TenantRepo, TenantSecretsRepo,
+    BundleAssignmentsRepo, BundlesRepo, GroupsRepo, RenamedBundle, TenantBundleKeysRepo,
+    TenantRepo, TenantSecretsRepo,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -784,10 +784,11 @@ const SEALED_PART_PREFIX: &str = "sealed:";
 ///     version renamed without new ciphertext would no longer open on any agent — and only
 ///     the browser holds the key to produce it.
 ///
-/// Plain versions keep their id and bytes; only the name and the signature over it change.
-/// The zip's bundle.toml keeps the name it was built with: agents never read it, and the
-/// next edit writes a fresh one. Encrypted versions get a new id and their group
-/// assignments follow, so every group carries the same versions as before.
+/// Every version moves to a new id with its group assignments, so every group carries the
+/// same versions as before — and every host's desired-state hash changes, which is what
+/// gets the new name to hosts that are already in sync (the hash covers bundle ids, not
+/// names). A plain version keeps its bytes: the zip's bundle.toml keeps the name it was
+/// built with, which agents never read and the next edit rewrites.
 /// All or nothing: a rename that would leave some versions behind is refused.
 pub async fn rename(
     State(state): State<AppState>,
@@ -881,50 +882,45 @@ pub async fn rename(
     let limits = fleet_core::tier::effective(&tenant.tier, tenant.tier_overrides_json.as_deref());
     let max = (limits.max_bundle_mb as usize) * 1024 * 1024;
 
+    // Each version's bytes under its new name: the stored zip for a plain version, the
+    // browser's new ciphertext for an encrypted one. Everything after that is one path.
     let mut renamed = Vec::new();
-    let mut resealed = Vec::new();
+    let mut fresh: Vec<Vec<u8>> = Vec::new();
     for b in &versions {
-        if b.format == encbundle::FORMAT_PLAIN {
-            let descriptor = fleet_core::bundlesig::BundleDescriptor {
-                tenant_id: who.tenant_id,
-                bundle_id: &b.id,
-                name: &to,
-                version: &b.version,
-                format: &b.format,
-                sha256_hex: &b.sha256,
-            };
-            match sign_with_tenant_key(&state, who.tenant_id, &descriptor).await {
-                Ok(signature) => renamed.push(RenamedBundle {
-                    id: b.id.clone(),
-                    signature,
-                }),
+        let (bytes, key_fingerprint) = if b.format == encbundle::FORMAT_PLAIN {
+            match state.bundle_store.get(who.tenant_id, &b.id).await {
+                Ok(bytes) => (bytes, None),
                 Err(e) => {
-                    tracing::error!(error = %e, "bundle sign failed");
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "sign failed").into_response();
+                    tracing::error!(error = %e, bundle_id = %b.id, "bundle bytes missing");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "bundle bytes missing")
+                        .into_response();
                 }
             }
-            continue;
-        }
-        let bytes = &sealed[&b.id];
-        if bytes.len() > max {
-            return (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!("bundle exceeds tier limit ({} MB)", limits.max_bundle_mb),
-            )
-                .into_response();
-        }
-        let fingerprint = match encbundle::parse_header(bytes) {
-            Ok(h) => h.fingerprint_hex(),
-            Err(e) => {
+        } else {
+            let bytes = sealed.remove(&b.id).unwrap_or_default();
+            if bytes.len() > max {
                 return (
-                    StatusCode::BAD_REQUEST,
-                    format!("version {}: not a valid encrypted bundle: {e}", b.version),
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    format!("bundle exceeds tier limit ({} MB)", limits.max_bundle_mb),
                 )
                     .into_response();
             }
+            match encbundle::parse_header(&bytes) {
+                Ok(h) => {
+                    let fingerprint = h.fingerprint_hex();
+                    (bytes, Some(fingerprint))
+                }
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("version {}: not a valid encrypted bundle: {e}", b.version),
+                    )
+                        .into_response();
+                }
+            }
         };
         let new_id = fleet_core::bundlesig::new_bundle_id();
-        let sha = sha256_hex(bytes);
+        let sha = sha256_hex(&bytes);
         let descriptor = fleet_core::bundlesig::BundleDescriptor {
             tenant_id: who.tenant_id,
             bundle_id: &new_id,
@@ -940,23 +936,24 @@ pub async fn rename(
                 return (StatusCode::INTERNAL_SERVER_ERROR, "sign failed").into_response();
             }
         };
-        resealed.push(ResealedBundle {
+        renamed.push(RenamedBundle {
             old_id: b.id.clone(),
             new_id,
             sha256: sha,
             size_bytes: bytes.len() as i64,
             signature,
-            key_fingerprint: Some(fingerprint),
+            key_fingerprint,
         });
+        fresh.push(bytes);
     }
 
     // New bytes first, rows second: until the transaction commits nothing points at them,
     // and if it does not they are removed again.
-    let new_ids: Vec<String> = resealed.iter().map(|r| r.new_id.clone()).collect();
-    for r in &resealed {
+    let new_ids: Vec<String> = renamed.iter().map(|r| r.new_id.clone()).collect();
+    for (r, bytes) in renamed.iter().zip(&fresh) {
         if let Err(e) = state
             .bundle_store
-            .put(who.tenant_id, &r.new_id, &sealed[&r.old_id])
+            .put(who.tenant_id, &r.new_id, bytes)
             .await
         {
             tracing::error!(error = %e, "bundle store put failed");
@@ -965,10 +962,7 @@ pub async fn rename(
         }
     }
 
-    match bundles
-        .rename(who.tenant_id, &from, &to, &renamed, &resealed)
-        .await
-    {
+    match bundles.rename(who.tenant_id, &from, &to, &renamed).await {
         Ok(true) => {}
         Ok(false) => {
             discard_bundle_bytes(&state, who.tenant_id, &new_ids).await;
@@ -985,9 +979,9 @@ pub async fn rename(
         }
     }
 
-    // The replaced ciphertext: after the commit, as for delete — an orphaned file is the
-    // direction to fail in.
-    for r in &resealed {
+    // The old bytes: after the commit, as for delete — an orphaned file is the direction
+    // to fail in.
+    for r in &renamed {
         if let Err(e) = state.bundle_store.delete(who.tenant_id, &r.old_id).await {
             tracing::error!(error = %e, bundle_id = %r.old_id, "bundle bytes could not be removed");
         }
