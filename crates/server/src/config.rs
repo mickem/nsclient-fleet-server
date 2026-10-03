@@ -204,10 +204,14 @@ impl Config {
             .filter(|s| !s.is_empty());
         match (&turnstile_secret, &turnstile_site_key) {
             (Some(_), None) => anyhow::bail!(
-                "TURNSTILE_SECRET is set but TURNSTILE_SITE_KEY is not. The browser needs the                  site key to render the widget that produces the token the secret verifies —                  without it every signup is refused. Set both, or neither."
+                "TURNSTILE_SECRET is set but TURNSTILE_SITE_KEY is not. The browser needs the \
+                 site key to render the widget that produces the token the secret verifies — \
+                 without it every signup is refused. Set both, or neither."
             ),
             (None, Some(_)) => anyhow::bail!(
-                "TURNSTILE_SITE_KEY is set but TURNSTILE_SECRET is not. The signup form would                  render a challenge whose answer nothing verifies, which is worse than no                  challenge because it looks protected. Set both, or neither."
+                "TURNSTILE_SITE_KEY is set but TURNSTILE_SECRET is not. The signup form would \
+                 render a challenge whose answer nothing verifies, which is worse than no \
+                 challenge because it looks protected. Set both, or neither."
             ),
             _ => {}
         }

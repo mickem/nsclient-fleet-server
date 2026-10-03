@@ -137,7 +137,8 @@ pub async fn ensure_on_prem_admin(db: &Db, cfg: &Config) -> anyhow::Result<()> {
     // every start that its working login would fail.
     if cfg.on_prem_admin_password.is_none() && cfg.on_prem_admin_password_hash.is_none() {
         tracing::warn!(
-            "ON_PREM=true but neither ON_PREM_ADMIN_PASSWORD nor ON_PREM_ADMIN_PASSWORD_HASH              is set — login will fail. Produce a hash with `nsclient-fleet --hash-password`."
+            "ON_PREM=true but neither ON_PREM_ADMIN_PASSWORD nor ON_PREM_ADMIN_PASSWORD_HASH \
+             is set — login will fail. Produce a hash with `nsclient-fleet --hash-password`."
         );
     }
 

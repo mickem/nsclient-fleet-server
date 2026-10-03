@@ -272,7 +272,9 @@ async fn serve(shutdown: Shutdown, env_file_vars: &[String]) -> anyhow::Result<(
     // operator will actually see rather than hiding it in the Turnstile constructor.
     if cfg.turnstile_secret.is_none() && !cfg.on_prem {
         tracing::warn!(
-            "TURNSTILE_SECRET and TURNSTILE_SITE_KEY are unset — self-service signup has no              bot challenge. Set both for any deployment reachable from the internet, or set              ON_PREM=true, or close signups from the platform console."
+            "TURNSTILE_SECRET and TURNSTILE_SITE_KEY are unset — self-service signup has no \
+             bot challenge. Set both for any deployment reachable from the internet, or set \
+             ON_PREM=true, or close signups from the platform console."
         );
     }
     let rate_limits = AuthRateLimits::new(cfg.daily_email_budget);
