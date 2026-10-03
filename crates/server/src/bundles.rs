@@ -14,13 +14,13 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use ed25519_dalek::pkcs8::DecodePrivateKey;
 use ed25519_dalek::{Signer, SigningKey};
+use fleet_core::digest::sha256_hex;
 use fleet_core::encbundle;
 use fleet_storage::{
     BundleAssignmentsRepo, BundlesRepo, GroupsRepo, TenantBundleKeysRepo, TenantRepo,
     TenantSecretsRepo,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use crate::auth::AuthedUser;
@@ -1119,15 +1119,6 @@ pub(crate) async fn sign_with_tenant_key(
     // first — one fewer step for an agent implementation to get wrong.
     let signature = signing_key.sign(&descriptor.to_signing_bytes());
     Ok(STANDARD.encode(signature.to_bytes()))
-}
-
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    let d = Sha256::digest(bytes);
-    let mut s = String::with_capacity(64);
-    for b in d.iter() {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
 }
 
 #[cfg(test)]

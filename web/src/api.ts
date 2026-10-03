@@ -130,6 +130,74 @@ export type DesiredStateView = {
   bundles: DesiredBundleView[];
 };
 
+/** How a host's stored inventory relates to what its agent holds. Mirrors `FactsStatus` in
+ *  `crates/server/src/facts.rs`. */
+export type FactsStatus =
+  /** The agent never sent a facts hash: a build without facts, or it has not polled since. */
+  | "not_reported"
+  /** The agent has no fact set enabled. */
+  | "nothing_enabled"
+  /** What is shown is what the agent holds. */
+  | "current"
+  /** The agent has an inventory we have not received yet; it follows its next poll. */
+  | "pending"
+  /** The agent has a newer inventory than the one shown; same. */
+  | "outdated"
+  /** The agent reports every fact set switched off; the inventory shown is cleared once it
+   *  has said so for a while (ten minutes), so a brief empty report does not wipe it. */
+  | "switched_off"
+  /** The agent's inventory was refused (too large, or malformed). The agent does not send
+   *  that inventory again; the next one follows when the host's inventory changes. */
+  | "refused";
+
+export type FactChange = {
+  /** Dotted, list records addressed by id: `software.installed[bash].version`. A selector
+   *  path, usable in a group as it stands. `""`: the whole document (a change beneath it
+   *  that has no path of its own). */
+  path: string;
+  kind: "added" | "removed" | "changed";
+  /** Present when short enough to show: a scalar, or a short list of scalars. */
+  old?: unknown;
+  new?: unknown;
+};
+
+export type FactsChanges = {
+  /** Stable id of the history entry. */
+  id: number;
+  /** The source whose document changed: `agent` today. */
+  source: string;
+  at: number;
+  facts_hash: string;
+  /** The first inventory this host sent — nothing to compare it with. */
+  initial: boolean;
+  changes: FactChange[];
+  /** Changes beyond those listed. */
+  truncated: number;
+};
+
+export type HostFacts = {
+  /** Which source this document is from. Only `agent` today; imported sources (spreadsheets,
+   *  files, cloud inventories) will sit beside it. */
+  source: string;
+  status: FactsStatus;
+  /** The stored document; null when the host never sent one, or when it is `unreadable`. */
+  facts: Record<string, unknown> | null;
+  /** A document is stored but could not be read back. */
+  unreadable: boolean;
+  facts_hash: string | null;
+  reported_hash: string | null;
+  /** Why nothing newer is coming, when the status is `refused`: the HTTP status of the
+   *  refusal (413 too large, 400 malformed) and when it was. */
+  refusal: { status: number; at: number } | null;
+  /** When the agent collected it, by the agent's clock (ISO 8601). */
+  collected_at: string | null;
+  /** When the server received it. */
+  received_at: number | null;
+  size_bytes: number | null;
+  /** Newest first. */
+  changes: FactsChanges[];
+};
+
 export type CreateHostResponse = {
   host_id: string;
   bootstrap_token: string;
@@ -147,11 +215,37 @@ export type CreateHostResponse = {
  *  own membership — and therefore which bundles they are served. */
 export type SourceFilter = "manual" | "agent" | "any";
 
+/** What a `fact` leaf checks — mirrors fleet_core::selector::FactTest (serde tag = "test"). */
+export type FactTest =
+  | { test: "exists" }
+  | { test: "eq"; value: string }
+  | { test: "in"; values: string[] }
+  | { test: "has"; value: string };
+
+/** The facts source the host uploads itself. A leaf on it is host-controlled. */
+export const AGENT_FACTS = "agent";
+
+/** What sits at a fact path. `mixed`: different kinds on different hosts, so no one test
+ *  suits every host. */
+export type FactPathKind = "scalar" | "list" | "map" | "mixed";
+/** One path of `GET /api/facts/catalog`: the paths the fleet's facts have, for the
+ *  selector pickers. */
+export type CatalogPath = {
+  path: string;
+  kind: FactPathKind;
+  hosts: number;
+  values: [string, number][];
+};
+export type FactsCatalog = {
+  sources: { source: string; hosts: number; paths: CatalogPath[]; truncated: boolean }[];
+};
+
 // Selector expression tree — mirrors fleet_core::selector::Expr (serde tag = "op").
 export type Expr =
   | { op: "eq"; key: string; value: string; source?: SourceFilter }
   | { op: "in"; key: string; values: string[]; source?: SourceFilter }
   | { op: "exists"; key: string; source?: SourceFilter }
+  | ({ op: "fact"; facts?: string; path: string } & FactTest)
   | { op: "not"; expr: Expr }
   | { op: "and"; exprs: Expr[] }
   | { op: "or"; exprs: Expr[] };
@@ -375,6 +469,8 @@ export function fmtAgo(ts: number | null | undefined): string {
 
 export function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  if (n < 1024 ** 4) return `${(n / 1024 ** 3).toFixed(1)} GB`;
+  return `${(n / 1024 ** 4).toFixed(1)} TB`;
 }

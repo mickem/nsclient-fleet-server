@@ -448,7 +448,7 @@ pub async fn revoke_host_certs(
     // The host is no longer enrolled, so its desired state is no longer anyone's to serve.
     state
         .desired_state_cache
-        .invalidate_host(who.tenant_id, &host_id);
+        .forget_host(who.tenant_id, &host_id);
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -515,7 +515,11 @@ pub async fn delete_host(
             // config_version covers configuration changes, not a host ceasing to exist.
             state
                 .desired_state_cache
-                .invalidate_host(who.tenant_id, &host_id);
+                .forget_host(who.tenant_id, &host_id);
+            // Its facts went with it: the catalog's host counts and values must too.
+            state
+                .facts_catalog_cache
+                .bump(who.tenant_id, crate::facts::CatalogChange::Removed);
             crate::audit::record(
                 &state,
                 who.tenant_id,
@@ -593,7 +597,7 @@ pub async fn bulk_delete(
             Ok(true) => {
                 state
                     .desired_state_cache
-                    .invalidate_host(who.tenant_id, &host_id);
+                    .forget_host(who.tenant_id, &host_id);
                 crate::audit::record(
                     &state,
                     who.tenant_id,
@@ -615,6 +619,13 @@ pub async fn bulk_delete(
                 return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
             }
         }
+    }
+    if deleted > 0 {
+        // Their facts went with them: the catalog's host counts and values must too. Once for
+        // the batch — every bump only marks the tenant's catalog for a rebuild.
+        state
+            .facts_catalog_cache
+            .bump(who.tenant_id, crate::facts::CatalogChange::Removed);
     }
     Json(BulkResult {
         updated: deleted,

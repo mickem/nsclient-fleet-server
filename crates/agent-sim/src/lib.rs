@@ -136,6 +136,28 @@ struct StateReportBody<'a> {
     /// on the wire — the server has to keep telling that apart from an explicit `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     local_config_present: Option<bool>,
+    /// Omitted when `None`: an agent without facts support.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    facts_hash: Option<&'a str>,
+}
+
+/// The `X-Facts-Hash` answer: `None` when the server sent no header (it does not do facts),
+/// otherwise the header's value — `none` or a hash.
+fn facts_header(res: &reqwest::Response) -> Option<String> {
+    res.headers()
+        .get("x-facts-hash")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+}
+
+/// A `/agent/v1/facts` body the way the agent builds it: the document spliced in verbatim
+/// and hashed as those exact bytes, members in sorted order.
+pub fn facts_upload_body(facts_json: &str, collected_at: &str) -> String {
+    format!(
+        "{{\"collected_at\":{},\"facts\":{facts_json},\"facts_hash\":\"{}\"}}",
+        serde_json::to_string(collected_at).expect("string serializes"),
+        fleet_core::facts::sha256_hex(facts_json.as_bytes())
+    )
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -202,18 +224,44 @@ impl EnrolledAgent {
         &self,
         current_hash: Option<&str>,
     ) -> Result<Option<DesiredState>> {
+        Ok(self.poll(current_hash, None).await?.0)
+    }
+
+    /// Poll the way a facts-aware agent does: carrying the hash of its facts document, and
+    /// reading back the hash the server holds. Returns the desired state (`None` on 304) and
+    /// the `X-Facts-Hash` answer.
+    pub async fn poll_with_facts(
+        &self,
+        current_hash: Option<&str>,
+        facts_hash: &str,
+    ) -> Result<(Option<DesiredState>, Option<String>)> {
+        self.poll(current_hash, Some(facts_hash)).await
+    }
+
+    /// The one desired-state request: `facts_hash` omitted is an agent without facts.
+    async fn poll(
+        &self,
+        current_hash: Option<&str>,
+        facts_hash: Option<&str>,
+    ) -> Result<(Option<DesiredState>, Option<String>)> {
         let client = self.mtls_client()?;
         let mut url = format!(
             "{}/agent/v1/desired-state",
             self.mtls_url.trim_end_matches('/')
         );
-        if let Some(h) = current_hash {
-            url.push_str(&format!("?current_hash={h}"));
+        let query: Vec<String> = [("current_hash", current_hash), ("facts_hash", facts_hash)]
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|v| format!("{k}={v}")))
+            .collect();
+        if !query.is_empty() {
+            url.push('?');
+            url.push_str(&query.join("&"));
         }
         let res = client.get(&url).send().await?;
+        let held = facts_header(&res);
         match res.status().as_u16() {
-            200 => Ok(Some(res.json::<DesiredState>().await?)),
-            304 => Ok(None),
+            200 => Ok((Some(res.json::<DesiredState>().await?), held)),
+            304 => Ok((None, held)),
             429 => Err(anyhow!(
                 "rate limited (retry-after {})",
                 res.headers()
@@ -229,6 +277,36 @@ impl EnrolledAgent {
         }
     }
 
+    /// A state report carrying a facts hash. Returns the `X-Facts-Hash` answer.
+    pub async fn report_state_with_facts(
+        &self,
+        applied_state_hash: Option<&str>,
+        reported_tags: BTreeMap<String, String>,
+        facts_hash: &str,
+    ) -> Result<Option<String>> {
+        self.send_state_report(
+            applied_state_hash,
+            reported_tags,
+            Some(false),
+            Some(facts_hash),
+        )
+        .await
+    }
+
+    /// POST a raw `/agent/v1/facts` body. Returns the status and the `X-Facts-Hash` answer;
+    /// a refusal is a status, not an error, so tests can assert on it.
+    pub async fn upload_facts(&self, body: String) -> Result<(u16, Option<String>)> {
+        let client = self.mtls_client()?;
+        let url = format!("{}/agent/v1/facts", self.mtls_url.trim_end_matches('/'));
+        let res = client
+            .post(&url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await?;
+        Ok((res.status().as_u16(), facts_header(&res)))
+    }
+
     /// Report state the way an agent predating `local_config_present` does: without the
     /// field at all. Kept as the default so the tests that do not care about it keep
     /// exercising the older wire shape.
@@ -237,8 +315,9 @@ impl EnrolledAgent {
         applied_state_hash: Option<&str>,
         reported_tags: BTreeMap<String, String>,
     ) -> Result<()> {
-        self.send_state_report(applied_state_hash, reported_tags, None)
+        self.send_state_report(applied_state_hash, reported_tags, None, None)
             .await
+            .map(drop)
     }
 
     /// Report state the way a current agent does: always carrying whether the host has
@@ -253,16 +332,20 @@ impl EnrolledAgent {
             applied_state_hash,
             reported_tags,
             Some(local_config_present),
+            None,
         )
         .await
+        .map(drop)
     }
 
+    /// The one state-report request. Returns the `X-Facts-Hash` answer.
     async fn send_state_report(
         &self,
         applied_state_hash: Option<&str>,
         reported_tags: BTreeMap<String, String>,
         local_config_present: Option<bool>,
-    ) -> Result<()> {
+        facts_hash: Option<&str>,
+    ) -> Result<Option<String>> {
         let client = self.mtls_client()?;
         let url = format!(
             "{}/agent/v1/state-report",
@@ -274,6 +357,7 @@ impl EnrolledAgent {
             errors: vec![],
             reported_tags,
             local_config_present,
+            facts_hash,
         };
         let res = client.post(&url).json(&body).send().await?;
         if !res.status().is_success() {
@@ -281,7 +365,7 @@ impl EnrolledAgent {
             let text = res.text().await.unwrap_or_default();
             return Err(anyhow!("state-report failed: {status} — {text}"));
         }
-        Ok(())
+        Ok(facts_header(&res))
     }
 
     /// Download a bundle by id and verify integrity (sha256) + authenticity.

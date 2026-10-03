@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import {
   Button,
+  Checkbox,
+  Chip,
   FormControlLabel,
   FormHelperText,
   IconButton,
@@ -20,10 +22,12 @@ import DeleteIcon from "@mui/icons-material/Delete";
 import {
   applyFieldChange,
   BundleTemplate,
+  factSetState,
   fieldDefault,
   fieldPresent,
   fieldValue,
   fieldVisible,
+  setFactSet,
   tableAddRow,
   tableRemoveRow,
   tableRenameRow,
@@ -295,6 +299,64 @@ function TableField({
   );
 }
 
+/** The fact-set checklist: one row per set, checked when every platform's switch for it is
+ *  on. A set switched on for one platform only (hand-edited INI) shows as indeterminate,
+ *  and checking it completes the set. */
+function FactsField({
+  field,
+  ini,
+  onChange,
+}: {
+  field: TemplateField & { kind: "facts" };
+  ini: string;
+  onChange: (ini: string) => void;
+}) {
+  return (
+    <div>
+      <Typography variant="subtitle2">{field.label}</Typography>
+      {field.help && <FormHelperText sx={{ mt: 0, mb: 1 }}>{field.help}</FormHelperText>}
+      <Stack spacing={0.5}>
+        {field.sets.map((set) => {
+          const state = factSetState(ini, set);
+          const platforms = [...new Set(set.targets.map((t) => t.platform))].join(", ");
+          return (
+            <Stack key={set.id} direction="row" spacing={1} alignItems="flex-start">
+              <Checkbox
+                size="small"
+                sx={{ mt: -0.5 }}
+                checked={state === "on"}
+                indeterminate={state === "partial"}
+                onChange={() => onChange(setFactSet(ini, set, state !== "on"))}
+                slotProps={{ input: { "aria-label": set.label } }}
+              />
+              <div>
+                <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
+                  <Typography variant="body2" fontWeight={500}>
+                    {set.label}
+                  </Typography>
+                  <Chip
+                    label={set.id}
+                    size="small"
+                    variant="outlined"
+                    sx={{ fontFamily: "monospace", height: 20 }}
+                  />
+                </Stack>
+                <Typography variant="caption" color="text.secondary" component="div">
+                  {set.description}
+                </Typography>
+                <Typography variant="caption" color="text.secondary" component="div">
+                  Cost: {set.cost} · {platforms}
+                  {state === "partial" && " · switched on for some platforms only"}
+                </Typography>
+              </div>
+            </Stack>
+          );
+        })}
+      </Stack>
+    </div>
+  );
+}
+
 /** The visual (form) editor view: the template's typed fields projected onto the INI
  *  text. Conditional fields appear/disappear as their parents change (e.g. the CA path
  *  only under mutual TLS), and hidden fields' keys are removed from the document. */
@@ -311,6 +373,8 @@ export function TemplateForm({ template, ini, onChange }: Props) {
           switch (f.kind) {
             case "table":
               return <TableField key={f.id} field={f} ini={ini} onChange={onChange} />;
+            case "facts":
+              return <FactsField key={f.id} field={f} ini={ini} onChange={onChange} />;
             case "bool":
               return (
                 <div key={f.id}>

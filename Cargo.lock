@@ -1010,7 +1010,6 @@ dependencies = [
  "rcgen",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "thiserror 1.0.69",
  "time",
  "tracing",
@@ -1057,7 +1056,6 @@ dependencies = [
  "rustls-acme",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "sqlx",
  "tempfile",
  "time",
@@ -1079,6 +1077,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "fleet-core",
+ "futures-util",
  "serde_json",
  "sqlx",
  "tempfile",

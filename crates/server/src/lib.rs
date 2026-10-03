@@ -11,6 +11,7 @@ pub mod conn;
 pub mod csrf;
 pub mod desired_state;
 pub mod env_file;
+pub mod facts;
 pub mod hosts;
 pub mod housekeeping;
 pub mod https;
@@ -61,6 +62,9 @@ pub struct AppState {
     /// Memoized desired state, invalidated by the tenant's `config_version`. Shared across
     /// clones of `AppState` — one cache per process.
     pub desired_state_cache: Arc<crate::desired_state::DesiredStateCache>,
+    /// The facts catalog per tenant, rebuilt only when a tenant's facts moved. Shared across
+    /// clones of `AppState`.
+    pub facts_catalog_cache: Arc<crate::facts::CatalogCache>,
 }
 
 /// Narrow a directory we own to owner-only access.
@@ -226,6 +230,8 @@ pub fn router(state: AppState) -> Router {
             get(hosts::detail).delete(hosts::delete_host),
         )
         .route("/api/hosts/:id/desired", get(hosts::desired))
+        .route("/api/hosts/:id/facts", get(facts::host_facts))
+        .route("/api/facts/catalog", get(facts::catalog))
         .route(
             "/api/hosts/:id/revoke-certs",
             post(hosts::revoke_host_certs),
@@ -353,6 +359,10 @@ pub fn mtls_router(state: AppState) -> Router {
         .route("/agent/v1/state-report", post(agent_api::state_report))
         .route("/agent/v1/renew", post(agent_api::renew))
         .route("/agent/v1/bundles/:id", get(bundles::download))
+        // The handler reads the body itself, capped at `MAX_FACTS_BODY_BYTES`: the document
+        // can legitimately exceed axum's 2 MiB default, and an oversized one has to reach
+        // the handler for its refusal to be recorded.
+        .route("/agent/v1/facts", post(facts::upload))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             agent_limits::tier_layer,

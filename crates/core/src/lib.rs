@@ -1,7 +1,9 @@
 pub mod aead;
 pub mod api_key;
 pub mod bundlesig;
+pub mod digest;
 pub mod encbundle;
+pub mod facts;
 pub mod host;
 pub mod merge;
 pub mod selector;

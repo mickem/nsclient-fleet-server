@@ -93,6 +93,7 @@ async fn harness() -> Harness {
             dir.path().join("bundles"),
         )),
         desired_state_cache: Default::default(),
+        facts_catalog_cache: Default::default(),
     };
 
     Harness {

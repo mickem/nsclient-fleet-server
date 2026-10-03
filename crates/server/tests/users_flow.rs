@@ -11,7 +11,6 @@ use std::sync::Arc;
 use fleet_core::aead::MasterKey;
 use fleet_core::user::Role;
 use fleet_storage::{Db, MagicLinkRepo, SessionRepo, TenantRepo, UserRepo};
-use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 struct TestServer {
@@ -61,6 +60,7 @@ async fn start() -> TestServer {
             dir.path().join("bundles"),
         )),
         desired_state_cache: Default::default(),
+        facts_catalog_cache: Default::default(),
     };
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -133,9 +133,7 @@ fn test_config(db_path: PathBuf) -> fleet_server::config::Config {
 }
 
 fn hash_token(token: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(token.as_bytes());
-    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    fleet_core::digest::sha256_hex(token.as_bytes())
 }
 
 /// A user of the given role, plus a client already holding their session cookie.

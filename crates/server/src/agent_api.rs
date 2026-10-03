@@ -28,6 +28,10 @@ const LAST_SEEN_REFRESH_SECS: i64 = 300;
 pub struct DesiredStateQuery {
     #[serde(default)]
     pub current_hash: Option<String>,
+    /// The hash of the agent's facts document. Answered with the hash we hold, in the
+    /// `X-Facts-Hash` header — see [`crate::facts`].
+    #[serde(default)]
+    pub facts_hash: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -93,6 +97,10 @@ pub async fn desired_state(
         tracing::error!(error = %e, "touch_last_seen_if_stale failed");
     }
 
+    // On every answer, the 304 included: that is the point of it being a header.
+    let facts_header =
+        crate::facts::advertise(&state, ctx.tenant_id, &ctx.host_id, q.facts_hash.as_deref()).await;
+
     // No tenant row means no trustworthy cache key; fall back to computing directly rather
     // than caching against a version we invented.
     let computed = match config_version {
@@ -111,13 +119,16 @@ pub async fn desired_state(
     };
 
     if q.current_hash.as_deref() == Some(ds.state_hash.as_str()) {
-        return (
-            StatusCode::NOT_MODIFIED,
-            Json(NotModifiedResponse {
-                next_poll_in_seconds: next_poll,
-            }),
-        )
-            .into_response();
+        return crate::facts::with_header(
+            (
+                StatusCode::NOT_MODIFIED,
+                Json(NotModifiedResponse {
+                    next_poll_in_seconds: next_poll,
+                }),
+            )
+                .into_response(),
+            facts_header,
+        );
     }
 
     let bundles = ds
@@ -135,14 +146,17 @@ pub async fn desired_state(
         })
         .collect();
 
-    Json(DesiredStateResponse {
-        tenant_id: ctx.tenant_id,
-        state_hash: ds.state_hash,
-        next_poll_in_seconds: next_poll,
-        merged_config_json: ds.merged_config,
-        bundles,
-    })
-    .into_response()
+    crate::facts::with_header(
+        Json(DesiredStateResponse {
+            tenant_id: ctx.tenant_id,
+            state_hash: ds.state_hash,
+            next_poll_in_seconds: next_poll,
+            merged_config_json: ds.merged_config,
+            bundles,
+        })
+        .into_response(),
+        facts_header,
+    )
 }
 
 #[derive(Deserialize, Default)]
@@ -165,6 +179,10 @@ pub struct StateReport {
     /// the local configuration itself never leaves the host.
     #[serde(default)]
     pub local_config_present: Option<bool>,
+    /// The hash of the host's facts document — the hash only; the document goes on its own
+    /// call, and only when we answer with a different one. See [`crate::facts`].
+    #[serde(default)]
+    pub facts_hash: Option<String>,
 }
 
 /// Longest hostname or OS string we will store. Both are the host's own description of
@@ -325,7 +343,14 @@ pub async fn state_report(
         );
     }
 
-    Json(serde_json::json!({})).into_response()
+    let facts_header = crate::facts::advertise(
+        &state,
+        ctx.tenant_id,
+        &ctx.host_id,
+        body.facts_hash.as_deref(),
+    )
+    .await;
+    crate::facts::with_header(Json(serde_json::json!({})).into_response(), facts_header)
 }
 
 #[derive(Deserialize)]

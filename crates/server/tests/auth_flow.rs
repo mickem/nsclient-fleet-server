@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use fleet_core::aead::MasterKey;
 use fleet_storage::{Db, MagicLinkRepo, TenantRepo, UserRepo};
-use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 // Helper struct to keep the server task alive for the duration of a test.
@@ -63,6 +62,7 @@ async fn start_with(adjust: impl FnOnce(&mut fleet_server::config::Config)) -> T
             dir.path().join("bundles"),
         )),
         desired_state_cache: Default::default(),
+        facts_catalog_cache: Default::default(),
     };
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -167,10 +167,7 @@ fn extract_csrf(html: &str) -> String {
 }
 
 fn hash_token(token: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(token.as_bytes());
-    let d = h.finalize();
-    d.iter().map(|b| format!("{b:02x}")).collect()
+    fleet_core::digest::sha256_hex(token.as_bytes())
 }
 
 /// Every response carries the headers, including the SPA fallback — which is served by

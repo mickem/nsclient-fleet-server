@@ -2,7 +2,6 @@ use rcgen::{
     CertificateParams, CertificateSigningRequestParams, DistinguishedName, DnType,
     ExtendedKeyUsagePurpose, KeyPair, KeyUsagePurpose, SanType,
 };
-use sha2::{Digest, Sha256};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SignError {
@@ -74,12 +73,11 @@ pub fn sign_client_cert(
 
     let cert_pem = cert.pem();
     let der = cert.der();
-    let fingerprint = Sha256::digest(der.as_ref());
 
     Ok(IssuedCert {
         cert_pem,
-        serial_hex: hex(&serial_bytes),
-        fingerprint_sha256_hex: hex(&fingerprint),
+        serial_hex: fleet_core::digest::hex(&serial_bytes),
+        fingerprint_sha256_hex: fleet_core::digest::sha256_hex(der.as_ref()),
         not_before_unix,
         not_after_unix,
     })
@@ -103,16 +101,6 @@ fn random_serial() -> [u8; 16] {
     rand::Rng::fill(&mut rand::thread_rng(), &mut bytes);
     bytes[0] = (bytes[0] & 0x7f) | 0x01;
     bytes
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push(HEX[(b >> 4) as usize] as char);
-        s.push(HEX[(b & 0xf) as usize] as char);
-    }
-    s
 }
 
 #[cfg(test)]
