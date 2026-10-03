@@ -350,3 +350,793 @@ async fn operator_download_round_trip() {
         .unwrap();
     assert_eq!(r.status(), 404);
 }
+
+/// Stage one re-sealed encrypted version.
+async fn stage(s: &TestServer, id: &str, bytes: Vec<u8>) -> reqwest::Response {
+    s.cookie_jar
+        .post(format!("{}/api/bundles/{id}/reseal", s.base_url))
+        .header("content-type", "application/octet-stream")
+        .body(bytes)
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn commit_rename(
+    s: &TestServer,
+    from: &str,
+    to: &str,
+    resealed: serde_json::Value,
+) -> reqwest::Response {
+    s.cookie_jar
+        .post(format!("{}/api/bundles/rename", s.base_url))
+        .json(&serde_json::json!({ "from": from, "to": to, "resealed": resealed }))
+        .send()
+        .await
+        .unwrap()
+}
+
+/// Rename the way the browser does: stage each re-sealed version, then commit. Returns the
+/// first refusal, from staging or from the commit.
+async fn rename_bundle(
+    s: &TestServer,
+    from: &str,
+    to: &str,
+    sealed: Vec<(String, Vec<u8>)>,
+) -> reqwest::Response {
+    let mut resealed = serde_json::Map::new();
+    for (id, bytes) in sealed {
+        let r = stage(s, &id, bytes).await;
+        if r.status() != 200 {
+            return r;
+        }
+        let staged: serde_json::Value = r.json().await.unwrap();
+        resealed.insert(id, staged["staged_id"].clone());
+    }
+    commit_rename(s, from, to, serde_json::Value::Object(resealed)).await
+}
+
+/// The orphan sweep, with no grace period.
+async fn sweep_now(s: &TestServer) -> usize {
+    fleet_server::housekeeping::sweep_bundle_files(&s.db, s.state.bundle_store.as_ref(), 0).await
+}
+
+/// Renaming moves every version of a name: plain versions keep their id, encrypted ones
+/// are re-sealed by the client and swapped in under a new id, and either way the groups
+/// keep carrying the same versions — which the agent then verifies and opens under the
+/// new name.
+#[tokio::test]
+async fn rename_keeps_assignments_and_reseals_encrypted_versions() {
+    let s = start().await;
+    signup_login(&s, "acme", "alice@example.com").await;
+    let (mut agent, host_id) = enroll_a_host(&s).await;
+
+    let key = BundleKey::generate();
+    let r = s
+        .cookie_jar
+        .put(format!("{}/api/bundle-key", s.base_url))
+        .json(&serde_json::json!({ "fingerprint": key.fingerprint_hex() }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let plain_zip = b"PK\x03\x04-plain".to_vec();
+    let r = upload_bundle(&s, "app", "1", None, plain_zip.clone()).await;
+    assert_eq!(r.status(), 200);
+    let plain: serde_json::Value = r.json().await.unwrap();
+    let plain_id = plain["id"].as_str().unwrap().to_string();
+
+    let secret_zip = b"PK\x03\x04-secret".to_vec();
+    let r = upload_bundle(
+        &s,
+        "app",
+        "2",
+        Some("enc-v1"),
+        key.encrypt("app", "2", &secret_zip),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let enc: serde_json::Value = r.json().await.unwrap();
+    let enc_id = enc["id"].as_str().unwrap().to_string();
+
+    let r = upload_bundle(&s, "taken", "1", None, b"PK\x03\x04-other".to_vec()).await;
+    assert_eq!(r.status(), 200);
+
+    let g = s
+        .cookie_jar
+        .post(format!("{}/api/groups", s.base_url))
+        .json(&serde_json::json!({
+            "name": "db",
+            "selector": { "clauses": [{"op": "eq", "key": "role", "value": "db"}] }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(g.status(), 201);
+    let group: serde_json::Value = g.json().await.unwrap();
+    let group_id = group["id"].as_str().unwrap().to_string();
+    for (id, priority) in [(&plain_id, 100), (&enc_id, 200)] {
+        let a = s
+            .cookie_jar
+            .post(format!("{}/api/groups/{group_id}/bundles", s.base_url))
+            .json(&serde_json::json!({"bundle_id": id, "priority": priority}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(a.status(), 204);
+    }
+    let t = s
+        .cookie_jar
+        .put(format!("{}/api/hosts/{}/tags/role", s.base_url, host_id))
+        .json(&serde_json::json!({"value": "db"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(t.status(), 204);
+
+    // The host is in sync before the rename: polling with its current hash is a 304.
+    s.agent_limits.forget_last_poll(&host_id);
+    let before = agent.fetch_desired_state(None).await.unwrap().unwrap();
+    s.agent_limits.forget_last_poll(&host_id);
+    assert!(agent
+        .fetch_desired_state(Some(&before.state_hash))
+        .await
+        .unwrap()
+        .is_none());
+
+    // Refusals change nothing: an encrypted version without new ciphertext, a name in use,
+    // a name that does not exist, a part for a version that is not encrypted.
+    let r = rename_bundle(&s, "app", "web", vec![]).await;
+    assert_eq!(r.status(), 400, "{:?}", r.text().await);
+    let r = rename_bundle(
+        &s,
+        "app",
+        "taken",
+        vec![(enc_id.clone(), key.encrypt("taken", "2", &secret_zip))],
+    )
+    .await;
+    assert_eq!(r.status(), 409);
+    let r = rename_bundle(&s, "nope", "web", vec![]).await;
+    assert_eq!(r.status(), 404);
+    let r = rename_bundle(
+        &s,
+        "app",
+        "web",
+        vec![
+            (enc_id.clone(), key.encrypt("web", "2", &secret_zip)),
+            (plain_id.clone(), key.encrypt("web", "1", &plain_zip)),
+        ],
+    )
+    .await;
+    assert_eq!(r.status(), 400);
+
+    let r = rename_bundle(
+        &s,
+        "app",
+        "web",
+        vec![(enc_id.clone(), key.encrypt("web", "2", &secret_zip))],
+    )
+    .await;
+    assert_eq!(r.status(), 200, "{:?}", r.text().await);
+    let renamed: Vec<serde_json::Value> = r.json().await.unwrap();
+    assert_eq!(renamed.len(), 2);
+    assert!(renamed.iter().all(|b| b["name"] == "web"));
+    let id_of = |version: &str| {
+        renamed.iter().find(|b| b["version"] == version).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let new_enc_id = id_of("2");
+    // A plain version is renamed in place — same id, same bytes; only an encrypted one,
+    // whose ciphertext had to change, moves to a new id.
+    assert_eq!(id_of("1"), plain_id);
+    assert_eq!(
+        renamed.iter().find(|b| b["version"] == "1").unwrap()["sha256"],
+        plain["sha256"]
+    );
+    assert_ne!(new_enc_id, enc_id);
+
+    // Nothing is left under the old name, and the replaced ciphertext is gone from disk.
+    let list: Vec<serde_json::Value> = s
+        .cookie_jar
+        .get(format!("{}/api/bundles", s.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(list.iter().all(|b| b["name"] != "app"));
+    let dir = s._tempdir.path().join("bundles").join("1");
+    // The replaced ciphertext stays until housekeeping, so an agent mid-download of it is
+    // not cut off; so do the re-seals staged by the two refused attempts above. The sweep
+    // takes those three and nothing a row points at.
+    assert!(dir.join(format!("{enc_id}.zip")).exists());
+    assert_eq!(sweep_now(&s).await, 3);
+    assert!(!dir.join(format!("{enc_id}.zip")).exists());
+    for id in [&plain_id, &new_enc_id] {
+        assert!(dir.join(format!("{id}.zip")).exists());
+    }
+
+    // One audit entry per version, filed under the id it has now and naming the one it had.
+    let mut ids: Vec<(String, String)> = sqlx::query_as::<_, (String, String)>(
+        "SELECT target_id, metadata_json FROM audit_log WHERE action = 'bundle.renamed'
+          AND metadata_json LIKE '%\"to\":\"web\"%'",
+    )
+    .fetch_all(&s.db.read)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|(target, meta)| {
+        let meta: serde_json::Value = serde_json::from_str(&meta).unwrap();
+        (meta["old_id"].as_str().unwrap().to_string(), target)
+    })
+    .collect();
+    ids.sort();
+    let mut want = vec![
+        (plain_id.clone(), plain_id.clone()),
+        (enc_id.clone(), new_enc_id.clone()),
+    ];
+    want.sort();
+    assert_eq!(ids, want);
+
+    // The group still carries both versions, with their priorities.
+    let carried: Vec<serde_json::Value> = s
+        .cookie_jar
+        .get(format!("{}/api/groups/{group_id}/bundles", s.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut ids: Vec<(String, i64)> = carried
+        .iter()
+        .map(|b| {
+            (
+                b["bundle_id"].as_str().unwrap().to_string(),
+                b["priority"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    ids.sort();
+    let mut want = vec![(plain_id.clone(), 100), (new_enc_id.clone(), 200)];
+    want.sort();
+    assert_eq!(ids, want);
+
+    // The host that was in sync is told something changed — polling with its old hash is
+    // no longer a 304 — and sees the new name; the signatures verify against it, and the
+    // re-sealed version opens under it.
+    s.agent_limits.forget_last_poll(&host_id);
+    let ds = agent
+        .fetch_desired_state(Some(&before.state_hash))
+        .await
+        .unwrap()
+        .expect("a rename must change the desired-state hash");
+    assert_ne!(ds.state_hash, before.state_hash);
+    assert_eq!(ds.bundles.len(), 2);
+    agent.bundle_encryption_keys = vec![key.to_b64()];
+    for b in &ds.bundles {
+        assert_eq!(b["name"], "web");
+        let signature = list.iter().find(|l| l["id"] == b["id"]).unwrap()["signature"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let bytes = agent
+            .fetch_bundle_verified(ds.descriptor(b).unwrap(), &signature)
+            .await
+            .unwrap();
+        if b["format"] == "enc-v1" {
+            assert_eq!(agent.open_bundle("web", "2", bytes).unwrap(), secret_zip);
+        } else {
+            assert_eq!(bytes, plain_zip);
+        }
+    }
+}
+
+/// A bundle whose versions are all plain: the case where renaming in place left the
+/// desired-state hash untouched (it covered ids, not names), so a host already in sync kept
+/// getting 304s and never heard of the new name.
+#[tokio::test]
+async fn renaming_a_plain_bundle_reaches_hosts_already_in_sync() {
+    let s = start().await;
+    signup_login(&s, "acme", "alice@example.com").await;
+    let (agent, host_id) = enroll_a_host(&s).await;
+
+    let r = upload_bundle(&s, "base", "1", None, b"PK\x03\x04-base".to_vec()).await;
+    assert_eq!(r.status(), 200);
+    let bundle: serde_json::Value = r.json().await.unwrap();
+    let g: serde_json::Value = s
+        .cookie_jar
+        .post(format!("{}/api/groups", s.base_url))
+        .json(&serde_json::json!({
+            "name": "all",
+            "selector": { "clauses": [{"op": "eq", "key": "role", "value": "db"}] }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let a = s
+        .cookie_jar
+        .post(format!(
+            "{}/api/groups/{}/bundles",
+            s.base_url,
+            g["id"].as_str().unwrap()
+        ))
+        .json(&serde_json::json!({"bundle_id": bundle["id"], "priority": 100}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(a.status(), 204);
+    let t = s
+        .cookie_jar
+        .put(format!("{}/api/hosts/{}/tags/role", s.base_url, host_id))
+        .json(&serde_json::json!({"value": "db"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(t.status(), 204);
+
+    s.agent_limits.forget_last_poll(&host_id);
+    let before = agent.fetch_desired_state(None).await.unwrap().unwrap();
+    assert_eq!(before.bundles[0]["name"], "base");
+
+    let r = rename_bundle(&s, "base", "baseline", vec![]).await;
+    assert_eq!(r.status(), 200, "{:?}", r.text().await);
+
+    s.agent_limits.forget_last_poll(&host_id);
+    let after = agent
+        .fetch_desired_state(Some(&before.state_hash))
+        .await
+        .unwrap()
+        .expect("a host in sync before the rename must be sent the renamed state, not a 304");
+    assert_eq!(after.bundles[0]["name"], "baseline");
+}
+
+/// Upload a plain bundle, put it in a group the host is in, and return its id.
+async fn assigned_plain_bundle(s: &TestServer, host_id: &str, name: &str, bytes: &[u8]) -> String {
+    let r = upload_bundle(s, name, "1", None, bytes.to_vec()).await;
+    assert_eq!(r.status(), 200);
+    let id = r.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let g: serde_json::Value = s
+        .cookie_jar
+        .post(format!("{}/api/groups", s.base_url))
+        .json(&serde_json::json!({
+            "name": format!("g-{name}"),
+            "selector": { "clauses": [{"op": "eq", "key": "role", "value": "db"}] }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let a = s
+        .cookie_jar
+        .post(format!(
+            "{}/api/groups/{}/bundles",
+            s.base_url,
+            g["id"].as_str().unwrap()
+        ))
+        .json(&serde_json::json!({"bundle_id": id, "priority": 100}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(a.status(), 204);
+    let t = s
+        .cookie_jar
+        .put(format!("{}/api/hosts/{}/tags/role", s.base_url, host_id))
+        .json(&serde_json::json!({"value": "db"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(t.status(), 204);
+    id
+}
+
+/// A plain version is re-signed over the digest recorded at upload, never over whatever is
+/// on disk now: bytes changed since then must still fail the agent's check after a rename,
+/// not come out of it validly signed.
+#[tokio::test]
+async fn a_rename_never_vouches_for_bytes_changed_on_disk() {
+    let s = start().await;
+    signup_login(&s, "acme", "alice@example.com").await;
+    let (agent, host_id) = enroll_a_host(&s).await;
+    let id = assigned_plain_bundle(&s, &host_id, "base", b"PK\x03\x04-original").await;
+
+    let stored = s
+        ._tempdir
+        .path()
+        .join("bundles")
+        .join("1")
+        .join(format!("{id}.zip"));
+    std::fs::write(&stored, b"PK\x03\x04-tampered").unwrap();
+
+    let r = rename_bundle(&s, "base", "baseline", vec![]).await;
+    assert_eq!(r.status(), 200, "{:?}", r.text().await);
+
+    s.agent_limits.forget_last_poll(&host_id);
+    let ds = agent.fetch_desired_state(None).await.unwrap().unwrap();
+    let b = &ds.bundles[0];
+    assert_eq!(b["name"], "baseline");
+    let err = agent
+        .fetch_bundle_verified(ds.descriptor(b).unwrap(), b["signature"].as_str().unwrap())
+        .await
+        .expect_err("bytes changed on disk must not verify after a rename");
+    assert!(err.to_string().to_lowercase().contains("sha"), "{err}");
+}
+
+/// A re-sealed version must be the same content sealed with the same key, as far as the
+/// server can tell — and a refused rename leaves everything as it was.
+#[tokio::test]
+async fn a_resealed_version_must_match_the_original() {
+    let s = start().await;
+    signup_login(&s, "acme", "alice@example.com").await;
+    let key = BundleKey::generate();
+    let r = s
+        .cookie_jar
+        .put(format!("{}/api/bundle-key", s.base_url))
+        .json(&serde_json::json!({ "fingerprint": key.fingerprint_hex() }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let zip = b"PK\x03\x04-secret".to_vec();
+    let original = key.encrypt("app", "1", &zip);
+    let r = upload_bundle(&s, "app", "1", Some("enc-v1"), original.clone()).await;
+    assert_eq!(r.status(), 200);
+    let id = r.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let other_key = BundleKey::generate();
+    let mut longer = zip.clone();
+    longer.push(b'!');
+    for (what, parts) in [
+        (
+            "another key",
+            vec![(id.clone(), other_key.encrypt("web", "1", &zip))],
+        ),
+        (
+            "different content",
+            vec![(id.clone(), key.encrypt("web", "1", &longer))],
+        ),
+        (
+            "the original ciphertext sent back",
+            vec![(id.clone(), original.clone())],
+        ),
+    ] {
+        let r = rename_bundle(&s, "app", "web", parts).await;
+        assert_eq!(r.status(), 400, "{what}: {:?}", r.text().await);
+    }
+
+    let list: Vec<serde_json::Value> = s
+        .cookie_jar
+        .get(format!("{}/api/bundles", s.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["id"], id.as_str());
+    assert_eq!(list[0]["name"], "app");
+    let dir = s._tempdir.path().join("bundles").join("1");
+    let files: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+    assert_eq!(
+        files.len(),
+        1,
+        "nothing a refused rename stored is left behind"
+    );
+}
+
+/// `from` is matched exactly as stored, so a bundle whose name predates validation — the
+/// kind most worth renaming — can be renamed.
+#[tokio::test]
+async fn a_bundle_with_a_legacy_name_can_be_renamed() {
+    let s = start().await;
+    signup_login(&s, "acme", "alice@example.com").await;
+    let r = upload_bundle(&s, "legacy", "1", None, b"PK\x03\x04-x".to_vec()).await;
+    assert_eq!(r.status(), 200);
+    sqlx::query("UPDATE bundles SET name = 'my bundle' WHERE name = 'legacy'")
+        .execute(&s.db.write)
+        .await
+        .unwrap();
+
+    let r = rename_bundle(&s, "my bundle", "my-bundle", vec![]).await;
+    assert_eq!(r.status(), 200, "{:?}", r.text().await);
+    let renamed: Vec<serde_json::Value> = r.json().await.unwrap();
+    assert_eq!(renamed[0]["name"], "my-bundle");
+}
+
+/// The transaction itself refuses a picture of the bundle that is no longer true: a
+/// version saved under the old name after the caller read them would be left behind, and a
+/// name taken meanwhile is reported as that rather than as "changed".
+#[tokio::test]
+async fn the_rename_transaction_refuses_a_stale_picture() {
+    let s = start().await;
+    signup_login(&s, "acme", "alice@example.com").await;
+    for v in ["1", "2"] {
+        let r = upload_bundle(&s, "app", v, None, format!("PK\x03\x04-{v}").into_bytes()).await;
+        assert_eq!(r.status(), 200);
+    }
+    let r = upload_bundle(&s, "taken", "1", None, b"PK\x03\x04-t".to_vec()).await;
+    assert_eq!(r.status(), 200);
+    let repo = fleet_storage::BundlesRepo::new(&s.db);
+    let versions = repo.list_by_name(1, "app").await.unwrap();
+    let only_first = vec![fleet_storage::RenamedInPlace {
+        id: versions[0].id.clone(),
+        signature: "sig".into(),
+    }];
+
+    assert_eq!(
+        repo.rename(1, "app", "web", &only_first, &[])
+            .await
+            .unwrap(),
+        fleet_storage::RenameOutcome::Changed
+    );
+    assert_eq!(
+        repo.rename(1, "app", "taken", &only_first, &[])
+            .await
+            .unwrap(),
+        fleet_storage::RenameOutcome::NameTaken
+    );
+    let still: Vec<String> = repo
+        .list_by_name(1, "app")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|b| b.signature)
+        .collect();
+    assert_eq!(still.len(), 2, "a refused rename changes nothing");
+    assert!(still.iter().all(|sig| sig != "sig"));
+}
+
+/// A staged id names a file, so the commit only accepts one the server could have minted
+/// that no bundle row owns — not another bundle's file, not a path.
+#[tokio::test]
+async fn a_rename_only_commits_files_it_staged() {
+    let s = start().await;
+    signup_login(&s, "acme", "alice@example.com").await;
+    let key = BundleKey::generate();
+    let r = s
+        .cookie_jar
+        .put(format!("{}/api/bundle-key", s.base_url))
+        .json(&serde_json::json!({ "fingerprint": key.fingerprint_hex() }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let zip = b"PK\x03\x04-secret".to_vec();
+    let r = upload_bundle(
+        &s,
+        "app",
+        "1",
+        Some("enc-v1"),
+        key.encrypt("app", "1", &zip),
+    )
+    .await;
+    let enc_id = r.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r = upload_bundle(&s, "other", "1", None, b"PK\x03\x04-other".to_vec()).await;
+    let other_id = r.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    for staged in [
+        other_id.as_str(),
+        "../../1/whatever",
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    ] {
+        let r = commit_rename(
+            &s,
+            "app",
+            "web",
+            serde_json::json!({ enc_id.clone(): staged }),
+        )
+        .await;
+        assert_eq!(r.status(), 400, "staged id {staged}: {:?}", r.text().await);
+    }
+    // A key for something that is not an encrypted version of the bundle.
+    let r = commit_rename(
+        &s,
+        "app",
+        "web",
+        serde_json::json!({ other_id.clone(): "x" }),
+    )
+    .await;
+    assert_eq!(r.status(), 400);
+
+    // An oversized body is refused while it is read — the server answers and stops reading,
+    // so the client may see the 400 or the connection closing under it — and nothing is
+    // staged.
+    let sent = s
+        .cookie_jar
+        .post(format!("{}/api/bundles/{enc_id}/reseal", s.base_url))
+        .header("content-type", "application/octet-stream")
+        .body(vec![0u8; 1024 * 1024])
+        .send()
+        .await;
+    if let Ok(r) = sent {
+        assert_eq!(r.status(), 400);
+    }
+    assert_eq!(sweep_now(&s).await, 0);
+
+    let r = rename_bundle(
+        &s,
+        "app",
+        "web",
+        vec![(enc_id.clone(), key.encrypt("web", "1", &zip))],
+    )
+    .await;
+    assert_eq!(r.status(), 200, "{:?}", r.text().await);
+}
+
+/// Bundle files no row points at are swept once older than the grace period, and only
+/// those: a staged re-seal is left alone while it is fresh.
+#[tokio::test]
+async fn the_sweep_removes_only_old_files_no_bundle_points_at() {
+    let s = start().await;
+    signup_login(&s, "acme", "alice@example.com").await;
+    let key = BundleKey::generate();
+    let r = s
+        .cookie_jar
+        .put(format!("{}/api/bundle-key", s.base_url))
+        .json(&serde_json::json!({ "fingerprint": key.fingerprint_hex() }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let zip = b"PK\x03\x04-secret".to_vec();
+    let r = upload_bundle(
+        &s,
+        "app",
+        "1",
+        Some("enc-v1"),
+        key.encrypt("app", "1", &zip),
+    )
+    .await;
+    let enc_id = r.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r = stage(&s, &enc_id, key.encrypt("web", "1", &zip)).await;
+    assert_eq!(r.status(), 200);
+    let staged = r.json::<serde_json::Value>().await.unwrap()["staged_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let store = s.state.bundle_store.as_ref();
+    assert_eq!(
+        fleet_server::housekeeping::sweep_bundle_files(&s.db, store, 3_600).await,
+        0,
+        "a fresh staged re-seal is waiting for its commit"
+    );
+    assert_eq!(sweep_now(&s).await, 1);
+    let dir = s._tempdir.path().join("bundles").join("1");
+    assert!(!dir.join(format!("{staged}.zip")).exists());
+    assert!(dir.join(format!("{enc_id}.zip")).exists());
+
+    // A commit naming a re-seal the sweep took asks for it again.
+    let r = commit_rename(
+        &s,
+        "app",
+        "web",
+        serde_json::json!({ enc_id.clone(): staged }),
+    )
+    .await;
+    assert_eq!(r.status(), 400);
+    assert!(r.text().await.unwrap().contains("re-seal it again"));
+}
+
+/// An edit is saved against the bundle it was opened from. Once that bundle has been
+/// renamed, the save is refused instead of recreating the old name beside the new one.
+#[tokio::test]
+async fn an_edit_open_across_a_rename_cannot_save_the_old_name() {
+    let s = start().await;
+    signup_login(&s, "acme", "alice@example.com").await;
+    let key = BundleKey::generate();
+    let r = s
+        .cookie_jar
+        .put(format!("{}/api/bundle-key", s.base_url))
+        .json(&serde_json::json!({ "fingerprint": key.fingerprint_hex() }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let r = upload_bundle(&s, "plain", "1", None, b"PK\x03\x04-p".to_vec()).await;
+    let plain_id = r.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let zip = b"PK\x03\x04-secret".to_vec();
+    let r = upload_bundle(
+        &s,
+        "sealed",
+        "1",
+        Some("enc-v1"),
+        key.encrypt("sealed", "1", &zip),
+    )
+    .await;
+    let enc_id = r.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    assert_eq!(
+        rename_bundle(&s, "plain", "plain2", vec![]).await.status(),
+        200
+    );
+    assert_eq!(
+        rename_bundle(
+            &s,
+            "sealed",
+            "sealed2",
+            vec![(enc_id.clone(), key.encrypt("sealed2", "1", &zip))]
+        )
+        .await
+        .status(),
+        200
+    );
+
+    // The server-composed save of a plain bundle: renamed in place, so the base is there
+    // under its new name.
+    let r = s
+        .cookie_jar
+        .post(format!("{}/api/bundles/compose", s.base_url))
+        .json(&serde_json::json!({
+            "name": "plain", "version": "2", "config_json": {}, "base_bundle_id": plain_id,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 409);
+    assert!(r.text().await.unwrap().contains("plain2"));
+
+    // The browser-built save of an encrypted bundle: its base moved to a new id.
+    let form = reqwest::multipart::Form::new()
+        .text("name", "sealed")
+        .text("version", "2")
+        .text("format", "enc-v1")
+        .text("base_bundle_id", enc_id.clone())
+        .part(
+            "bundle",
+            reqwest::multipart::Part::bytes(key.encrypt("sealed", "2", &zip)).file_name("b.nseb"),
+        );
+    let r = s
+        .cookie_jar
+        .post(format!("{}/api/bundles", s.base_url))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+
+    let names: Vec<String> = s
+        .cookie_jar
+        .get(format!("{}/api/bundles", s.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json::<Vec<serde_json::Value>>()
+        .await
+        .unwrap()
+        .iter()
+        .map(|b| b["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(!names.contains(&"plain".to_string()) && !names.contains(&"sealed".to_string()));
+}

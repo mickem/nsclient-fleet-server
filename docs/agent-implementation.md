@@ -162,7 +162,8 @@ Notes:
 - `merged_config_json` is currently always `{}` — real configuration lives
   inside bundle contents; the agent is responsible for unpacking and applying
   them (see `crates/server/src/desired_state.rs`).
-- `state_hash` covers the merged config **and** the bundle set. Store it only
+- `state_hash` covers the merged config **and** every bundle entry in full (id, name,
+  version, format, sha256, signature, priority). Store it only
   after a successful apply, and echo it as `current_hash` on subsequent polls.
 - Add jitter to the sleep to avoid thundering-herd across a fleet.
 
