@@ -42,6 +42,13 @@ type MenuItemDef = { id: Page; label: string; icon: JSX.Element };
 /// roles that cannot manage users — the API refuses them anyway, so a visible-but-broken
 /// entry would only be a dead end.
 function menuFor(me: Me): MenuItemDef[][] {
+  // An expired tenant can reach nothing but the expired view, so its pages are not offered.
+  // The platform console stays: the server exempts it, and it is what extends a trial.
+  if (me.trial_expired) {
+    return me.is_platform_admin
+      ? [[{ id: "platform", label: "Platform", icon: <AdminPanelSettingsIcon /> }]]
+      : [];
+  }
   const groups: MenuItemDef[][] = [
     [{ id: "hosts", label: "Hosts", icon: <DnsIcon /> }],
     [

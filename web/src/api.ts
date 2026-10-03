@@ -36,7 +36,16 @@ export type Me = {
   /** Cross-tenant privilege, orthogonal to `role`. Only decides whether the Platform entry
    *  appears — the routes behind it check the flag themselves. */
   is_platform_admin: boolean;
+  /** Unix seconds; null for a tenant without a trial deadline (paid, on-prem). */
+  trial_expires_at: number | null;
+  /** While true, every tenant route answers 402 — the UI shows the expired view instead. */
+  trial_expired: boolean;
 };
+
+/** Fired on `window` when any API call is refused because the tenant's trial has lapsed,
+ *  so a session that outlives its trial re-reads /api/me and swaps to the expired view
+ *  instead of surfacing the raw 402 on whichever page happened to be open. */
+export const TRIAL_EXPIRED_EVENT = "fleet:trial-expired";
 
 export type ApiKeyView = {
   id: string;
@@ -301,6 +310,7 @@ export class ApiError extends Error {
 }
 
 async function handle<T>(r: Response): Promise<T> {
+  if (r.status === 402) window.dispatchEvent(new Event(TRIAL_EXPIRED_EVENT));
   if (!r.ok) {
     let msg = `HTTP ${r.status}`;
     try {
@@ -321,6 +331,7 @@ export function apiGet<T>(path: string): Promise<T> {
 /** Like `apiGet`, but for binary responses (bundle bytes). */
 export async function apiGetBytes(path: string): Promise<Uint8Array<ArrayBuffer>> {
   const r = await fetch(path, { credentials: "include" });
+  if (r.status === 402) window.dispatchEvent(new Event(TRIAL_EXPIRED_EVENT));
   if (!r.ok) {
     let msg = `HTTP ${r.status}`;
     try {
