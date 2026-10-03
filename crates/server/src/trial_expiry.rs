@@ -16,7 +16,8 @@ use crate::auth::AuthedUser;
 use crate::AppState;
 
 /// Paths that work even with an expired trial. The frontend uses /api/me to detect the
-/// expired state and renders an "upgrade" view; logout lets the user sign out cleanly.
+/// expired state and renders an "upgrade" view; logout (and logout-all, which the navbar
+/// offers on that same view) lets the user sign out cleanly.
 fn is_allowlisted(path: &str) -> bool {
     if !path.starts_with("/api/") {
         // /healthz, frontend assets, the /enroll/v1 endpoint (agents shouldn't be hit by
@@ -30,7 +31,10 @@ fn is_allowlisted(path: &str) -> bool {
     if path.starts_with("/api/platform/") {
         return true;
     }
-    matches!(path, "/api/me" | "/api/auth/logout" | "/api/public-config")
+    matches!(
+        path,
+        "/api/me" | "/api/auth/logout" | "/api/auth/logout-all" | "/api/public-config"
+    )
 }
 
 pub async fn trial_expiry_layer(

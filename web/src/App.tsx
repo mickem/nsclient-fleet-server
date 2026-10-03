@@ -3,7 +3,7 @@ import { CssBaseline } from "@mui/material";
 import { ThemeProvider } from "@mui/material/styles";
 import { BrowserRouter, Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { theme } from "./theme";
-import { canManageUsers, Me, PublicConfig } from "./api";
+import { canManageUsers, Me, PublicConfig, TRIAL_EXPIRED_EVENT } from "./api";
 import { Login } from "./Login";
 import { Signup } from "./Signup";
 import { Dashboard } from "./Dashboard";
@@ -15,11 +15,24 @@ import { AuditPage } from "./AuditPage";
 import { UsersPage } from "./UsersPage";
 import { ApiKeysPage } from "./ApiKeysPage";
 import { PlatformPage } from "./PlatformPage";
+import { TrialExpiredPage } from "./TrialExpiredPage";
 
 /** Routes for a signed-in session. Role-gated pages are not registered at all for roles
  *  that cannot use them, so a deep link to one lands on the fallback instead of a page
  *  whose every request would be refused. */
 function AuthedRoutes({ me, onLogout }: { me: Me; onLogout: () => void }) {
+  if (me.trial_expired) {
+    // Every tenant route would answer 402, so none is registered: any URL lands on the
+    // expired view. The platform console is exempt server-side and stays reachable.
+    return (
+      <Routes>
+        <Route element={<Dashboard me={me} onLogout={onLogout} />}>
+          {me.is_platform_admin && <Route path="platform" element={<PlatformPage me={me} />} />}
+          <Route path="*" element={<TrialExpiredPage me={me} />} />
+        </Route>
+      </Routes>
+    );
+  }
   return (
     <Routes>
       <Route element={<Dashboard me={me} onLogout={onLogout} />}>
@@ -112,6 +125,13 @@ export default function App() {
       setReady(true);
     }
   };
+
+  // A trial can lapse mid-session; the first refused call re-reads /api/me.
+  useEffect(() => {
+    const onExpired = () => refresh();
+    window.addEventListener(TRIAL_EXPIRED_EVENT, onExpired);
+    return () => window.removeEventListener(TRIAL_EXPIRED_EVENT, onExpired);
+  }, []);
 
   useEffect(() => {
     refresh();

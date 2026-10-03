@@ -266,6 +266,15 @@ async fn expired_trial_returns_402_except_allowlisted() {
         .unwrap();
     assert_eq!(r.status(), 402);
 
+    // Signing out everywhere still works (allowlisted) — the navbar offers it on the
+    // expired-trial view too.
+    let r = c
+        .post(format!("{}/api/auth/logout-all", s.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(r.status(), 402);
+
     // Logout still works (allowlisted)
     let r = c
         .post(format!("{}/api/auth/logout", s.base_url))
