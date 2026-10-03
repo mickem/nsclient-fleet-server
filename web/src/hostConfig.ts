@@ -6,7 +6,7 @@
 // paths, leaves become `key=value`. Rows here use the same section/key split, so what the
 // table shows is what lands in the file.
 
-import { type ConfigObject, iniToJson, jsonToIni } from "./ini";
+import { type ConfigObject } from "./ini";
 
 /** One input to the layering: a bundle's config fragment, or the host override. */
 export type Layer = {
@@ -122,23 +122,52 @@ export type Removal = string[];
 
 export const removalLabel = (r: Removal) => sectionOf(r.slice(0, -1)) + " · " + r[r.length - 1];
 
-/** Split a stored override into what the editor shows: its values as INI text, and its
- *  removals as a list (INI has no way to say "delete this key"). */
-export function splitOverride(patch: ConfigObject): { ini: string; removals: Removal[] } {
-  const removals: Removal[] = [];
+/** Every path a merge patch removes: the segments of each `null` leaf. */
+export function removalsOf(patch: ConfigObject): Removal[] {
+  const out: Removal[] = [];
   const walk = (node: ConfigObject, path: string[]) => {
     for (const [k, v] of Object.entries(node)) {
-      if (v === null) removals.push([...path, k]);
+      if (v === null) out.push([...path, k]);
       else if (isObject(v)) walk(v, [...path, k]);
     }
   };
   walk(patch, []);
-  return { ini: jsonToIni(patch), removals };
+  return out;
+}
+
+/** The settings rows put in force, as one config document (removals left out). */
+export function configFromRows(rows: EffectiveRow[]): ConfigObject {
+  const out: ConfigObject = {};
+  for (const r of rows) {
+    if (r.value === null) continue;
+    const path = removalFor(r.section, r.key);
+    let node = out;
+    for (const segment of path.slice(0, -1)) {
+      const next = node[segment];
+      if (!isObject(next)) node[segment] = {};
+      node = node[segment] as ConfigObject;
+    }
+    node[path[path.length - 1]] = r.value;
+  }
+  return out;
+}
+
+/** Leaves of a config document by row id, values rendered as the agent writes them. */
+function leaves(config: ConfigObject): Map<string, { path: Removal; value: string }> {
+  const out = new Map<string, { path: Removal; value: string }>();
+  const walk = (node: ConfigObject, path: string[]) => {
+    for (const [k, v] of Object.entries(node)) {
+      if (v === null) continue;
+      if (isObject(v)) walk(v, [...path, k]);
+      else out.set(rowId(sectionOf(path), k), { path: [...path, k], value: render(v) });
+    }
+  };
+  walk(config, []);
+  return out;
 }
 
 /** Drop objects left with nothing in them. An empty object in a merge patch changes
- *  nothing, but it makes an override that does nothing look like one that does — e.g. the
- *  section header removeIniKey leaves behind when its last key goes. */
+ *  nothing, but it makes an override that does nothing look like one that does. */
 function pruneEmpty(node: ConfigObject): ConfigObject {
   for (const [k, v] of Object.entries(node)) {
     if (isObject(v)) {
@@ -149,58 +178,52 @@ function pruneEmpty(node: ConfigObject): ConfigObject {
   return node;
 }
 
-/** The editor's INI text and removals back into one merge patch, with empty sections
- *  dropped (so `{}` means "no override"). A removal of a path the INI also sets is
- *  dropped: the value is the more specific instruction. Throws `IniParseError` for text
- *  that does not parse. */
-export function joinOverride(ini: string, removals: Removal[]): ConfigObject {
-  const patch = iniToJson(ini);
-  for (const r of removals) {
-    let node: ConfigObject = patch;
-    let blocked = false;
-    for (const segment of r.slice(0, -1)) {
+const isPrefix = (p: Removal, q: Removal) => p.length <= q.length && p.every((s, i) => s === q[i]);
+
+/** The override that turns `base` (what the host's bundles give it) into `working` (the
+ *  configuration as edited): every setting `working` adds or changes, and a removal for
+ *  every setting it drops. `{}` means "no override".
+ *
+ *  `kept` are removals the override already makes. One still in force — nothing under it
+ *  set again — is kept as it is, so removing a whole section stays one line rather than
+ *  becoming one per key the bundles happen to set today (and keeps removing what they add
+ *  there later). Everything else dropped is removed key by key. */
+export function overrideDiff(base: ConfigObject, working: ConfigObject, kept: Removal[]): ConfigObject {
+  const had = leaves(base);
+  const has = leaves(working);
+  const patch: ConfigObject = {};
+  const put = (path: Removal, value: string | null) => {
+    let node = patch;
+    for (const segment of path.slice(0, -1)) {
       const next = node[segment];
-      if (next === undefined) {
-        const child: ConfigObject = {};
-        node[segment] = child;
-        node = child;
-      } else if (isObject(next)) {
-        node = next;
-      } else {
-        blocked = true;
-        break;
-      }
+      if (next === undefined) node[segment] = {};
+      else if (!isObject(next)) return; // a removal of a key whose section is set: moot
+      node = node[segment] as ConfigObject;
     }
-    const last = r[r.length - 1];
-    if (!blocked && node[last] === undefined) node[last] = null;
+    const last = path[path.length - 1];
+    if (node[last] === undefined) node[last] = value;
+  };
+
+  for (const [id, w] of has) {
+    if (had.get(id)?.value !== w.value) put(w.path, w.value);
+  }
+  const covered = new Set<string>();
+  for (const r of kept) {
+    if ([...has.values()].some((w) => isPrefix(r, w.path))) continue;
+    put(r, null);
+    for (const [id, b] of had) if (isPrefix(r, b.path)) covered.add(id);
+  }
+  for (const [id, b] of had) {
+    if (!has.has(id) && !covered.has(id)) put(b.path, null);
   }
   return pruneEmpty(patch);
 }
 
-const isPrefix = (p: Removal, q: Removal) => p.length <= q.length && p.every((s, i) => s === q[i]);
-
-/** Stop removing `target` and nothing else. A removal of exactly that path just goes; one
- *  of a whole section containing it is replaced by removals of everything else it was
- *  taking away (`removedNow`: the paths the override currently removes), so undoing one
- *  key does not bring back its whole section. */
-export function withoutRemovalOf(
-  removals: Removal[],
-  target: Removal,
-  removedNow: Removal[],
-): Removal[] {
-  const out: Removal[] = [];
-  const add = (r: Removal) => {
-    if (!out.some((x) => sameRemoval(x, r))) out.push(r);
-  };
-  for (const r of removals) {
-    if (!isPrefix(r, target)) add(r);
-    else if (!sameRemoval(r, target)) {
-      for (const other of removedNow) {
-        if (isPrefix(r, other) && !sameRemoval(other, target)) add(other);
-      }
-    }
-  }
-  return out;
+/** The settings of `base` a removal takes away, as (section, key, value). */
+export function removedBy(base: ConfigObject, r: Removal): { section: string; key: string; value: string }[] {
+  return [...leaves(base).values()]
+    .filter((b) => isPrefix(r, b.path))
+    .map((b) => ({ section: sectionOf(b.path.slice(0, -1)), key: b.path[b.path.length - 1], value: b.value }));
 }
 
 /** The override with every value blanked, as `GET …/override/shape` returns it. */

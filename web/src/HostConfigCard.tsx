@@ -10,7 +10,6 @@ import {
   DialogContent,
   DialogContentText,
   DialogTitle,
-  IconButton,
   InputAdornment,
   Stack,
   Table,
@@ -23,9 +22,7 @@ import {
   Typography,
 } from "@mui/material";
 import EditIcon from "@mui/icons-material/Edit";
-import RemoveCircleOutlineIcon from "@mui/icons-material/RemoveCircleOutline";
 import SearchIcon from "@mui/icons-material/Search";
-import UndoIcon from "@mui/icons-material/Undo";
 import {
   apiGet,
   apiGetBytes,
@@ -38,20 +35,23 @@ import {
 import { useBundleKey } from "./bundleKey";
 import { readBundleZip } from "./bundlezip";
 import { decryptBundle, recalledKey } from "./crypto";
+import { ConfigEditor } from "./ConfigEditor";
 import {
-  EffectiveRow,
-  joinOverride,
+  configFromRows,
   Layer,
   layerConfigs,
+  overrideDiff,
   Removal,
   removalFor,
   removalLabel,
+  removalsOf,
+  removedBy,
   sameRemoval,
   shapeOf,
-  splitOverride,
-  withoutRemovalOf,
 } from "./hostConfig";
-import { type ConfigObject, IniParseError, removeIniKey, setIniValue } from "./ini";
+import { type ConfigObject, iniToJson, IniParseError, jsonToIni, setIniValue } from "./ini";
+import { TemplatePicker } from "./TemplatePicker";
+import { templateById } from "./templates";
 
 type Props = {
   host: HostDetail;
@@ -108,6 +108,26 @@ async function loadBundleLayers(
 /** Shown in place of an override value that has not been revealed. */
 const HIDDEN = "••••••";
 
+const DRAFT_HEADER = `; This host's whole configuration: what its bundles give it, with the override applied.
+; Change, add or delete settings here. Only what differs from the bundles is saved, as
+; the host override; a setting deleted here is removed on this host.
+
+`;
+
+/** `ini` with every setting of `template`'s base document it does not have yet: picking a
+ *  template adds its defaults without touching what the host already gets. */
+function withTemplateDefaults(ini: string, templateIni: string): string {
+  const have = layerConfigs([{ id: "draft", label: "", kind: "bundle", config: iniToJson(ini) }]);
+  const seen = new Set(have.map((r) => `${r.section}\u0000${r.key}`));
+  let out = ini;
+  for (const r of layerConfigs([{ id: "t", label: "", kind: "bundle", config: iniToJson(templateIni) }])) {
+    if (r.value !== null && !seen.has(`${r.section}\u0000${r.key}`)) {
+      out = setIniValue(out, r.section, r.key, r.value);
+    }
+  }
+  return out;
+}
+
 /** The host's configuration as the agent will write it — every setting with the bundle
  *  (or the override) it comes from and what it replaced — and the host override, edited
  *  as INI with a live preview in the same table.
@@ -123,11 +143,19 @@ export function HostConfigCard({ host, desired, desiredError, canWrite, onChange
   const [shape, setShape] = useState<ConfigObject | null>(null);
   /** The override with its values, once someone has asked for them. */
   const [saved, setSaved] = useState<ConfigObject | null>(null);
+  /** The template the saved override was written with (known once its values are). */
+  const [savedTemplate, setSavedTemplate] = useState<string | null>(null);
   const [overrideError, setOverrideError] = useState<string | null>(null);
 
   const [editing, setEditing] = useState(false);
+  /** Choosing a template, before (or while) editing. */
+  const [picking, setPicking] = useState(false);
+  /** The host's whole configuration as edited; the override is its difference from the
+   *  bundles. */
   const [draftIni, setDraftIni] = useState("");
-  const [draftRemovals, setDraftRemovals] = useState<Removal[]>([]);
+  const [draftTemplate, setDraftTemplate] = useState<string | null>(null);
+  /** Removals the saved override makes, kept while nothing under them is set again. */
+  const [keptRemovals, setKeptRemovals] = useState<Removal[]>([]);
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -172,14 +200,15 @@ export function HostConfigCard({ host, desired, desiredError, canWrite, onChange
   }, [host.id, hasOverride, canWrite]);
 
   /** The override with its values: fetched (and audited) the first time it is needed. */
-  const reveal = async (): Promise<ConfigObject> => {
-    if (saved) return saved;
-    if (!hasOverride) return {};
+  const reveal = async (): Promise<{ patch: ConfigObject; template: string | null }> => {
+    if (saved) return { patch: saved, template: savedTemplate };
+    if (!hasOverride) return { patch: {}, template: null };
     try {
       const o = await apiGet<HostOverrideView>(`/api/hosts/${host.id}/override`);
       setSaved(o.patch as ConfigObject);
+      setSavedTemplate(o.template);
       setOverrideError(null);
-      return o.patch as ConfigObject;
+      return { patch: o.patch as ConfigObject, template: o.template };
     } catch (e) {
       const msg = `Could not read the override: ${e instanceof Error ? e.message : String(e)}`;
       setOverrideError(msg);
@@ -187,16 +216,23 @@ export function HostConfigCard({ host, desired, desiredError, canWrite, onChange
     }
   };
 
+  /** What the bundles alone give this host: the override is the draft's difference from it. */
+  const baseline = useMemo(
+    () => (bundles ? configFromRows(layerConfigs(bundles.layers)) : null),
+    [bundles],
+  );
+
   // The override in the table: the draft while editing (when it parses), else what is saved.
   let parseError: string | null = null;
   let draftPatch: ConfigObject | null = null;
-  if (editing) {
+  if (editing && baseline) {
     try {
-      draftPatch = joinOverride(draftIni, draftRemovals);
+      draftPatch = overrideDiff(baseline, iniToJson(draftIni), keptRemovals);
     } catch (e) {
       parseError = e instanceof IniParseError ? e.message : String(e);
     }
   }
+  const draftRemovals = draftPatch ? removalsOf(draftPatch) : [];
   const overridePatch = editing ? (draftPatch ?? saved) : (saved ?? shape);
   /** The table shows where the override wins, but not with what. */
   const valuesHidden = !editing && saved === null && shape !== null;
@@ -238,47 +274,36 @@ export function HostConfigCard({ host, desired, desiredError, canWrite, onChange
     return out;
   }, [bundles, overridePatch, rows, valuesHidden]);
 
-  type Draft = { ini: string; removals: Removal[] };
-  /** Row actions and "Edit" all start from the current draft, or — when not editing yet —
-   *  from the override with its values, fetched first if need be. */
-  const editDraft = async (f: (d: Draft) => Draft) => {
-    let base: Draft;
-    if (editing) {
-      base = { ini: draftIni, removals: draftRemovals };
-    } else {
-      try {
-        base = splitOverride(await reveal());
-      } catch {
-        return;
-      }
+  /** Open the editor on the host's configuration as it stands, override included; a new
+   *  override starts at the template picker, as a new bundle does. */
+  const openEditor = async () => {
+    if (!bundles || !baseline) return;
+    let current: { patch: ConfigObject; template: string | null };
+    try {
+      current = await reveal();
+    } catch {
+      return;
     }
-    const next = f(base);
-    setDraftIni(next.ini);
-    setDraftRemovals(next.removals);
+    const layers = [...bundles.layers];
+    if (Object.keys(current.patch).length > 0) {
+      layers.push({ id: "override", label: "host override", kind: "override", config: current.patch });
+    }
+    setDraftIni(DRAFT_HEADER + jsonToIni(configFromRows(layerConfigs(layers))));
+    setDraftTemplate(current.template);
+    setKeptRemovals(removalsOf(current.patch));
     setSaveError(null);
+    setPicking(!hasOverride);
     setEditing(true);
   };
-  const openEditor = () => void editDraft((d) => d);
-  const overrideRow = (r: EffectiveRow) =>
-    void editDraft((d) => ({
-      ini: setIniValue(d.ini, r.section, r.key, r.value ?? r.replaced[r.replaced.length - 1]?.value ?? ""),
-      removals: d.removals.filter((x) => !sameRemoval(x, removalFor(r.section, r.key))),
-    }));
-  const removeRow = (r: EffectiveRow) =>
-    void editDraft((d) => ({
-      ini: removeIniKey(d.ini, r.section, r.key),
-      removals: [...d.removals.filter((x) => !sameRemoval(x, removalFor(r.section, r.key))), removalFor(r.section, r.key)],
-    }));
-  // Undoing a removal undoes exactly that key, even when the override removes its whole
-  // section: the section removal becomes removals of everything else it was taking away.
-  const removedNow = (rows ?? [])
-    .filter((x) => x.layer.kind === "override" && x.value === null)
-    .map((x) => removalFor(x.section, x.key));
-  const revertRow = (r: EffectiveRow) =>
-    void editDraft((d) => ({
-      ini: removeIniKey(d.ini, r.section, r.key),
-      removals: withoutRemovalOf(d.removals, removalFor(r.section, r.key), removedNow),
-    }));
+
+  /** Stop removing `r`: what it took away comes back with the bundles' values. */
+  const restoreRemoval = (r: Removal) => {
+    if (!baseline) return;
+    let ini = draftIni;
+    for (const b of removedBy(baseline, r)) ini = setIniValue(ini, b.section, b.key, b.value);
+    setDraftIni(ini);
+    setKeptRemovals(keptRemovals.filter((x) => !sameRemoval(x, r)));
+  };
 
   const save = async () => {
     if (!draftPatch) return;
@@ -288,10 +313,14 @@ export function HostConfigCard({ host, desired, desiredError, canWrite, onChange
       if (Object.keys(draftPatch).length === 0) {
         if (hasOverride) await apiSend("DELETE", `/api/hosts/${host.id}/override`);
       } else {
-        await apiSend("PUT", `/api/hosts/${host.id}/override`, { patch: draftPatch });
+        await apiSend("PUT", `/api/hosts/${host.id}/override`, {
+          patch: draftPatch,
+          template: draftTemplate,
+        });
       }
       const empty = Object.keys(draftPatch).length === 0;
       setSaved(empty ? null : draftPatch);
+      setSavedTemplate(empty ? null : draftTemplate);
       setShape(empty ? null : shapeOf(draftPatch));
       setEditing(false);
       onChanged();
@@ -408,7 +437,6 @@ export function HostConfigCard({ host, desired, desiredError, canWrite, onChange
                 <TableCell>Key</TableCell>
                 <TableCell>Value</TableCell>
                 <TableCell>Set by</TableCell>
-                {canWrite && <TableCell />}
               </TableRow>
             </TableHead>
             <TableBody>
@@ -445,30 +473,6 @@ export function HostConfigCard({ host, desired, desiredError, canWrite, onChange
                         variant={fromOverride ? "filled" : "outlined"}
                       />
                     </TableCell>
-                    {canWrite && (
-                      <TableCell align="right" sx={{ whiteSpace: "nowrap" }}>
-                        {fromOverride ? (
-                          <Tooltip title="Stop overriding: back to what the bundles give">
-                            <IconButton size="small" onClick={() => revertRow(r)}>
-                              <UndoIcon fontSize="small" />
-                            </IconButton>
-                          </Tooltip>
-                        ) : (
-                          <>
-                            <Tooltip title="Override this value on this host">
-                              <IconButton size="small" onClick={() => overrideRow(r)}>
-                                <EditIcon fontSize="small" />
-                              </IconButton>
-                            </Tooltip>
-                            <Tooltip title="Remove this key on this host">
-                              <IconButton size="small" onClick={() => removeRow(r)}>
-                                <RemoveCircleOutlineIcon fontSize="small" />
-                              </IconButton>
-                            </Tooltip>
-                          </>
-                        )}
-                      </TableCell>
-                    )}
                   </TableRow>
                 );
               })}
@@ -478,7 +482,13 @@ export function HostConfigCard({ host, desired, desiredError, canWrite, onChange
 
         {canWrite && !editing && (
           <Stack direction="row" spacing={1}>
-            <Button variant="outlined" size="small" startIcon={<EditIcon />} onClick={openEditor}>
+            <Button
+              variant="outlined"
+              size="small"
+              startIcon={<EditIcon />}
+              onClick={() => void openEditor()}
+              disabled={baseline === null}
+            >
               {hasOverride ? "Edit override" : "Add override"}
             </Button>
             {hasOverride &&
@@ -501,23 +511,79 @@ export function HostConfigCard({ host, desired, desiredError, canWrite, onChange
           </Stack>
         )}
 
-        {canWrite && editing && (
+        {canWrite && editing && picking && (
           <Stack spacing={1.5}>
-            <Typography variant="subtitle1">Host override</Typography>
-            <Typography variant="body2" color="text.secondary">
-              Settings for this host only, as INI — the table above previews the result. Use
-              the row buttons to override or remove a bundle's setting.
-            </Typography>
-            <TextField
-              multiline
-              minRows={6}
-              value={draftIni}
-              onChange={(e) => setDraftIni(e.target.value)}
-              placeholder={"[/settings/mysql]\npassword = …"}
-              error={parseError !== null}
-              helperText={parseError ?? " "}
-              slotProps={{ input: { sx: { fontFamily: "monospace", fontSize: "0.85rem" } } }}
+            <Typography variant="subtitle1">{hasOverride ? "Edit override" : "New override"}</Typography>
+            <TemplatePicker
+              intro={
+                "Pick what to change on this host. A template adds its settings where the " +
+                "host has none and opens its form; anything its bundles already set keeps " +
+                "their value until you change it."
+              }
+              onPick={(t) => {
+                if (t !== null) {
+                  try {
+                    setDraftIni(withTemplateDefaults(draftIni, t.ini));
+                  } catch (e) {
+                    setSaveError(e instanceof Error ? e.message : String(e));
+                  }
+                  setDraftTemplate(t.id);
+                }
+                setPicking(false);
+              }}
+              onCancel={() => {
+                setPicking(false);
+                if (!hasOverride && draftPatch !== null && Object.keys(draftPatch).length === 0) {
+                  setEditing(false);
+                }
+              }}
             />
+          </Stack>
+        )}
+
+        {canWrite && editing && !picking && (
+          <Stack spacing={1.5}>
+            <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
+              <Typography variant="subtitle1" sx={{ flexGrow: 1 }}>
+                Host override
+              </Typography>
+              {draftTemplate !== null ? (
+                <Tooltip
+                  title={
+                    templateById(draftTemplate)?.description ??
+                    "Written with a template this UI no longer knows. Remove to detach."
+                  }
+                >
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label={`template: ${templateById(draftTemplate)?.title ?? draftTemplate}`}
+                    onDelete={() => setDraftTemplate(null)}
+                  />
+                </Tooltip>
+              ) : (
+                <Button size="small" onClick={() => setPicking(true)}>
+                  Use a template
+                </Button>
+              )}
+            </Stack>
+            <Typography variant="body2" color="text.secondary">
+              This host's whole configuration — the table above previews the result. Only what
+              you change is saved as the override; a setting you delete is removed on this host.
+            </Typography>
+            {bundles?.unreadable.length ? (
+              <Alert severity="info">
+                Settings from {bundles.unreadable.map((u) => u.label).join(", ")} are not shown
+                here, so they cannot be removed; anything set here still wins over them.
+              </Alert>
+            ) : null}
+            <ConfigEditor
+              template={draftTemplate !== null ? templateById(draftTemplate) : undefined}
+              ini={draftIni}
+              onChange={setDraftIni}
+              minRows={10}
+            />
+            {parseError && <Alert severity="error">{parseError}</Alert>}
             {draftRemovals.length > 0 && (
               <div>
                 <Typography variant="body2" sx={{ mb: 0.5 }}>
@@ -525,13 +591,14 @@ export function HostConfigCard({ host, desired, desiredError, canWrite, onChange
                 </Typography>
                 <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
                   {draftRemovals.map((r) => (
-                    <Chip
-                      key={r.join("/")}
-                      size="small"
-                      label={removalLabel(r)}
-                      sx={{ fontFamily: "monospace" }}
-                      onDelete={() => setDraftRemovals(draftRemovals.filter((x) => !sameRemoval(x, r)))}
-                    />
+                    <Tooltip key={r.join("/")} title="Keep it: back to what the bundles give">
+                      <Chip
+                        size="small"
+                        label={removalLabel(r)}
+                        sx={{ fontFamily: "monospace" }}
+                        onDelete={() => restoreRemoval(r)}
+                      />
+                    </Tooltip>
                   ))}
                 </Stack>
               </div>
@@ -550,7 +617,11 @@ export function HostConfigCard({ host, desired, desiredError, canWrite, onChange
             )}
             {saveError && <Alert severity="error">{saveError}</Alert>}
             <Stack direction="row" spacing={1}>
-              <Button variant="contained" onClick={save} disabled={busy || parseError !== null}>
+              <Button
+                variant="contained"
+                onClick={save}
+                disabled={busy || draftPatch === null || (!hasOverride && Object.keys(draftPatch).length === 0)}
+              >
                 {busy ? "Saving…" : "Save override"}
               </Button>
               <Button onClick={() => setEditing(false)} disabled={busy}>

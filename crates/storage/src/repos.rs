@@ -1517,6 +1517,8 @@ pub struct StoredHostOverride {
     pub host_id: String,
     pub patch_encrypted: Vec<u8>,
     pub priority: i64,
+    /// UI template the override was written with; `None` for plain INI.
+    pub template: Option<String>,
 }
 
 pub struct HostOverridesRepo<'a> {
@@ -1534,16 +1536,18 @@ impl<'a> HostOverridesRepo<'a> {
         host_id: &str,
         patch_encrypted: &[u8],
         priority: i64,
+        template: Option<&str>,
         updated_by_user: Option<i64>,
     ) -> Result<()> {
         let now = now_unix();
         sqlx::query(
             "INSERT INTO host_overrides
-             (tenant_id, host_id, patch_encrypted, priority, updated_at, updated_by_user)
-             VALUES (?, ?, ?, ?, ?, ?)
+             (tenant_id, host_id, patch_encrypted, priority, template, updated_at, updated_by_user)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(host_id) DO UPDATE SET
                patch_encrypted = excluded.patch_encrypted,
                priority = excluded.priority,
+               template = excluded.template,
                updated_at = excluded.updated_at,
                updated_by_user = excluded.updated_by_user,
                tenant_id = excluded.tenant_id",
@@ -1552,6 +1556,7 @@ impl<'a> HostOverridesRepo<'a> {
         .bind(host_id)
         .bind(patch_encrypted)
         .bind(priority)
+        .bind(template)
         .bind(now)
         .bind(updated_by_user)
         .execute(&self.db.write)
@@ -1607,7 +1612,7 @@ impl<'a> HostOverridesRepo<'a> {
 
     pub async fn get(&self, tenant_id: i64, host_id: &str) -> Result<Option<StoredHostOverride>> {
         let row = sqlx::query(
-            "SELECT host_id, patch_encrypted, priority FROM host_overrides
+            "SELECT host_id, patch_encrypted, priority, template FROM host_overrides
              WHERE tenant_id = ? AND host_id = ?",
         )
         .bind(tenant_id)
@@ -1618,6 +1623,7 @@ impl<'a> HostOverridesRepo<'a> {
             host_id: r.get("host_id"),
             patch_encrypted: r.get("patch_encrypted"),
             priority: r.get("priority"),
+            template: r.get("template"),
         }))
     }
 }

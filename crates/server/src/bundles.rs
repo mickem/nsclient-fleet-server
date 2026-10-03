@@ -426,7 +426,7 @@ async fn persist_bundle(
 const BUNDLE_TOKEN_RULE: &str =
     "name and version must be 1-128 characters of letters, digits, '.', '_' or '-'";
 
-fn valid_bundle_token(s: &str) -> bool {
+pub(crate) fn valid_bundle_token(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 128
         && s.chars()
