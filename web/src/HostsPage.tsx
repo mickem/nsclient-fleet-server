@@ -23,6 +23,7 @@ import {
 } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
 import DeleteIcon from "@mui/icons-material/Delete";
+import UploadFileIcon from "@mui/icons-material/UploadFile";
 import LabelIcon from "@mui/icons-material/Label";
 import LabelOffIcon from "@mui/icons-material/LabelOff";
 import {
@@ -199,6 +200,15 @@ export function HostsPage({ me }: Props) {
         <Typography variant="h4">Hosts</Typography>
         <Stack direction="row" spacing={1} alignItems="center">
           <RefreshButton refreshing={refreshing} onClick={refresh} />
+          {canWrite && (
+            <Button
+              variant="outlined"
+              startIcon={<UploadFileIcon />}
+              onClick={() => navigate("/hosts/import")}
+            >
+              Import facts
+            </Button>
+          )}
           {canAddHosts(me.role) && (
             <Button variant="contained" startIcon={<AddIcon />} onClick={addHost} disabled={busy}>
               {busy ? "Issuing token…" : "Add host"}

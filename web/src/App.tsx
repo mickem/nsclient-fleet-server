@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { CssBaseline } from "@mui/material";
 import { ThemeProvider } from "@mui/material/styles";
 import { BrowserRouter, Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { theme } from "./theme";
-import { canManageUsers, Me, PublicConfig, TRIAL_EXPIRED_EVENT } from "./api";
+import { canManageUsers, canWriteConfig, Me, PublicConfig, TRIAL_EXPIRED_EVENT } from "./api";
 import { Login } from "./Login";
 import { Signup } from "./Signup";
 import { Dashboard } from "./Dashboard";
@@ -16,6 +16,11 @@ import { UsersPage } from "./UsersPage";
 import { ApiKeysPage } from "./ApiKeysPage";
 import { PlatformPage } from "./PlatformPage";
 import { TrialExpiredPage } from "./TrialExpiredPage";
+
+// Loaded on first use: the wizard brings a YAML parser most sessions never need.
+const ImportFactsPage = lazy(() =>
+  import("./ImportFactsPage").then((m) => ({ default: m.ImportFactsPage })),
+);
 
 /** Routes for a signed-in session. Role-gated pages are not registered at all for roles
  *  that cannot use them, so a deep link to one lands on the fallback instead of a page
@@ -37,6 +42,16 @@ function AuthedRoutes({ me, onLogout }: { me: Me; onLogout: () => void }) {
     <Routes>
       <Route element={<Dashboard me={me} onLogout={onLogout} />}>
         <Route path="hosts" element={<HostsPage me={me} />} />
+        {canWriteConfig(me.role) && (
+          <Route
+            path="hosts/import"
+            element={
+              <Suspense fallback={null}>
+                <ImportFactsPage />
+              </Suspense>
+            }
+          />
+        )}
         <Route path="hosts/:hostId" element={<HostDetailPage me={me} />} />
         {/* Editors are URLs too (/groups/new, /bundles/:id, …): a refresh keeps them open,
             and the sidebar entry for the list is a real way back out of one. */}

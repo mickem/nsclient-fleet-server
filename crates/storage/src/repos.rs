@@ -819,6 +819,20 @@ impl<'a> HostTagsRepo<'a> {
         Ok(res.rows_affected() > 0)
     }
 
+    /// Every value of tag `key` in a tenant, manual and agent alike, as `(host_id, value)`.
+    pub async fn values_for_key(&self, tenant_id: i64, key: &str) -> Result<Vec<(String, String)>> {
+        let rows =
+            sqlx::query("SELECT host_id, value FROM host_tags WHERE tenant_id = ? AND key = ?")
+                .bind(tenant_id)
+                .bind(key)
+                .fetch_all(&self.db.read)
+                .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get("host_id"), r.get("value")))
+            .collect())
+    }
+
     /// Every host's tags in a tenant, keyed by host id, in one query. For evaluating a
     /// selector across the fleet without a round trip per host.
     pub async fn maps_for_tenant(
@@ -2094,6 +2108,91 @@ impl<'a> HostFactsRepo<'a> {
             n += 1;
         }
         Ok(n)
+    }
+
+    /// Every document a host holds from a source other than `except`, sorted by source.
+    pub async fn list_for_host_except(
+        &self,
+        tenant_id: i64,
+        host_id: &str,
+        except: &str,
+    ) -> Result<Vec<StoredFacts>> {
+        let rows = sqlx::query(
+            "SELECT source, facts_hash, facts_json, collected_at, received_at, size_bytes
+               FROM host_facts WHERE tenant_id = ? AND host_id = ? AND source != ?
+              ORDER BY source",
+        )
+        .bind(tenant_id)
+        .bind(host_id)
+        .bind(except)
+        .fetch_all(&self.db.read)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| StoredFacts {
+                source: r.get("source"),
+                facts_hash: r.get("facts_hash"),
+                facts_json: r.get("facts_json"),
+                collected_at: r.get("collected_at"),
+                received_at: r.get("received_at"),
+                size_bytes: r.get("size_bytes"),
+            })
+            .collect())
+    }
+
+    /// The hosts in a tenant holding a document from `source`, in host id order.
+    pub async fn hosts_with_source(&self, tenant_id: i64, source: &str) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT host_id FROM host_facts WHERE tenant_id = ? AND source = ? ORDER BY host_id",
+        )
+        .bind(tenant_id)
+        .bind(source)
+        .fetch_all(&self.db.read)
+        .await?)
+    }
+
+    /// Delete one host's document from `source`, and its history. Returns true iff there
+    /// was a document.
+    pub async fn delete(&self, tenant_id: i64, host_id: &str, source: &str) -> Result<bool> {
+        let mut tx = self.db.write.begin().await?;
+        let res = sqlx::query(
+            "DELETE FROM host_facts WHERE tenant_id = ? AND host_id = ? AND source = ?",
+        )
+        .bind(tenant_id)
+        .bind(host_id)
+        .bind(source)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "DELETE FROM host_fact_changes WHERE tenant_id = ? AND host_id = ? AND source = ?",
+        )
+        .bind(tenant_id)
+        .bind(host_id)
+        .bind(source)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Delete every document of `source` in a tenant, and their history. Returns the hosts
+    /// whose document was deleted.
+    pub async fn delete_source(&self, tenant_id: i64, source: &str) -> Result<Vec<String>> {
+        let mut tx = self.db.write.begin().await?;
+        let hosts: Vec<String> = sqlx::query_scalar(
+            "DELETE FROM host_facts WHERE tenant_id = ? AND source = ? RETURNING host_id",
+        )
+        .bind(tenant_id)
+        .bind(source)
+        .fetch_all(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM host_fact_changes WHERE tenant_id = ? AND source = ?")
+            .bind(tenant_id)
+            .bind(source)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(hosts)
     }
 
     /// The sources any host in the tenant holds a document from, sorted.
