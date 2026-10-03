@@ -447,6 +447,16 @@ export function apiSend<T>(method: string, path: string, body?: unknown): Promis
   }).then((r) => handle<T>(r));
 }
 
+/** POST a raw binary body (e.g. one re-sealed bundle). */
+export function apiPostBytes<T>(path: string, bytes: Uint8Array<ArrayBuffer>): Promise<T> {
+  return fetch(path, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: bytes,
+  }).then((r) => handle<T>(r));
+}
+
 export function apiUpload<T>(path: string, form: FormData): Promise<T> {
   return fetch(path, { method: "POST", credentials: "include", body: form }).then((r) =>
     handle<T>(r),

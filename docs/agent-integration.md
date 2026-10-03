@@ -60,8 +60,10 @@ never hardcode a poll interval.
   bundle contents, and host overrides are folded into `state_hash` server-side. Treat the
   field as a forward-compatibility slot — merge it like a bundle patch if it is ever
   non-empty.
-- `state_hash` covers the bundle set (ids, digests, priorities) and the merged config.
-  Persist it only after a fully successful apply.
+- `state_hash` covers the merged config and, for every bundle, everything the entry
+  carries: id, name, version, format, sha256, signature and priority. A bundle renamed or
+  re-signed without new bytes still changes it, so the agent is told. Persist it only
+  after a fully successful apply.
 
 **`429 Too Many Requests`** — the agent polled faster than the tier's floor or exceeded
 its per-host request budget. Honor the `Retry-After` header, then resume the normal

@@ -152,6 +152,9 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
         form.set("version", v);
         form.set("format", "enc-v1");
         form.set("bundle", new Blob([sealed]), `${n}-${v}.nseb`);
+        // Saved against the bundle this was opened from: if it has been renamed (or
+        // deleted) meanwhile, the server refuses rather than recreate the old name.
+        if (editBundle) form.set("base_bundle_id", editBundle.id);
         await apiUpload<BundleView>("/api/bundles", form);
       } else if (encBase) {
         // The base was decrypted in this browser; the server cannot compose from a bundle
@@ -161,6 +164,9 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
         form.set("name", n);
         form.set("version", v);
         form.set("bundle", new Blob([zip], { type: "application/zip" }), `${n}-${v}.zip`);
+        // Saved against the bundle this was opened from: if it has been renamed (or
+        // deleted) meanwhile, the server refuses rather than recreate the old name.
+        if (editBundle) form.set("base_bundle_id", editBundle.id);
         await apiUpload<BundleView>("/api/bundles", form);
       } else {
         await apiSend<BundleView>("POST", "/api/bundles/compose", {

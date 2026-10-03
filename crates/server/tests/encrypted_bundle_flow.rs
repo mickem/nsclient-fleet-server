@@ -351,27 +351,54 @@ async fn operator_download_round_trip() {
     assert_eq!(r.status(), 404);
 }
 
+/// Stage one re-sealed encrypted version.
+async fn stage(s: &TestServer, id: &str, bytes: Vec<u8>) -> reqwest::Response {
+    s.cookie_jar
+        .post(format!("{}/api/bundles/{id}/reseal", s.base_url))
+        .header("content-type", "application/octet-stream")
+        .body(bytes)
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn commit_rename(
+    s: &TestServer,
+    from: &str,
+    to: &str,
+    resealed: serde_json::Value,
+) -> reqwest::Response {
+    s.cookie_jar
+        .post(format!("{}/api/bundles/rename", s.base_url))
+        .json(&serde_json::json!({ "from": from, "to": to, "resealed": resealed }))
+        .send()
+        .await
+        .unwrap()
+}
+
+/// Rename the way the browser does: stage each re-sealed version, then commit. Returns the
+/// first refusal, from staging or from the commit.
 async fn rename_bundle(
     s: &TestServer,
     from: &str,
     to: &str,
     sealed: Vec<(String, Vec<u8>)>,
 ) -> reqwest::Response {
-    let mut form = reqwest::multipart::Form::new()
-        .text("from", from.to_string())
-        .text("to", to.to_string());
+    let mut resealed = serde_json::Map::new();
     for (id, bytes) in sealed {
-        form = form.part(
-            format!("sealed:{id}"),
-            reqwest::multipart::Part::bytes(bytes).file_name("sealed.bin"),
-        );
+        let r = stage(s, &id, bytes).await;
+        if r.status() != 200 {
+            return r;
+        }
+        let staged: serde_json::Value = r.json().await.unwrap();
+        resealed.insert(id, staged["staged_id"].clone());
     }
-    s.cookie_jar
-        .post(format!("{}/api/bundles/rename", s.base_url))
-        .multipart(form)
-        .send()
-        .await
-        .unwrap()
+    commit_rename(s, from, to, serde_json::Value::Object(resealed)).await
+}
+
+/// The orphan sweep, with no grace period.
+async fn sweep_now(s: &TestServer) -> usize {
+    fleet_server::housekeeping::sweep_bundle_files(&s.db, s.state.bundle_store.as_ref(), 0).await
 }
 
 /// Renaming moves every version of a name: plain versions keep their id, encrypted ones
@@ -523,37 +550,37 @@ async fn rename_keeps_assignments_and_reseals_encrypted_versions() {
         .unwrap();
     assert!(list.iter().all(|b| b["name"] != "app"));
     let dir = s._tempdir.path().join("bundles").join("1");
+    // The replaced ciphertext stays until housekeeping, so an agent mid-download of it is
+    // not cut off; so do the re-seals staged by the two refused attempts above. The sweep
+    // takes those three and nothing a row points at.
+    assert!(dir.join(format!("{enc_id}.zip")).exists());
+    assert_eq!(sweep_now(&s).await, 3);
     assert!(!dir.join(format!("{enc_id}.zip")).exists());
     for id in [&plain_id, &new_enc_id] {
         assert!(dir.join(format!("{id}.zip")).exists());
     }
 
-    // The audit entry says which id each version had and has.
-    let meta: String = sqlx::query_scalar(
-        "SELECT metadata_json FROM audit_log WHERE action = 'bundle.renamed' ORDER BY id DESC LIMIT 1",
+    // One audit entry per version, filed under the id it has now and naming the one it had.
+    let mut ids: Vec<(String, String)> = sqlx::query_as::<_, (String, String)>(
+        "SELECT target_id, metadata_json FROM audit_log WHERE action = 'bundle.renamed'
+          AND metadata_json LIKE '%\"to\":\"web\"%'",
     )
-    .fetch_one(&s.db.read)
+    .fetch_all(&s.db.read)
     .await
-    .unwrap();
-    let meta: serde_json::Value = serde_json::from_str(&meta).unwrap();
-    let ids: Vec<(String, String)> = meta["versions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| {
-            (
-                v["old_id"].as_str().unwrap().to_string(),
-                v["new_id"].as_str().unwrap().to_string(),
-            )
-        })
-        .collect();
-    assert_eq!(
-        ids,
-        vec![
-            (plain_id.clone(), plain_id.clone()),
-            (enc_id.clone(), new_enc_id.clone())
-        ]
-    );
+    .unwrap()
+    .into_iter()
+    .map(|(target, meta)| {
+        let meta: serde_json::Value = serde_json::from_str(&meta).unwrap();
+        (meta["old_id"].as_str().unwrap().to_string(), target)
+    })
+    .collect();
+    ids.sort();
+    let mut want = vec![
+        (plain_id.clone(), plain_id.clone()),
+        (enc_id.clone(), new_enc_id.clone()),
+    ];
+    want.sort();
+    assert_eq!(ids, want);
 
     // The group still carries both versions, with their priorities.
     let carried: Vec<serde_json::Value> = s
@@ -610,7 +637,7 @@ async fn rename_keeps_assignments_and_reseals_encrypted_versions() {
 }
 
 /// A bundle whose versions are all plain: the case where renaming in place left the
-/// desired-state hash untouched (it covers ids, not names), so a host already in sync kept
+/// desired-state hash untouched (it covered ids, not names), so a host already in sync kept
 /// getting 304s and never heard of the new name.
 #[tokio::test]
 async fn renaming_a_plain_bundle_reaches_hosts_already_in_sync() {
@@ -763,14 +790,8 @@ async fn a_resealed_version_must_match_the_original() {
         .unwrap();
     assert_eq!(r.status(), 200);
     let zip = b"PK\x03\x04-secret".to_vec();
-    let r = upload_bundle(
-        &s,
-        "app",
-        "1",
-        Some("enc-v1"),
-        key.encrypt("app", "1", &zip),
-    )
-    .await;
+    let original = key.encrypt("app", "1", &zip);
+    let r = upload_bundle(&s, "app", "1", Some("enc-v1"), original.clone()).await;
     assert_eq!(r.status(), 200);
     let id = r.json::<serde_json::Value>().await.unwrap()["id"]
         .as_str()
@@ -790,11 +811,8 @@ async fn a_resealed_version_must_match_the_original() {
             vec![(id.clone(), key.encrypt("web", "1", &longer))],
         ),
         (
-            "the same version twice",
-            vec![
-                (id.clone(), key.encrypt("web", "1", &zip)),
-                (id.clone(), key.encrypt("web", "1", &zip)),
-            ],
+            "the original ciphertext sent back",
+            vec![(id.clone(), original.clone())],
         ),
     ] {
         let r = rename_bundle(&s, "app", "web", parts).await;
@@ -882,4 +900,243 @@ async fn the_rename_transaction_refuses_a_stale_picture() {
         .collect();
     assert_eq!(still.len(), 2, "a refused rename changes nothing");
     assert!(still.iter().all(|sig| sig != "sig"));
+}
+
+/// A staged id names a file, so the commit only accepts one the server could have minted
+/// that no bundle row owns — not another bundle's file, not a path.
+#[tokio::test]
+async fn a_rename_only_commits_files_it_staged() {
+    let s = start().await;
+    signup_login(&s, "acme", "alice@example.com").await;
+    let key = BundleKey::generate();
+    let r = s
+        .cookie_jar
+        .put(format!("{}/api/bundle-key", s.base_url))
+        .json(&serde_json::json!({ "fingerprint": key.fingerprint_hex() }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let zip = b"PK\x03\x04-secret".to_vec();
+    let r = upload_bundle(
+        &s,
+        "app",
+        "1",
+        Some("enc-v1"),
+        key.encrypt("app", "1", &zip),
+    )
+    .await;
+    let enc_id = r.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r = upload_bundle(&s, "other", "1", None, b"PK\x03\x04-other".to_vec()).await;
+    let other_id = r.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    for staged in [
+        other_id.as_str(),
+        "../../1/whatever",
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    ] {
+        let r = commit_rename(
+            &s,
+            "app",
+            "web",
+            serde_json::json!({ enc_id.clone(): staged }),
+        )
+        .await;
+        assert_eq!(r.status(), 400, "staged id {staged}: {:?}", r.text().await);
+    }
+    // A key for something that is not an encrypted version of the bundle.
+    let r = commit_rename(
+        &s,
+        "app",
+        "web",
+        serde_json::json!({ other_id.clone(): "x" }),
+    )
+    .await;
+    assert_eq!(r.status(), 400);
+
+    // An oversized body is refused while it is read — the server answers and stops reading,
+    // so the client may see the 400 or the connection closing under it — and nothing is
+    // staged.
+    let sent = s
+        .cookie_jar
+        .post(format!("{}/api/bundles/{enc_id}/reseal", s.base_url))
+        .header("content-type", "application/octet-stream")
+        .body(vec![0u8; 1024 * 1024])
+        .send()
+        .await;
+    if let Ok(r) = sent {
+        assert_eq!(r.status(), 400);
+    }
+    assert_eq!(sweep_now(&s).await, 0);
+
+    let r = rename_bundle(
+        &s,
+        "app",
+        "web",
+        vec![(enc_id.clone(), key.encrypt("web", "1", &zip))],
+    )
+    .await;
+    assert_eq!(r.status(), 200, "{:?}", r.text().await);
+}
+
+/// Bundle files no row points at are swept once older than the grace period, and only
+/// those: a staged re-seal is left alone while it is fresh.
+#[tokio::test]
+async fn the_sweep_removes_only_old_files_no_bundle_points_at() {
+    let s = start().await;
+    signup_login(&s, "acme", "alice@example.com").await;
+    let key = BundleKey::generate();
+    let r = s
+        .cookie_jar
+        .put(format!("{}/api/bundle-key", s.base_url))
+        .json(&serde_json::json!({ "fingerprint": key.fingerprint_hex() }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let zip = b"PK\x03\x04-secret".to_vec();
+    let r = upload_bundle(
+        &s,
+        "app",
+        "1",
+        Some("enc-v1"),
+        key.encrypt("app", "1", &zip),
+    )
+    .await;
+    let enc_id = r.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r = stage(&s, &enc_id, key.encrypt("web", "1", &zip)).await;
+    assert_eq!(r.status(), 200);
+    let staged = r.json::<serde_json::Value>().await.unwrap()["staged_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let store = s.state.bundle_store.as_ref();
+    assert_eq!(
+        fleet_server::housekeeping::sweep_bundle_files(&s.db, store, 3_600).await,
+        0,
+        "a fresh staged re-seal is waiting for its commit"
+    );
+    assert_eq!(sweep_now(&s).await, 1);
+    let dir = s._tempdir.path().join("bundles").join("1");
+    assert!(!dir.join(format!("{staged}.zip")).exists());
+    assert!(dir.join(format!("{enc_id}.zip")).exists());
+
+    // A commit naming a re-seal the sweep took asks for it again.
+    let r = commit_rename(
+        &s,
+        "app",
+        "web",
+        serde_json::json!({ enc_id.clone(): staged }),
+    )
+    .await;
+    assert_eq!(r.status(), 400);
+    assert!(r.text().await.unwrap().contains("re-seal it again"));
+}
+
+/// An edit is saved against the bundle it was opened from. Once that bundle has been
+/// renamed, the save is refused instead of recreating the old name beside the new one.
+#[tokio::test]
+async fn an_edit_open_across_a_rename_cannot_save_the_old_name() {
+    let s = start().await;
+    signup_login(&s, "acme", "alice@example.com").await;
+    let key = BundleKey::generate();
+    let r = s
+        .cookie_jar
+        .put(format!("{}/api/bundle-key", s.base_url))
+        .json(&serde_json::json!({ "fingerprint": key.fingerprint_hex() }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let r = upload_bundle(&s, "plain", "1", None, b"PK\x03\x04-p".to_vec()).await;
+    let plain_id = r.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let zip = b"PK\x03\x04-secret".to_vec();
+    let r = upload_bundle(
+        &s,
+        "sealed",
+        "1",
+        Some("enc-v1"),
+        key.encrypt("sealed", "1", &zip),
+    )
+    .await;
+    let enc_id = r.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    assert_eq!(
+        rename_bundle(&s, "plain", "plain2", vec![]).await.status(),
+        200
+    );
+    assert_eq!(
+        rename_bundle(
+            &s,
+            "sealed",
+            "sealed2",
+            vec![(enc_id.clone(), key.encrypt("sealed2", "1", &zip))]
+        )
+        .await
+        .status(),
+        200
+    );
+
+    // The server-composed save of a plain bundle: renamed in place, so the base is there
+    // under its new name.
+    let r = s
+        .cookie_jar
+        .post(format!("{}/api/bundles/compose", s.base_url))
+        .json(&serde_json::json!({
+            "name": "plain", "version": "2", "config_json": {}, "base_bundle_id": plain_id,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 409);
+    assert!(r.text().await.unwrap().contains("plain2"));
+
+    // The browser-built save of an encrypted bundle: its base moved to a new id.
+    let form = reqwest::multipart::Form::new()
+        .text("name", "sealed")
+        .text("version", "2")
+        .text("format", "enc-v1")
+        .text("base_bundle_id", enc_id.clone())
+        .part(
+            "bundle",
+            reqwest::multipart::Part::bytes(key.encrypt("sealed", "2", &zip)).file_name("b.nseb"),
+        );
+    let r = s
+        .cookie_jar
+        .post(format!("{}/api/bundles", s.base_url))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+
+    let names: Vec<String> = s
+        .cookie_jar
+        .get(format!("{}/api/bundles", s.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json::<Vec<serde_json::Value>>()
+        .await
+        .unwrap()
+        .iter()
+        .map(|b| b["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(!names.contains(&"plain".to_string()) && !names.contains(&"sealed".to_string()));
 }

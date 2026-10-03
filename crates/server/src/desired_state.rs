@@ -338,9 +338,8 @@ pub async fn compute_uncached(
     //    bundle. For Phase 5 we don't unpack the zip server-side; we keep an in-memory
     //    indirection by storing the patch on the row at upload time. Until that's wired,
     //    bundles contribute nothing to the merged config and an agent's config_json is {}.
-    //    The agent applies bundles itself once it downloads them. The state_hash here
-    //    therefore reflects the *bundle set* (id + sha256 + priority), not the merged
-    //    config bytes. Document this in the response so agents know.
+    //    The agent applies bundles itself once it downloads them, so the state_hash
+    //    covers each bundle's full signed descriptor (see step 7), not the config inside.
     let mut merged = Value::Object(serde_json::Map::new());
 
     // 5. Layer in host override (priority 1000+ by default).

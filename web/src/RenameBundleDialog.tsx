@@ -9,7 +9,7 @@ import {
   DialogTitle,
   TextField,
 } from "@mui/material";
-import { apiGetBytes, apiUpload, BundleView } from "./api";
+import { apiGetBytes, apiPostBytes, apiSend, BundleView } from "./api";
 import { TOKEN_RE } from "./bundlezip";
 import { decryptBundle, encryptBundle, recalledKey } from "./crypto";
 
@@ -68,18 +68,22 @@ export function RenameBundleDialog({
     setBusy(true);
     setError(null);
     try {
-      const form = new FormData();
-      form.set("from", from);
-      form.set("to", target);
+      // One encrypted version at a time: open it under the old name, seal it under the new
+      // one, stage it, and let it go — so only one is ever held here. Nothing is renamed
+      // until the last call; staged versions that never get there are cleaned up later.
       const key = recalledKey();
+      const resealed: Record<string, string> = {};
       for (const v of encrypted) {
         if (!key) throw new Error("The encryption key is no longer unlocked.");
         const sealed = await apiGetBytes(`/api/bundles/${v.id}/download`);
         const plain = await decryptBundle(key, from, v.version, sealed);
-        const resealed = await encryptBundle(key, target, v.version, plain);
-        form.set(`sealed:${v.id}`, new Blob([resealed]), `${target}-${v.version}.nseb`);
+        const staged = await apiPostBytes<{ staged_id: string }>(
+          `/api/bundles/${v.id}/reseal`,
+          await encryptBundle(key, target, v.version, plain),
+        );
+        resealed[v.id] = staged.staged_id;
       }
-      await apiUpload("/api/bundles/rename", form);
+      await apiSend("POST", "/api/bundles/rename", { from, to: target, resealed });
       onRenamed();
     } catch (e) {
       setError((e as Error).message);
