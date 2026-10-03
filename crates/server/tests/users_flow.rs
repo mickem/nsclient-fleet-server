@@ -278,6 +278,17 @@ async fn the_permission_matrix_is_enforced_by_the_server() {
         )
         .await;
         assert_eq!(code, want, "{name} reading a host override");
+        let code = status(
+            c.get(format!(
+                "{}/api/hosts/{}/override/shape",
+                s.base_url, host_id
+            ))
+            .send()
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(code, want, "{name} reading a host override's shape");
     }
 
     // User management: admins only, and the listing is not readable by anyone else.

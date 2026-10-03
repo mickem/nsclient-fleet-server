@@ -66,6 +66,7 @@ export function HostDetailPage({ me }: Props) {
   const onBack = () => navigate("/hosts");
   const [host, setHost] = useState<HostDetail | null>(null);
   const [desired, setDesired] = useState<DesiredStateView | null>(null);
+  const [desiredError, setDesiredError] = useState<string | null>(null);
   const [facts, setFacts] = useState<HostFacts | null>(null);
   const [factsError, setFactsError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -86,7 +87,13 @@ export function HostDetailPage({ me }: Props) {
         },
         (e) => setError(e.message),
       ),
-      apiGet<DesiredStateView>(`/api/hosts/${hostId}/desired`).then(setDesired, () => {}),
+      apiGet<DesiredStateView>(`/api/hosts/${hostId}/desired`).then(
+        (d) => {
+          setDesired(d);
+          setDesiredError(null);
+        },
+        (e) => setDesiredError(e instanceof Error ? e.message : String(e)),
+      ),
       apiGet<HostFacts>(`/api/hosts/${hostId}/facts`).then(
         (f) => {
           setFacts(f);
@@ -207,6 +214,7 @@ export function HostDetailPage({ me }: Props) {
           <HostConfigCard
             host={host}
             desired={desired}
+            desiredError={desiredError}
             canWrite={canWriteConfig(me.role)}
             onChanged={refresh}
           />

@@ -47,13 +47,17 @@ import {
   removalFor,
   removalLabel,
   sameRemoval,
+  shapeOf,
   splitOverride,
+  withoutRemovalOf,
 } from "./hostConfig";
 import { type ConfigObject, IniParseError, removeIniKey, setIniValue } from "./ini";
 
 type Props = {
   host: HostDetail;
   desired: DesiredStateView | null;
+  /** Why the desired state could not be loaded, when it could not. */
+  desiredError: string | null;
   canWrite: boolean;
   onChanged: () => void;
 };
@@ -101,14 +105,25 @@ async function loadBundleLayers(
   return out;
 }
 
+/** Shown in place of an override value that has not been revealed. */
+const HIDDEN = "••••••";
+
 /** The host's configuration as the agent will write it — every setting with the bundle
  *  (or the override) it comes from and what it replaced — and the host override, edited
- *  as INI with a live preview in the same table. */
-export function HostConfigCard({ host, desired, canWrite, onChanged }: Props) {
+ *  as INI with a live preview in the same table.
+ *
+ *  The override usually holds credentials, so the page loads only its shape (which keys
+ *  it sets or removes) and shows its values masked. They are fetched — an audited read —
+ *  only when someone asks to see them or starts changing the override. */
+export function HostConfigCard({ host, desired, desiredError, canWrite, onChanged }: Props) {
   const keyState = useBundleKey();
   const [bundles, setBundles] = useState<BundleLayers | null>(null);
+  const [bundlesError, setBundlesError] = useState<string | null>(null);
+  /** Which keys the override sets ("") or removes (null); no values. */
+  const [shape, setShape] = useState<ConfigObject | null>(null);
+  /** The override with its values, once someone has asked for them. */
   const [saved, setSaved] = useState<ConfigObject | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [overrideError, setOverrideError] = useState<string | null>(null);
 
   const [editing, setEditing] = useState(false);
   const [draftIni, setDraftIni] = useState("");
@@ -124,8 +139,12 @@ export function HostConfigCard({ host, desired, canWrite, onChanged }: Props) {
     if (!desired) return;
     let live = true;
     loadBundleLayers(desired, keyState.unlocked).then(
-      (b) => live && setBundles(b),
-      (e) => live && setLoadError(String(e)),
+      (b) => {
+        if (!live) return;
+        setBundles(b);
+        setBundlesError(null);
+      },
+      (e) => live && setBundlesError(String(e)),
     );
     return () => {
       live = false;
@@ -133,19 +152,40 @@ export function HostConfigCard({ host, desired, canWrite, onChanged }: Props) {
   }, [desired?.state_hash, keyState.unlocked]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
+    setSaved(null);
     if (!canWrite || !hasOverride) {
-      setSaved(null);
+      setShape(null);
       return;
     }
     let live = true;
-    apiGet<HostOverrideView>(`/api/hosts/${host.id}/override`).then(
-      (o) => live && setSaved(o.patch as ConfigObject),
-      (e) => live && setLoadError(`Could not read the override: ${e.message ?? e}`),
+    apiGet<HostOverrideView>(`/api/hosts/${host.id}/override/shape`).then(
+      (o) => {
+        if (!live) return;
+        setShape(o.patch as ConfigObject);
+        setOverrideError(null);
+      },
+      (e) => live && setOverrideError(`Could not read the override: ${e.message ?? e}`),
     );
     return () => {
       live = false;
     };
   }, [host.id, hasOverride, canWrite]);
+
+  /** The override with its values: fetched (and audited) the first time it is needed. */
+  const reveal = async (): Promise<ConfigObject> => {
+    if (saved) return saved;
+    if (!hasOverride) return {};
+    try {
+      const o = await apiGet<HostOverrideView>(`/api/hosts/${host.id}/override`);
+      setSaved(o.patch as ConfigObject);
+      setOverrideError(null);
+      return o.patch as ConfigObject;
+    } catch (e) {
+      const msg = `Could not read the override: ${e instanceof Error ? e.message : String(e)}`;
+      setOverrideError(msg);
+      throw new Error(msg);
+    }
+  };
 
   // The override in the table: the draft while editing (when it parses), else what is saved.
   let parseError: string | null = null;
@@ -157,7 +197,9 @@ export function HostConfigCard({ host, desired, canWrite, onChanged }: Props) {
       parseError = e instanceof IniParseError ? e.message : String(e);
     }
   }
-  const overridePatch = editing ? (draftPatch ?? saved) : saved;
+  const overridePatch = editing ? (draftPatch ?? saved) : (saved ?? shape);
+  /** The table shows where the override wins, but not with what. */
+  const valuesHidden = !editing && saved === null && shape !== null;
   const overrideLast = host.host_override_last !== false;
 
   const rows = useMemo(() => {
@@ -174,7 +216,7 @@ export function HostConfigCard({ host, desired, canWrite, onChanged }: Props) {
   // Override lines that change nothing: a value the bundles already give, or a removal of
   // something nothing sets. Worth saying — they are easy to leave behind.
   const noOps = useMemo(() => {
-    if (!bundles || !overridePatch) return [];
+    if (!bundles || !overridePatch || valuesHidden) return [];
     const fromBundles = new Map(
       layerConfigs(bundles.layers).map((r) => [`${r.section}\u0000${r.key}`, r]),
     );
@@ -194,45 +236,48 @@ export function HostConfigCard({ host, desired, canWrite, onChanged }: Props) {
       }
     }
     return out;
-  }, [bundles, overridePatch, rows]);
+  }, [bundles, overridePatch, rows, valuesHidden]);
 
-  const openEditor = () => {
-    if (editing) return;
-    const split = saved ? splitOverride(saved) : { ini: "", removals: [] };
-    setDraftIni(split.ini);
-    setDraftRemovals(split.removals);
-    setSaveError(null);
-    setEditing(true);
-  };
-  // Row actions edit the draft, opening the editor first when needed. The draft has to be
-  // seeded synchronously, so these read the saved override directly when not yet editing.
-  const draftBase = () =>
-    editing
-      ? { ini: draftIni, removals: draftRemovals }
-      : saved
-        ? splitOverride(saved)
-        : { ini: "", removals: [] as Removal[] };
-  const editDraft = (f: (d: { ini: string; removals: Removal[] }) => { ini: string; removals: Removal[] }) => {
-    const next = f(draftBase());
+  type Draft = { ini: string; removals: Removal[] };
+  /** Row actions and "Edit" all start from the current draft, or — when not editing yet —
+   *  from the override with its values, fetched first if need be. */
+  const editDraft = async (f: (d: Draft) => Draft) => {
+    let base: Draft;
+    if (editing) {
+      base = { ini: draftIni, removals: draftRemovals };
+    } else {
+      try {
+        base = splitOverride(await reveal());
+      } catch {
+        return;
+      }
+    }
+    const next = f(base);
     setDraftIni(next.ini);
     setDraftRemovals(next.removals);
     setSaveError(null);
     setEditing(true);
   };
+  const openEditor = () => void editDraft((d) => d);
   const overrideRow = (r: EffectiveRow) =>
-    editDraft((d) => ({
+    void editDraft((d) => ({
       ini: setIniValue(d.ini, r.section, r.key, r.value ?? r.replaced[r.replaced.length - 1]?.value ?? ""),
       removals: d.removals.filter((x) => !sameRemoval(x, removalFor(r.section, r.key))),
     }));
   const removeRow = (r: EffectiveRow) =>
-    editDraft((d) => ({
+    void editDraft((d) => ({
       ini: removeIniKey(d.ini, r.section, r.key),
       removals: [...d.removals.filter((x) => !sameRemoval(x, removalFor(r.section, r.key))), removalFor(r.section, r.key)],
     }));
+  // Undoing a removal undoes exactly that key, even when the override removes its whole
+  // section: the section removal becomes removals of everything else it was taking away.
+  const removedNow = (rows ?? [])
+    .filter((x) => x.layer.kind === "override" && x.value === null)
+    .map((x) => removalFor(x.section, x.key));
   const revertRow = (r: EffectiveRow) =>
-    editDraft((d) => ({
+    void editDraft((d) => ({
       ini: removeIniKey(d.ini, r.section, r.key),
-      removals: d.removals.filter((x) => !sameRemoval(x, removalFor(r.section, r.key))),
+      removals: withoutRemovalOf(d.removals, removalFor(r.section, r.key), removedNow),
     }));
 
   const save = async () => {
@@ -245,7 +290,9 @@ export function HostConfigCard({ host, desired, canWrite, onChanged }: Props) {
       } else {
         await apiSend("PUT", `/api/hosts/${host.id}/override`, { patch: draftPatch });
       }
-      setSaved(Object.keys(draftPatch).length === 0 ? null : draftPatch);
+      const empty = Object.keys(draftPatch).length === 0;
+      setSaved(empty ? null : draftPatch);
+      setShape(empty ? null : shapeOf(draftPatch));
       setEditing(false);
       onChanged();
     } catch (e) {
@@ -260,6 +307,7 @@ export function HostConfigCard({ host, desired, canWrite, onChanged }: Props) {
     try {
       await apiSend("DELETE", `/api/hosts/${host.id}/override`);
       setSaved(null);
+      setShape(null);
       setEditing(false);
       setConfirmDelete(false);
       onChanged();
@@ -310,7 +358,8 @@ export function HostConfigCard({ host, desired, canWrite, onChanged }: Props) {
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
           What this host's agent writes to its fleet.ini: each setting with the bundle it comes
           from, lowest priority first, and the host override on top. The override is for this
-          host alone and may hold secrets — it is encrypted at rest and never logged.
+          host alone and may hold secrets — it is encrypted at rest, its values stay hidden here
+          until you ask for them, and each time they are shown that is recorded in the audit log.
         </Typography>
 
         {overrideInPlay && host.host_override_last === false && (
@@ -332,11 +381,13 @@ export function HostConfigCard({ host, desired, canWrite, onChanged }: Props) {
             shows what the bundles give it.
           </Alert>
         )}
-        {loadError && (
-          <Alert severity="error" sx={{ mb: 1.5 }}>
-            {loadError}
-          </Alert>
-        )}
+        {[desiredError && `Could not load this host's desired state: ${desiredError}`, bundlesError, overrideError]
+          .filter((m): m is string => Boolean(m))
+          .map((m) => (
+            <Alert key={m} severity="error" sx={{ mb: 1.5 }}>
+              {m}
+            </Alert>
+          ))}
         {bundles?.unreadable.map((u) => (
           <Alert key={u.label} severity="info" sx={{ mb: 1 }}>
             Not included: <strong>{u.label}</strong> — {u.reason}.
@@ -344,7 +395,7 @@ export function HostConfigCard({ host, desired, canWrite, onChanged }: Props) {
         ))}
 
         {rows === null ? (
-          <Typography color="text.secondary">Loading…</Typography>
+          !desiredError && <Typography color="text.secondary">Loading…</Typography>
         ) : rows.length === 0 ? (
           <Typography color="text.secondary" sx={{ mb: 2 }}>
             Nothing configured — no bundle applies to this host{hasOverride ? "" : " and it has no override"}.
@@ -372,6 +423,10 @@ export function HostConfigCard({ host, desired, canWrite, onChanged }: Props) {
                       {r.value === null ? (
                         <Typography component="span" variant="body2" color="text.secondary">
                           {last ? <s>{last.value}</s> : null} removed on this host
+                        </Typography>
+                      ) : fromOverride && valuesHidden ? (
+                        <Typography component="span" variant="body2" color="text.secondary">
+                          {HIDDEN}
                         </Typography>
                       ) : (
                         r.value
@@ -426,6 +481,18 @@ export function HostConfigCard({ host, desired, canWrite, onChanged }: Props) {
             <Button variant="outlined" size="small" startIcon={<EditIcon />} onClick={openEditor}>
               {hasOverride ? "Edit override" : "Add override"}
             </Button>
+            {hasOverride &&
+              (valuesHidden ? (
+                <Tooltip title="Show the override's values here. Reading them is recorded in the audit log.">
+                  <Button size="small" onClick={() => void reveal().catch(() => {})}>
+                    Show values
+                  </Button>
+                </Tooltip>
+              ) : (
+                <Button size="small" onClick={() => setSaved(null)}>
+                  Hide values
+                </Button>
+              ))}
             {hasOverride && (
               <Button size="small" color="error" onClick={() => setConfirmDelete(true)}>
                 Delete override

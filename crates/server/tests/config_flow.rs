@@ -1275,3 +1275,43 @@ async fn an_override_reads_back_and_the_read_is_audited() {
         "a refused write leaves the override alone"
     );
 }
+
+/// The host page learns which settings the override touches without reading what it sets
+/// them to: the shape blanks every value, keeps removals, and is not a "read" in the audit
+/// log — that is kept for when someone actually looks at the values.
+#[tokio::test]
+async fn an_override_shape_carries_no_values_and_is_not_audited() {
+    let s = start().await;
+    signup_login(&s, "kappa", "kim@example.com").await;
+    let (_agent, host_id) = enroll_a_host(&s).await;
+    let url = format!("{}/api/hosts/{}/override", s.base_url, host_id);
+    let r = s
+        .cookie_jar
+        .put(&url)
+        .json(&serde_json::json!({
+            "patch": { "settings": { "mysql": { "password": "p4ss", "port": "3307", "user": null } } }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+
+    let r = s
+        .cookie_jar
+        .get(format!("{url}/shape"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(
+        body["patch"],
+        serde_json::json!({ "settings": { "mysql": { "password": "", "port": "", "user": null } } })
+    );
+    let reads: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'host.override.read'")
+            .fetch_one(&s.db.read)
+            .await
+            .unwrap();
+    assert_eq!(reads, 0, "the shape is not a read of the override");
+}

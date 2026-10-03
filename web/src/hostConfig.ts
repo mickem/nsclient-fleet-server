@@ -136,9 +136,23 @@ export function splitOverride(patch: ConfigObject): { ini: string; removals: Rem
   return { ini: jsonToIni(patch), removals };
 }
 
-/** The editor's INI text and removals back into one merge patch. A removal of a path the
- *  INI also sets is dropped: the value is the more specific instruction. Throws
- *  `IniParseError` for text that does not parse. */
+/** Drop objects left with nothing in them. An empty object in a merge patch changes
+ *  nothing, but it makes an override that does nothing look like one that does — e.g. the
+ *  section header removeIniKey leaves behind when its last key goes. */
+function pruneEmpty(node: ConfigObject): ConfigObject {
+  for (const [k, v] of Object.entries(node)) {
+    if (isObject(v)) {
+      pruneEmpty(v);
+      if (Object.keys(v).length === 0) delete node[k];
+    }
+  }
+  return node;
+}
+
+/** The editor's INI text and removals back into one merge patch, with empty sections
+ *  dropped (so `{}` means "no override"). A removal of a path the INI also sets is
+ *  dropped: the value is the more specific instruction. Throws `IniParseError` for text
+ *  that does not parse. */
 export function joinOverride(ini: string, removals: Removal[]): ConfigObject {
   const patch = iniToJson(ini);
   for (const r of removals) {
@@ -160,7 +174,42 @@ export function joinOverride(ini: string, removals: Removal[]): ConfigObject {
     const last = r[r.length - 1];
     if (!blocked && node[last] === undefined) node[last] = null;
   }
-  return patch;
+  return pruneEmpty(patch);
+}
+
+const isPrefix = (p: Removal, q: Removal) => p.length <= q.length && p.every((s, i) => s === q[i]);
+
+/** Stop removing `target` and nothing else. A removal of exactly that path just goes; one
+ *  of a whole section containing it is replaced by removals of everything else it was
+ *  taking away (`removedNow`: the paths the override currently removes), so undoing one
+ *  key does not bring back its whole section. */
+export function withoutRemovalOf(
+  removals: Removal[],
+  target: Removal,
+  removedNow: Removal[],
+): Removal[] {
+  const out: Removal[] = [];
+  const add = (r: Removal) => {
+    if (!out.some((x) => sameRemoval(x, r))) out.push(r);
+  };
+  for (const r of removals) {
+    if (!isPrefix(r, target)) add(r);
+    else if (!sameRemoval(r, target)) {
+      for (const other of removedNow) {
+        if (isPrefix(r, other) && !sameRemoval(other, target)) add(other);
+      }
+    }
+  }
+  return out;
+}
+
+/** The override with every value blanked, as `GET …/override/shape` returns it. */
+export function shapeOf(patch: ConfigObject): ConfigObject {
+  const out: ConfigObject = {};
+  for (const [k, v] of Object.entries(patch)) {
+    out[k] = v === null ? null : isObject(v) ? shapeOf(v) : "";
+  }
+  return out;
 }
 
 export const sameRemoval = (a: Removal, b: Removal) =>

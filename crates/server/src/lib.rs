@@ -249,6 +249,10 @@ pub fn router(state: AppState) -> Router {
             axum::routing::put(config_api::put_override).get(config_api::get_override),
         )
         .route(
+            "/api/hosts/:id/override/shape",
+            get(config_api::get_override_shape),
+        )
+        .route(
             "/api/hosts/:id/override",
             axum::routing::delete(config_api::delete_override),
         )
