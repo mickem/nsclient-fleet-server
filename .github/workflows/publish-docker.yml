@@ -4,9 +4,9 @@ name: Publish docker image
 # as ghcr.io/<owner>/nsclient-fleet.
 #
 # Triggering on `release: published` rather than on the release workflow is deliberate.
-# Every push to main produces a DRAFT release candidate, and a draft has no published
-# artifacts to build from — so this runs only once a human has published something, which
-# is also exactly when the download URLs the Dockerfile uses start resolving.
+# Every push to main rebuilds the next release as a DRAFT, and a draft has no published
+# artifacts to build from — so this runs only once a human has published it, which is also
+# exactly when the download URLs the Dockerfile uses start resolving.
 #
 # Nothing is compiled here: the image installs the musl binary already attached to the
 # release and checks it against that release's SHA256SUMS. So the container and a VM
@@ -74,8 +74,8 @@ jobs:
           if [ "$EVENT" = "release" ]; then
             raw="$RELEASE_TAG"
             push=true
-            # A release candidate must never move `latest`: RCs are prereleases built from
-            # main, and `latest` is what an unpinned `docker run` gets.
+            # A prerelease must never move `latest`: that is what an unpinned `docker run`
+            # gets. The release workflow never marks one; this is for one ticked by hand.
             if [ "$PRERELEASE" = "true" ]; then latest=false; else latest=true; fi
           else
             raw="$INPUT_VERSION"

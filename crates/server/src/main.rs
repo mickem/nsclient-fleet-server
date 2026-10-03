@@ -18,7 +18,7 @@ use fleet_server::config::host_of;
 ///
 /// Releases are versioned from git tags, not from `Cargo.toml`, so the release workflow
 /// compiles the computed version in through `FLEET_BUILD_VERSION` — otherwise a release
-/// named `v0.1.1-rc.7` would contain a binary claiming whatever the manifest last said.
+/// named `v0.1.1` would contain a binary claiming whatever the manifest last said.
 /// A local build has no such variable and falls back to the manifest.
 const VERSION: &str = match option_env!("FLEET_BUILD_VERSION") {
     Some(v) => v,
