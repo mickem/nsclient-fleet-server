@@ -379,47 +379,56 @@ binary reports the expected version, which catches both.
 `0.0.x`, which is lower than the `0.1.0` currently in `Cargo.toml`. Tag `v0.1.0` once and
 everything after it reads sensibly.
 
-### Release candidates come from main
+### The next release is always a draft
 
-Every commit to `main` — in practice every merge — produces a **draft prerelease** named
-`v<version>-rc.<run number>`. There is always a built, downloadable artifact set for the
-tip of main, and no ceremony is needed to get one. `-rc.N` is a semver prerelease, so
-`v0.1.1-rc.7` correctly sorts before the eventual `v0.1.1`.
+Every commit to `main` — in practice every merge — rebuilds the next release as a
+**draft** named after its version: tag `v0.1.1`, title `0.1.1`, and a binary that reports
+`0.1.1`. The workflow deletes the draft it made for the previous merge first, so there is
+exactly one, and it is always built from the tip of main. Merges keep computing the same
+version until it is released, unless one carries `feature:` or `breaking:`, which raises
+it (the old draft is replaced all the same).
 
 Two properties worth knowing:
 
 - **A draft does not create its git tag.** GitHub only creates it when someone publishes
-  the draft, so RC drafts never pollute the tag namespace and can be deleted freely.
+  the draft, so drafts never pollute the tag namespace and can be deleted freely.
 - **Drafts are visible to collaborators only**, never to the public.
 
-`target_commitish` pins each RC to the commit it was built from, so publishing an older
-draft tags that commit rather than wherever main has since moved.
+`target_commitish` pins the draft to the commit it was built from, so publishing it tags
+that commit rather than wherever main has since moved.
 
-RC drafts accumulate — one per merge. They cost nothing but clutter; prune with:
+Only drafts the workflow created (author `github-actions[bot]`) are replaced; one you
+create by hand is left alone. Release notes you type into the generated draft are lost at
+the next merge, so write them just before publishing.
+
+The draft build does not wait for CI. Tests run in parallel on the same commit, so check
+the commit is green before publishing — that human step is the gate.
+
+### Cutting a release
+
+**From the GitHub UI:** open the draft under Releases, check the version and the notes,
+and press *Publish release*. GitHub creates the tag on the commit the draft was built from,
+and the binaries already attached are the release — they report exactly that version, so
+nothing is rebuilt. Publishing also starts `publish-docker.yml`, which builds the
+container image from those binaries and moves `latest`.
+
+The new tag is the base the next merge bumps from, so the following draft is `0.1.2` (or
+`0.2.0` / `1.0.0` with `feature:` / `breaking:` in a commit message). To release under a
+different version than the draft's, publish from the command line instead.
+
+**From the command line:** push a tag. On a tag the tag *is* the version — git-version is
+skipped entirely, so what you name is exactly what gets released and compiled in:
 
 ```bash
-gh release list --limit 100 --json tagName,isDraft \
-  --jq '.[] | select(.isDraft) | select(.tagName | test("-rc\\.")) | .tagName' \
-  | tail -n +11 | xargs -r -n1 gh release delete --yes
+git tag v0.2.0 && git push origin v0.2.0
 ```
 
-The RC build does not wait for CI. Tests run in parallel on the same commit, so check the
-commit is green before publishing a draft — that human step is the gate.
+Push the tag by itself, once its commit is already on main. Pushing commits and a tag
+together (`git push --follow-tags`) starts a draft build and a release build for the same
+commit at the same time.
 
-### Cutting a real release
-
-Push a tag. On a tag the tag *is* the version — git-version is skipped entirely, so what
-you name is exactly what gets released and compiled in:
-
-```bash
-git tag v0.1.0 && git push origin v0.1.0
-```
-
-The tag you push also becomes the base that subsequent RCs bump from, so cutting a real
-release is what advances the RC series.
-
-Pushing commits and a tag together (`git push --follow-tags`) triggers two runs: an RC
-draft for the branch push and the real release for the tag. Harmless, just redundant.
+The tag that publishing a draft creates starts the release workflow too. It finds the
+release already published and stops before building anything.
 
 ### Verifying and rehearsing
 
