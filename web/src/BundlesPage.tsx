@@ -28,6 +28,7 @@ import DownloadIcon from "@mui/icons-material/Download";
 import DeleteIcon from "@mui/icons-material/Delete";
 import EditIcon from "@mui/icons-material/Edit";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import DriveFileRenameOutlineIcon from "@mui/icons-material/DriveFileRenameOutline";
 import LockIcon from "@mui/icons-material/Lock";
 import {
   apiGet,
@@ -52,6 +53,7 @@ import { useMatch, useNavigate, useParams } from "react-router-dom";
 import { BundleEditor } from "./BundleEditor";
 import { RefreshButton } from "./RefreshButton";
 import { useBundleKey } from "./bundleKey";
+import { RenameBundleDialog } from "./RenameBundleDialog";
 
 /** Key registration, unlock, and rotation. The key exists only in this browser and on
  *  agents — the server sees the fingerprint alone, so losing the key loses the bundles. */
@@ -237,6 +239,8 @@ function EncryptionKeyCard({
 
 export function BundlesPage({ me }: { me: Me }) {
   const [bundles, setBundles] = useState<BundleView[] | null>(null);
+  /** Name of the bundle whose rename dialog is open. */
+  const [renaming, setRenaming] = useState<string | null>(null);
   // Which editor is open is the URL's business: /bundles/new or /bundles/:id. Nothing
   // else holds it, so the "Bundles" sidebar entry (→ /bundles) is a way out of an editor
   // and a refresh lands back in it.
@@ -463,6 +467,13 @@ export function BundlesPage({ me }: { me: Me }) {
                         </Button>
                       ))}
                     {canWriteConfig(me.role) && (
+                      <Tooltip title="Rename this bundle (all its versions)">
+                        <IconButton size="small" onClick={() => setRenaming(b.name)}>
+                          <DriveFileRenameOutlineIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    )}
+                    {canWriteConfig(me.role) && (
                       <Tooltip title="Delete this bundle, and remove it from every group">
                         <IconButton size="small" color="error" onClick={() => remove(b)}>
                           <DeleteIcon fontSize="small" />
@@ -528,6 +539,17 @@ export function BundlesPage({ me }: { me: Me }) {
         </AccordionDetails>
       </Accordion>
       )}
+
+      <RenameBundleDialog
+        versions={bundles?.filter((b) => b.name === renaming) ?? []}
+        takenNames={new Set(bundles?.map((b) => b.name) ?? [])}
+        unlockedFingerprint={keyState.unlocked ? keyState.fingerprint : null}
+        onClose={() => setRenaming(null)}
+        onRenamed={() => {
+          setRenaming(null);
+          refresh();
+        }}
+      />
     </Box>
   );
 }

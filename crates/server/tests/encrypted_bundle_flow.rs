@@ -350,3 +350,207 @@ async fn operator_download_round_trip() {
         .unwrap();
     assert_eq!(r.status(), 404);
 }
+
+async fn rename_bundle(
+    s: &TestServer,
+    from: &str,
+    to: &str,
+    sealed: Vec<(String, Vec<u8>)>,
+) -> reqwest::Response {
+    let mut form = reqwest::multipart::Form::new()
+        .text("from", from.to_string())
+        .text("to", to.to_string());
+    for (id, bytes) in sealed {
+        form = form.part(
+            format!("sealed:{id}"),
+            reqwest::multipart::Part::bytes(bytes).file_name("sealed.bin"),
+        );
+    }
+    s.cookie_jar
+        .post(format!("{}/api/bundles/rename", s.base_url))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// Renaming moves every version of a name: plain versions keep their id, encrypted ones
+/// are re-sealed by the client and swapped in under a new id, and either way the groups
+/// keep carrying the same versions — which the agent then verifies and opens under the
+/// new name.
+#[tokio::test]
+async fn rename_keeps_assignments_and_reseals_encrypted_versions() {
+    let s = start().await;
+    signup_login(&s, "acme", "alice@example.com").await;
+    let (mut agent, host_id) = enroll_a_host(&s).await;
+
+    let key = BundleKey::generate();
+    let r = s
+        .cookie_jar
+        .put(format!("{}/api/bundle-key", s.base_url))
+        .json(&serde_json::json!({ "fingerprint": key.fingerprint_hex() }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let plain_zip = b"PK\x03\x04-plain".to_vec();
+    let r = upload_bundle(&s, "app", "1", None, plain_zip.clone()).await;
+    assert_eq!(r.status(), 200);
+    let plain: serde_json::Value = r.json().await.unwrap();
+    let plain_id = plain["id"].as_str().unwrap().to_string();
+
+    let secret_zip = b"PK\x03\x04-secret".to_vec();
+    let r = upload_bundle(
+        &s,
+        "app",
+        "2",
+        Some("enc-v1"),
+        key.encrypt("app", "2", &secret_zip),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let enc: serde_json::Value = r.json().await.unwrap();
+    let enc_id = enc["id"].as_str().unwrap().to_string();
+
+    let r = upload_bundle(&s, "taken", "1", None, b"PK\x03\x04-other".to_vec()).await;
+    assert_eq!(r.status(), 200);
+
+    let g = s
+        .cookie_jar
+        .post(format!("{}/api/groups", s.base_url))
+        .json(&serde_json::json!({
+            "name": "db",
+            "selector": { "clauses": [{"op": "eq", "key": "role", "value": "db"}] }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(g.status(), 201);
+    let group: serde_json::Value = g.json().await.unwrap();
+    let group_id = group["id"].as_str().unwrap().to_string();
+    for (id, priority) in [(&plain_id, 100), (&enc_id, 200)] {
+        let a = s
+            .cookie_jar
+            .post(format!("{}/api/groups/{group_id}/bundles", s.base_url))
+            .json(&serde_json::json!({"bundle_id": id, "priority": priority}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(a.status(), 204);
+    }
+    let t = s
+        .cookie_jar
+        .put(format!("{}/api/hosts/{}/tags/role", s.base_url, host_id))
+        .json(&serde_json::json!({"value": "db"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(t.status(), 204);
+
+    // Refusals change nothing: an encrypted version without new ciphertext, a name in use,
+    // a name that does not exist, a part for a version that is not encrypted.
+    let r = rename_bundle(&s, "app", "web", vec![]).await;
+    assert_eq!(r.status(), 400, "{:?}", r.text().await);
+    let r = rename_bundle(
+        &s,
+        "app",
+        "taken",
+        vec![(enc_id.clone(), key.encrypt("taken", "2", &secret_zip))],
+    )
+    .await;
+    assert_eq!(r.status(), 409);
+    let r = rename_bundle(&s, "nope", "web", vec![]).await;
+    assert_eq!(r.status(), 404);
+    let r = rename_bundle(
+        &s,
+        "app",
+        "web",
+        vec![
+            (enc_id.clone(), key.encrypt("web", "2", &secret_zip)),
+            (plain_id.clone(), key.encrypt("web", "1", &plain_zip)),
+        ],
+    )
+    .await;
+    assert_eq!(r.status(), 400);
+
+    let r = rename_bundle(
+        &s,
+        "app",
+        "web",
+        vec![(enc_id.clone(), key.encrypt("web", "2", &secret_zip))],
+    )
+    .await;
+    assert_eq!(r.status(), 200, "{:?}", r.text().await);
+    let renamed: Vec<serde_json::Value> = r.json().await.unwrap();
+    assert_eq!(renamed.len(), 2);
+    assert!(renamed.iter().all(|b| b["name"] == "web"));
+    let new_enc_id = renamed.iter().find(|b| b["version"] == "2").unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(new_enc_id, enc_id, "re-sealed bytes get a new id");
+    assert!(renamed.iter().any(|b| b["id"] == plain_id.as_str()));
+
+    // Nothing is left under the old name, and the replaced ciphertext is gone from disk.
+    let list: Vec<serde_json::Value> = s
+        .cookie_jar
+        .get(format!("{}/api/bundles", s.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(list.iter().all(|b| b["name"] != "app"));
+    let dir = s._tempdir.path().join("bundles").join("1");
+    assert!(!dir.join(format!("{enc_id}.zip")).exists());
+    assert!(dir.join(format!("{new_enc_id}.zip")).exists());
+
+    // The group still carries both versions, with their priorities.
+    let carried: Vec<serde_json::Value> = s
+        .cookie_jar
+        .get(format!("{}/api/groups/{group_id}/bundles", s.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut ids: Vec<(String, i64)> = carried
+        .iter()
+        .map(|b| {
+            (
+                b["bundle_id"].as_str().unwrap().to_string(),
+                b["priority"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    ids.sort();
+    let mut want = vec![(plain_id.clone(), 100), (new_enc_id.clone(), 200)];
+    want.sort();
+    assert_eq!(ids, want);
+
+    // The agent sees the new name, the signatures verify against it, and the re-sealed
+    // version opens under it.
+    s.agent_limits.forget_last_poll(&host_id);
+    let ds = agent.fetch_desired_state(None).await.unwrap().unwrap();
+    assert_eq!(ds.bundles.len(), 2);
+    agent.bundle_encryption_keys = vec![key.to_b64()];
+    for b in &ds.bundles {
+        assert_eq!(b["name"], "web");
+        let signature = list.iter().find(|l| l["id"] == b["id"]).unwrap()["signature"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let bytes = agent
+            .fetch_bundle_verified(ds.descriptor(b).unwrap(), &signature)
+            .await
+            .unwrap();
+        if b["format"] == "enc-v1" {
+            assert_eq!(agent.open_bundle("web", "2", bytes).unwrap(), secret_zip);
+        } else {
+            assert_eq!(bytes, plain_zip);
+        }
+    }
+}

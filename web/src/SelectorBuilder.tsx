@@ -10,6 +10,7 @@ import {
   Menu,
   MenuItem,
   Select,
+  SelectProps,
   Stack,
   TextField,
   Tooltip,
@@ -28,6 +29,31 @@ import {
   SourceFilter,
   TagView,
 } from "./api";
+
+/** A select whose tooltip explains the current choice — hidden while the menu is open,
+ *  where it would otherwise sit on top of the options it describes. */
+function HintedSelect({ hint, ...props }: SelectProps<string> & { hint: string }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  return (
+    <Tooltip
+      title={hint}
+      open={hovered && !menuOpen}
+      onOpen={() => setHovered(true)}
+      onClose={() => setHovered(false)}
+    >
+      <Select
+        {...props}
+        open={menuOpen}
+        onOpen={() => setMenuOpen(true)}
+        onClose={() => {
+          setMenuOpen(false);
+          setHovered(false);
+        }}
+      />
+    </Tooltip>
+  );
+}
 
 // Structured selector editor — every field is a discrete input; the selector is never
 // entered as raw text (locked design decision from PLAN.md).
@@ -354,20 +380,19 @@ export function ExprEditor({ expr, onChange, onRemove, known, facts }: ExprProps
   const sourceSelect = (leaf: Leaf) => {
     const current = sourceOf(leaf);
     return (
-      <Tooltip title={SOURCES.find((s) => s.id === current)?.help ?? ""}>
-        <Select
-          size="small"
-          value={current}
-          color={current === "manual" ? undefined : "warning"}
-          onChange={(e) => onChange({ ...leaf, source: e.target.value as SourceFilter })}
-        >
-          {SOURCES.map((s) => (
-            <MenuItem key={s.id} value={s.id}>
-              {s.label}
-            </MenuItem>
-          ))}
-        </Select>
-      </Tooltip>
+      <HintedSelect
+        hint={SOURCES.find((s) => s.id === current)?.help ?? ""}
+        size="small"
+        value={current}
+        color={current === "manual" ? undefined : "warning"}
+        onChange={(e) => onChange({ ...leaf, source: e.target.value as SourceFilter })}
+      >
+        {SOURCES.map((s) => (
+          <MenuItem key={s.id} value={s.id}>
+            {s.label}
+          </MenuItem>
+        ))}
+      </HintedSelect>
     );
   };
   const removeBtn = onRemove ? (
@@ -465,27 +490,24 @@ export function ExprEditor({ expr, onChange, onRemove, known, facts }: ExprProps
               </MenuItem>
             ))}
           </Select>
-          <Tooltip
-            title={
+          <HintedSelect
+            hint={
               source === AGENT_FACTS
                 ? "The inventory the host uploads about itself. A compromised host can report " +
                   "anything here and join the group, so it will receive whatever bundles the group carries."
                 : `Facts from ${source}, not written by the host.`
             }
+            size="small"
+            value={source}
+            color={source === AGENT_FACTS ? "warning" : undefined}
+            onChange={(e) => onChange({ ...leaf, facts: e.target.value })}
           >
-            <Select
-              size="small"
-              value={source}
-              color={source === AGENT_FACTS ? "warning" : undefined}
-              onChange={(e) => onChange({ ...leaf, facts: e.target.value })}
-            >
-              {factSources(facts).map((s) => (
-                <MenuItem key={s} value={s}>
-                  {factSourceLabel(s)}
-                </MenuItem>
-              ))}
-            </Select>
-          </Tooltip>
+            {factSources(facts).map((s) => (
+              <MenuItem key={s} value={s}>
+                {factSourceLabel(s)}
+              </MenuItem>
+            ))}
+          </HintedSelect>
           <TagAutocomplete
             value={leaf.path}
             onChange={setPath}

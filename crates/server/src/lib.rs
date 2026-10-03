@@ -287,6 +287,13 @@ pub fn router(state: AppState) -> Router {
             get(bundles::get_bundle_key).put(bundles::set_bundle_key),
         )
         .route("/api/bundles/compose", post(bundles::compose))
+        // Carries re-sealed encrypted versions, so it gets upload's allowance.
+        .route(
+            "/api/bundles/rename",
+            post(bundles::rename).layer(axum::extract::DefaultBodyLimit::max(
+                fleet_core::tier::MAX_BUNDLE_MB_ANY_TIER as usize * 1024 * 1024,
+            )),
+        )
         .route(
             "/api/bundles/:id",
             axum::routing::delete(bundles::delete_bundle),
