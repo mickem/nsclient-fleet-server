@@ -159,9 +159,10 @@ Notes:
   certificate carries the tenant *slug*, not this id. There is nothing to trust
   here — a wrong value simply fails signature verification, since the verifying
   key is per tenant.
-- `merged_config_json` is currently always `{}` — real configuration lives
-  inside bundle contents; the agent is responsible for unpacking and applying
-  them (see `crates/server/src/desired_state.rs`).
+- `merged_config_json` is the host override (`{}` when there is none). The
+  agent unpacks and applies the bundles in ascending priority, then merges this
+  last so it wins, and says so with `"host_override_last": true` in every state
+  report (see `crates/server/src/desired_state.rs`).
 - `state_hash` covers the merged config **and** every bundle entry in full (id, name,
   version, format, sha256, signature, priority). Store it only
   after a successful apply, and echo it as `current_hash` on subsequent polls.

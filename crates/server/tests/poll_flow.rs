@@ -509,3 +509,93 @@ async fn cache_speedup_profile() {
         uncached.as_secs_f64() / cached.as_secs_f64(),
     );
 }
+
+/// Whether the host's agent lets the host override win over its bundles. Unknown until a
+/// report arrives; then silence is a real "no" — every agent older than the field merged the
+/// override first — and the field turns it into a "yes".
+#[tokio::test]
+async fn a_host_reports_whether_its_override_outranks_bundles() {
+    let s = start().await;
+    signup_login(&s, "theta", "tess@example.com").await;
+    let mut agent = enroll_a_host(&s).await;
+
+    let published = || async {
+        let hosts: serde_json::Value = s
+            .cookie_jar
+            .get(format!("{}/api/hosts", s.base_url))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        hosts[0]["host_override_last"].clone()
+    };
+
+    assert_eq!(
+        published().await,
+        serde_json::Value::Null,
+        "unknown before any report"
+    );
+
+    agent
+        .report_state(Some(TEST_HASH), BTreeMap::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        published().await,
+        serde_json::json!(false),
+        "an older agent: bundles win"
+    );
+
+    agent.host_override_last = true;
+    agent
+        .report_state(Some(TEST_HASH), BTreeMap::new())
+        .await
+        .unwrap();
+    assert_eq!(published().await, serde_json::json!(true));
+
+    // A downgrade is seen too.
+    agent.host_override_last = false;
+    agent
+        .report_state(Some(TEST_HASH), BTreeMap::new())
+        .await
+        .unwrap();
+    assert_eq!(published().await, serde_json::json!(false));
+}
+
+/// The host override reaches the agent exactly as stored, removals included: a null means
+/// "delete this key on this host", and only the agent — merging it over the bundles — can
+/// act on it. Building the document by merging the override onto {} used to strip them.
+#[tokio::test]
+async fn an_override_removal_reaches_the_agent() {
+    let s = start().await;
+    signup_login(&s, "iota", "ida@example.com").await;
+    let agent = enroll_a_host(&s).await;
+    let hosts: serde_json::Value = s
+        .cookie_jar
+        .get(format!("{}/api/hosts", s.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let host_id = hosts[0]["id"].as_str().unwrap().to_string();
+
+    let patch = serde_json::json!({
+        "settings": { "demo": null, "mysql": { "password": "p", "user": null } }
+    });
+    let r = s
+        .cookie_jar
+        .put(format!("{}/api/hosts/{host_id}/override", s.base_url))
+        .json(&serde_json::json!({ "patch": patch }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+
+    s.agent_limits.forget_last_poll(&host_id);
+    let ds = agent.fetch_desired_state(None).await.unwrap().unwrap();
+    assert_eq!(ds.merged_config_json, patch);
+}

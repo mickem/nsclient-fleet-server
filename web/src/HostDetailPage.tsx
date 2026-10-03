@@ -8,7 +8,6 @@ import {
   CardContent,
   Chip,
   Grid,
-  IconButton,
   Stack,
   Table,
   TableBody,
@@ -23,6 +22,7 @@ import DeleteIcon from "@mui/icons-material/Delete";
 import KeyOffIcon from "@mui/icons-material/KeyOff";
 import { ConfirmDeleteHostDialog } from "./ConfirmDeleteHostDialog";
 import { HostStatusChip, LocalConfigChip } from "./HostStatusChip";
+import { HostConfigCard } from "./HostConfigCard";
 import { InventoryCard } from "./InventoryCard";
 import { RefreshButton } from "./RefreshButton";
 import {
@@ -66,6 +66,7 @@ export function HostDetailPage({ me }: Props) {
   const onBack = () => navigate("/hosts");
   const [host, setHost] = useState<HostDetail | null>(null);
   const [desired, setDesired] = useState<DesiredStateView | null>(null);
+  const [desiredError, setDesiredError] = useState<string | null>(null);
   const [facts, setFacts] = useState<HostFacts | null>(null);
   const [factsError, setFactsError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -86,7 +87,13 @@ export function HostDetailPage({ me }: Props) {
         },
         (e) => setError(e.message),
       ),
-      apiGet<DesiredStateView>(`/api/hosts/${hostId}/desired`).then(setDesired, () => {}),
+      apiGet<DesiredStateView>(`/api/hosts/${hostId}/desired`).then(
+        (d) => {
+          setDesired(d);
+          setDesiredError(null);
+        },
+        (e) => setDesiredError(e instanceof Error ? e.message : String(e)),
+      ),
       apiGet<HostFacts>(`/api/hosts/${hostId}/facts`).then(
         (f) => {
           setFacts(f);
@@ -203,8 +210,14 @@ export function HostDetailPage({ me }: Props) {
         <Grid size={{ xs: 12, md: 6 }}>
           <TagsCard host={host} canWrite={canWriteConfig(me.role)} onChanged={refresh} />
         </Grid>
-        <Grid size={{ xs: 12, md: 6 }}>
-          <OverrideCard host={host} canWrite={canWriteConfig(me.role)} onChanged={refresh} />
+        <Grid size={12}>
+          <HostConfigCard
+            host={host}
+            desired={desired}
+            desiredError={desiredError}
+            canWrite={canWriteConfig(me.role)}
+            onChanged={refresh}
+          />
         </Grid>
         <Grid size={12}>
           <InventoryCard facts={facts} error={factsError} />
@@ -398,124 +411,6 @@ function TagsCard({
         <Typography variant="caption" color="text.secondary">
           Outlined chips are agent-reported (read-only); solid chips are manual.
         </Typography>
-      </CardContent>
-    </Card>
-  );
-}
-
-function OverrideCard({
-  host,
-  canWrite,
-  onChanged,
-}: {
-  host: HostDetail;
-  canWrite: boolean;
-  onChanged: () => void;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [patch, setPatch] = useState("{}");
-  const [priority, setPriority] = useState("1000");
-  const [error, setError] = useState<string | null>(null);
-
-  const save = async () => {
-    setError(null);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(patch);
-    } catch {
-      setError("Patch is not valid JSON");
-      return;
-    }
-    try {
-      await apiSend("PUT", `/api/hosts/${host.id}/override`, {
-        patch: parsed,
-        priority: parseInt(priority, 10) || 1000,
-      });
-      setEditing(false);
-      onChanged();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  const remove = async () => {
-    setError(null);
-    try {
-      await apiSend("DELETE", `/api/hosts/${host.id}/override`);
-      onChanged();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  return (
-    <Card variant="outlined" sx={{ height: "100%" }}>
-      <CardContent>
-        <Typography variant="h5" gutterBottom>
-          Host override
-        </Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-          A JSON Merge Patch applied only to this host, above all group bundles. May contain
-          secrets — encrypted at rest, never logged, write-only from here.
-        </Typography>
-        {error && (
-          <Alert severity="error" sx={{ mb: 1 }}>
-            {error}
-          </Alert>
-        )}
-        {host.override_meta && !editing && (
-          <Stack direction="row" spacing={1} alignItems="center">
-            <Chip
-              label={`Override set (priority ${host.override_meta.priority})`}
-              color="secondary"
-              size="small"
-            />
-            {canWrite && (
-              <>
-                <Button size="small" onClick={() => setEditing(true)}>
-                  Replace
-                </Button>
-                <IconButton size="small" onClick={remove} title="Delete override">
-                  <DeleteIcon fontSize="small" />
-                </IconButton>
-              </>
-            )}
-          </Stack>
-        )}
-        {!host.override_meta && !editing && canWrite && (
-          <Button variant="outlined" size="small" onClick={() => setEditing(true)}>
-            Add override
-          </Button>
-        )}
-        {!host.override_meta && !editing && !canWrite && (
-          <Typography variant="body2" color="text.secondary">
-            No override set.
-          </Typography>
-        )}
-        {editing && (
-          <Stack spacing={1}>
-            <TextField
-              multiline
-              minRows={5}
-              value={patch}
-              onChange={(e) => setPatch(e.target.value)}
-              slotProps={{ input: { sx: { fontFamily: "monospace", fontSize: "0.85rem" } } }}
-            />
-            <Stack direction="row" spacing={1} alignItems="center">
-              <TextField
-                size="small"
-                label="Priority"
-                value={priority}
-                onChange={(e) => setPriority(e.target.value)}
-                sx={{ width: "8rem" }}
-              />
-              <Button variant="contained" onClick={save}>
-                Save override
-              </Button>
-              <Button onClick={() => setEditing(false)}>Cancel</Button>
-            </Stack>
-          </Stack>
-        )}
       </CardContent>
     </Card>
   );

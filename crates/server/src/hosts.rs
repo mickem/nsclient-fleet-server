@@ -163,6 +163,9 @@ pub struct HostView {
     /// fleet's. `null` means it has never said — which the UI must not render as "no", since
     /// the honest answer there is that we do not know.
     pub local_config_present: Option<bool>,
+    /// Whether this host's agent lets the host override win over bundles; see
+    /// `fleet_core::host::Host::host_override_last`.
+    pub host_override_last: Option<bool>,
     pub created_at: i64,
     /// All of the host's tags, manual and agent-reported alike. Carried on the list view —
     /// not just the detail — so the hosts page can filter and bulk-select by tag without a
@@ -188,6 +191,7 @@ fn host_view(
         status,
         bootstrap_expires_at: h.bootstrap_expires_at,
         local_config_present: h.local_config_present,
+        host_override_last: h.host_override_last,
         created_at: h.created_at,
         tags,
     }

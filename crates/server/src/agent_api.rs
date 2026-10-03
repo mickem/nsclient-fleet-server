@@ -179,6 +179,11 @@ pub struct StateReport {
     /// the local configuration itself never leaves the host.
     #[serde(default)]
     pub local_config_present: Option<bool>,
+    /// Whether the agent merges the host override after the bundles, so the override wins.
+    /// Agents that do send `true` on every report. Unlike `local_config_present`, silence is
+    /// an answer: every build older than the field merged the override first.
+    #[serde(default)]
+    pub host_override_last: Option<bool>,
     /// The hash of the host's facts document — the hash only; the document goes on its own
     /// call, and only when we answer with a different one. See [`crate::facts`].
     #[serde(default)]
@@ -290,6 +295,22 @@ pub async fn state_report(
                 tracing::error!(error = %e, "set_local_config_present failed");
             }
         }
+    }
+
+    // Silence means an older agent, on which bundles beat the host override — stored as a
+    // real `false` so the console can say the override is not in force there.
+    let override_last = body.host_override_last.unwrap_or(false);
+    match hosts_repo
+        .set_host_override_last(ctx.tenant_id, &ctx.host_id, override_last)
+        .await
+    {
+        Ok(true) => tracing::info!(
+            host_id = %ctx.host_id,
+            host_override_last = override_last,
+            "host override precedence changed"
+        ),
+        Ok(false) => {}
+        Err(e) => tracing::error!(error = %e, "set_host_override_last failed"),
     }
 
     if let Some(reported) = &body.reported_tags {

@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use anyhow::{anyhow, Result};
-use fleet_core::merge::{canonical_string, merge_patch};
+use fleet_core::merge::canonical_string;
 use fleet_core::selector::Selector;
 use fleet_core::time::now_unix;
 use fleet_storage::{
@@ -362,8 +362,17 @@ pub async fn compute_uncached(
         }
         None => None,
     };
-    if let Some((_, ref patch)) = override_priority {
-        merge_patch(&mut merged, patch);
+    // The override goes to the agent exactly as stored, nulls included: a null is a
+    // removal ("delete this key on this host"), which only means something to the agent,
+    // merging over the bundles. Merging it onto the empty document here would strip every
+    // null and silently drop the removals. A non-object can only be a row from before PUT
+    // validated the shape, and the agent refuses a document that is not an object.
+    if let Some((_, patch)) = override_priority {
+        if patch.is_object() {
+            merged = patch;
+        } else {
+            tracing::warn!(%host_id, "ignoring a host override that is not a JSON object");
+        }
     }
 
     // 6. Build the descriptor list for the agent.

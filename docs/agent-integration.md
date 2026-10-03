@@ -56,10 +56,10 @@ never hardcode a poll interval.
 
 - `bundles` is ordered by **ascending priority** — apply in exactly this order so the
   agent's merge matches the server's layering.
-- `merged_config_json` is currently always `{}`: all real configuration lives inside
-  bundle contents, and host overrides are folded into `state_hash` server-side. Treat the
-  field as a forward-compatibility slot — merge it like a bundle patch if it is ever
-  non-empty.
+- `merged_config_json` is the host override: settings an operator made for this host
+  alone (`{}` when there is none). Merge it **after** every bundle, so it wins over them,
+  and report `"host_override_last": true` on every state report so the server knows you
+  do — without it, the console warns that the override is not in force on this host.
 - `state_hash` covers the merged config and, for every bundle, everything the entry
   carries: id, name, version, format, sha256, signature and priority. A bundle renamed or
   re-signed without new bytes still changes it, so the agent is told. Persist it only

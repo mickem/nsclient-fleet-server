@@ -36,6 +36,9 @@ pub struct EnrolledAgent {
     /// When set, refuse any bundle that is not an authenticated NSEB1 envelope — the
     /// "cloud is untrusted" posture: bundle content must be produced by a key holder.
     pub require_encrypted_bundles: bool,
+    /// Report `host_override_last: true` on every state report, as an agent that merges the
+    /// host override after the bundles does. Off by default: the older wire shape.
+    pub host_override_last: bool,
 }
 
 /// Generate an Ed25519 keypair, build a CSR, post it to /enroll/v1, return the issued
@@ -83,6 +86,7 @@ pub async fn enroll(
         mtls_server_cert_pem: parsed.mtls_server_cert_pem,
         bundle_encryption_keys: Vec::new(),
         require_encrypted_bundles: false,
+        host_override_last: false,
     })
 }
 
@@ -136,6 +140,9 @@ struct StateReportBody<'a> {
     /// on the wire — the server has to keep telling that apart from an explicit `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     local_config_present: Option<bool>,
+    /// Omitted when `None`: an agent that merges the host override first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host_override_last: Option<bool>,
     /// Omitted when `None`: an agent without facts support.
     #[serde(skip_serializing_if = "Option::is_none")]
     facts_hash: Option<&'a str>,
@@ -357,6 +364,7 @@ impl EnrolledAgent {
             errors: vec![],
             reported_tags,
             local_config_present,
+            host_override_last: self.host_override_last.then_some(true),
             facts_hash,
         };
         let res = client.post(&url).json(&body).send().await?;

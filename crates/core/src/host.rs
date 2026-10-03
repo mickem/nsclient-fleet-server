@@ -20,6 +20,11 @@ pub struct Host {
     /// The agent reports only this fact, never the local configuration, so the server can say
     /// a host is partly self-managed without ever holding what that configuration contains.
     pub local_config_present: Option<bool>,
+    /// Whether the agent applies the host override after the bundles, so the override wins.
+    /// `None` until the first state report after this field existed. Agents that do it say
+    /// so on every report; every older build merged the override first and let bundles win,
+    /// so a report without the field is stored as `Some(false)`.
+    pub host_override_last: Option<bool>,
     pub created_at: i64,
 }
 
@@ -220,6 +225,7 @@ mod tests {
             current_state_hash: None,
             bootstrap_expires_at,
             local_config_present: None,
+            host_override_last: None,
             created_at: 1_000,
         }
     }
