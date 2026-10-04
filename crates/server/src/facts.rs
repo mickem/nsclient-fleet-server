@@ -502,6 +502,57 @@ pub async fn store(
     Ok(ReplaceOutcome::Conflict)
 }
 
+/// Delete `source`'s document for a host, and its history. Returns true iff there was one.
+///
+/// The counterpart of [`store`], with the same side effects: the host's cached desired
+/// state goes (a group selector may have read the document), and the catalog is rebuilt.
+/// `bump_catalog`: false for a caller that removes many and bumps once itself.
+pub async fn remove(
+    state: &AppState,
+    tenant_id: i64,
+    host_id: &str,
+    source: &str,
+    bump_catalog: bool,
+) -> anyhow::Result<bool> {
+    let removed = HostFactsRepo::new(&state.db)
+        .delete(tenant_id, host_id, source)
+        .await?;
+    if removed {
+        state
+            .desired_state_cache
+            .invalidate_host(tenant_id, host_id);
+        if bump_catalog {
+            state
+                .facts_catalog_cache
+                .bump(tenant_id, CatalogChange::Operator);
+        }
+    }
+    Ok(removed)
+}
+
+/// Delete every document of `source` in a tenant, with [`remove`]'s side effects for each
+/// host that had one. Returns how many were deleted.
+pub async fn remove_source(
+    state: &AppState,
+    tenant_id: i64,
+    source: &str,
+) -> anyhow::Result<usize> {
+    let hosts = HostFactsRepo::new(&state.db)
+        .delete_source(tenant_id, source)
+        .await?;
+    for host_id in &hosts {
+        state
+            .desired_state_cache
+            .invalidate_host(tenant_id, host_id);
+    }
+    if !hosts.is_empty() {
+        state
+            .facts_catalog_cache
+            .bump(tenant_id, CatalogChange::Operator);
+    }
+    Ok(hosts.len())
+}
+
 /// A host's documents from `sources`, parsed, for selector evaluation.
 ///
 /// Only the sources asked for: a tags-only selector asks for none and costs nothing. A
@@ -725,7 +776,7 @@ pub struct FactsChangesView {
 
 #[derive(Serialize)]
 pub struct HostFactsView {
-    /// Which source this is. Only `agent` today; imported sources will sit beside it.
+    /// Which source this is: always `agent`. Imported sources are in `others`.
     pub source: &'static str,
     pub status: FactsStatus,
     /// The stored document — its stored bytes, passed through rather than parsed and
@@ -744,6 +795,23 @@ pub struct HostFactsView {
     /// When we received it.
     pub received_at: Option<i64>,
     pub size_bytes: Option<i64>,
+    /// Newest first.
+    pub changes: Vec<FactsChangesView>,
+    /// The host's documents from every other source (imports), sorted by source.
+    pub others: Vec<OtherFactsView>,
+}
+
+/// A host's document from a source other than the agent: an import. No hash exchange, so
+/// no status; otherwise as [`HostFactsView`].
+#[derive(Serialize)]
+pub struct OtherFactsView {
+    pub source: String,
+    pub facts: Option<Box<serde_json::value::RawValue>>,
+    pub unreadable: bool,
+    pub facts_hash: String,
+    pub collected_at: Option<String>,
+    pub received_at: i64,
+    pub size_bytes: i64,
     /// Newest first.
     pub changes: Vec<FactsChangesView>,
 }
@@ -780,10 +848,20 @@ pub async fn host_facts(
         let changes = repo
             .list_changes(who.tenant_id, &host_id, AGENT_SOURCE, CHANGES_SHOWN)
             .await?;
-        anyhow::Ok((hashes, stored, changes))
+        let mut others = Vec::new();
+        for o in repo
+            .list_for_host_except(who.tenant_id, &host_id, AGENT_SOURCE)
+            .await?
+        {
+            let changes = repo
+                .list_changes(who.tenant_id, &host_id, &o.source, CHANGES_SHOWN)
+                .await?;
+            others.push((o, changes));
+        }
+        anyhow::Ok((hashes, stored, changes, others))
     }
     .await;
-    let (hashes, stored, changes) = match loaded {
+    let (hashes, stored, changes, others) = match loaded {
         Ok(v) => v,
         Err(e) => {
             tracing::error!(error = %e, "host facts load failed");
@@ -791,28 +869,7 @@ pub async fn host_facts(
         }
     };
 
-    let changes = changes
-        .into_iter()
-        .filter_map(|row| {
-            // Left out rather than failing the page — but said, as a stored document that
-            // no longer parses is.
-            let entry: HistoryEntry = match serde_json::from_str(&row.changes_json) {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!(%host_id, history_id = row.id, error = %e, "stored facts history entry does not parse");
-                    return None;
-                }
-            };
-            Some(FactsChangesView {
-                id: row.id,
-                source: row.source,
-                at: row.at,
-                facts_hash: row.facts_hash,
-                initial: entry.initial,
-                diff: entry.diff,
-            })
-        })
-        .collect();
+    let changes = changes_view(&host_id, changes);
 
     let status = status(&hashes);
     let refusal = match (&status, &hashes.refused) {
@@ -825,14 +882,7 @@ pub async fn host_facts(
     let (facts, unreadable, facts_hash, collected_at, received_at, size_bytes) = match stored {
         None => (None, false, None, None, None, None),
         Some(s) => {
-            // Validated, not re-encoded: a document of megabytes goes out as it was stored.
-            let facts = match serde_json::value::RawValue::from_string(s.facts_json) {
-                Ok(raw) => Some(raw),
-                Err(e) => {
-                    tracing::warn!(%host_id, error = %e, "stored facts document does not parse");
-                    None
-                }
-            };
+            let facts = raw_document(&host_id, &s.source, s.facts_json);
             let unreadable = facts.is_none();
             (
                 facts,
@@ -856,8 +906,65 @@ pub async fn host_facts(
         received_at,
         size_bytes,
         changes,
+        others: others
+            .into_iter()
+            .map(|(o, changes)| {
+                let facts = raw_document(&host_id, &o.source, o.facts_json);
+                OtherFactsView {
+                    unreadable: facts.is_none(),
+                    facts,
+                    source: o.source,
+                    facts_hash: o.facts_hash,
+                    collected_at: o.collected_at,
+                    received_at: o.received_at,
+                    size_bytes: o.size_bytes,
+                    changes: changes_view(&host_id, changes),
+                }
+            })
+            .collect(),
     };
     Json(view).into_response()
+}
+
+/// A stored document as it goes out: validated, not re-encoded, so a document of megabytes
+/// goes out as it was stored. `None` when it does not parse.
+fn raw_document(
+    host_id: &str,
+    source: &str,
+    json: String,
+) -> Option<Box<serde_json::value::RawValue>> {
+    match serde_json::value::RawValue::from_string(json) {
+        Ok(raw) => Some(raw),
+        Err(e) => {
+            tracing::warn!(%host_id, %source, error = %e, "stored facts document does not parse");
+            None
+        }
+    }
+}
+
+/// History rows as the page shows them.
+fn changes_view(host_id: &str, rows: Vec<fleet_storage::FactChangeRow>) -> Vec<FactsChangesView> {
+    rows.into_iter()
+        .filter_map(|row| {
+            // Left out rather than failing the page — but said, as a stored document that
+            // no longer parses is.
+            let entry: HistoryEntry = match serde_json::from_str(&row.changes_json) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(%host_id, history_id = row.id, error = %e, "stored facts history entry does not parse");
+                    return None;
+                }
+            };
+            Some(FactsChangesView {
+                id: row.id,
+                source: row.source,
+                at: row.at,
+                facts_hash: row.facts_hash,
+                initial: entry.initial,
+                diff: entry.diff,
+            })
+        })
+        .collect()
 }
 
 // ---- Catalog: what the fleet's facts look like, for the selector editor -------------------
@@ -947,13 +1054,16 @@ pub enum CatalogChange {
     /// Hosts were deleted with their documents: rebuilt at once. An operator who just
     /// deleted a host does not expect to find it in the picker, and deletes are rare.
     Removed,
+    /// An operator imported or deleted a source's documents: rebuilt at once, for the same
+    /// reason — they expect the picker to show what they just did, and it is rare.
+    Operator,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct CatalogGeneration {
     /// Every change.
     any: u64,
-    /// [`CatalogChange::Removed`] changes only.
+    /// Changes rebuilt at once ([`CatalogChange::Removed`], [`CatalogChange::Operator`]).
     removed: u64,
 }
 
@@ -990,7 +1100,7 @@ impl CatalogCache {
         let mut inner = self.inner.lock().expect("catalog cache lock");
         let g = inner.generations.entry(tenant_id).or_default();
         g.any += 1;
-        if change == CatalogChange::Removed {
+        if change != CatalogChange::Stored {
             g.removed += 1;
         }
     }
