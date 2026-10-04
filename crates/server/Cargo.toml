@@ -40,7 +40,7 @@ rpassword = "7"
 # LOG_FILE. A Windows service has nowhere to write stdout, so without a file there is no
 # record of why one failed to start; daily rotation keeps that from growing without bound.
 tracing-appender = "0.2"
-governor = "0.6"
+governor = "0.10"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "cookies", "multipart"] }
 url = "2"
