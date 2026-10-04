@@ -42,6 +42,19 @@ pub enum Purpose<'a> {
     TenantBundleSigningKey { tenant_id: i64 },
     /// One host's configuration override, in `host_overrides.patch_encrypted`.
     HostOverride { tenant_id: i64, host_id: &'a str },
+    /// One alert-context document, in `alert_contexts.payload_encrypted`, and the
+    /// description a model wrote for it, in `enrichment_encrypted`.
+    ///
+    /// Bound to the host as well as the tenant for the same reason the override is: the
+    /// document names paths, processes and log lines from one machine, and a row moved onto
+    /// another host would be read as that host's evidence — and, once enrichment runs, sent
+    /// to a model as that host's evidence.
+    AlertContext { tenant_id: i64, host_id: &'a str },
+    /// A tenant's model-provider API key, in `tenant_llm_settings.api_key_encrypted`.
+    ///
+    /// This one is a live credential for a third-party account rather than data about a
+    /// host: a blob moved between tenants would spend the wrong customer's money.
+    TenantLlmApiKey { tenant_id: i64 },
 }
 
 impl Purpose<'_> {
@@ -70,6 +83,15 @@ impl Purpose<'_> {
                 field(b"host_override");
                 field(tenant_id.to_string().as_bytes());
                 field(host_id.as_bytes());
+            }
+            Self::AlertContext { tenant_id, host_id } => {
+                field(b"alert_context");
+                field(tenant_id.to_string().as_bytes());
+                field(host_id.as_bytes());
+            }
+            Self::TenantLlmApiKey { tenant_id } => {
+                field(b"tenant_llm_api_key");
+                field(tenant_id.to_string().as_bytes());
             }
         }
         out

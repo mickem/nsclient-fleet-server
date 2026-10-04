@@ -376,6 +376,40 @@ impl EnrolledAgent {
         Ok(facts_header(&res))
     }
 
+    /// Post alert contexts the way an agent does when checks go WARNING or CRITICAL.
+    ///
+    /// Takes the already-built documents rather than assembling them here: the tests that
+    /// use this are about what the *server* does with a report, so they need to be able to
+    /// send a deliberately awkward one.
+    pub async fn post_alert_context(
+        &self,
+        alerts: Vec<fleet_core::alert::AlertContext>,
+    ) -> Result<(u16, String)> {
+        self.post_alert_context_raw(&serde_json::to_string(&serde_json::json!({
+            "alerts": alerts
+        }))?)
+        .await
+    }
+
+    /// Post a body verbatim, for the cases where the point is that it is not well-formed.
+    pub async fn post_alert_context_raw(&self, body: &str) -> Result<(u16, String)> {
+        let client = self.mtls_client()?;
+        let url = format!(
+            "{}/agent/v1/alert-context",
+            self.mtls_url.trim_end_matches('/')
+        );
+        let res = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await?;
+        // The status is returned rather than turned into an error: every rejection path is
+        // something a test wants to assert on.
+        let status = res.status().as_u16();
+        Ok((status, res.text().await.unwrap_or_default()))
+    }
+
     /// Download a bundle by id and verify integrity (sha256) + authenticity.
     ///
     /// The signature is Ed25519 over the bundle's *descriptor* — tenant, id, name, version,

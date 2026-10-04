@@ -91,4 +91,8 @@ pub async fn sweep(db: &Db, session_idle_ttl_secs: i64) {
         Ok(n) => tracing::info!(removed = n, "swept expired magic links"),
         Err(e) => tracing::error!(error = %e, "magic link sweep failed"),
     }
+    // Alert contexts and the model-usage ledger. Unlike the two above, these grow with
+    // fleet activity rather than with sign-ins, so they are the ones that would actually
+    // become an operational problem unattended.
+    crate::alerts::sweep(db).await;
 }

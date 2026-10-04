@@ -337,10 +337,11 @@ loop:
 | Enrollment server-side                              | `crates/server/src/hosts.rs` (`enroll`)                                 |
 | Desired-state / state-report / renew handlers       | `crates/server/src/agent_api.rs`                                        |
 | Host facts: hash exchange, upload, operator view    | `crates/server/src/facts.rs`, `crates/core/src/facts.rs` (wire format, diff); protocol in [agent-integration.md §3](agent-integration.md#3-host-facts-inventory) |
+| Alert context: ingest, storage, model enrichment    | `crates/server/src/alerts.rs`, `crates/server/src/enrichment.rs`, `crates/server/src/llm/`, `crates/core/src/alert.rs` (wire format, fingerprint); protocol in [agent-integration.md §4](agent-integration.md#4-alert-context) |
 | Desired-state computation (tags → groups → bundles) | `crates/server/src/desired_state.rs`                                    |
 | Bundle download authz                               | `crates/server/src/bundles.rs` (`download`)                             |
 | Route wiring (public vs mTLS router)                | `crates/server/src/lib.rs`                                              |
-| End-to-end lifecycle tests                          | `crates/server/tests/fleet_flow.rs`, `crates/server/tests/poll_flow.rs`, `crates/server/tests/facts_flow.rs` |
+| End-to-end lifecycle tests                          | `crates/server/tests/fleet_flow.rs`, `crates/server/tests/poll_flow.rs`, `crates/server/tests/facts_flow.rs`, `crates/server/tests/alert_flow.rs` |
 
 The simulator uses `rcgen` (keys/CSRs), `rustls` + `reqwest` (mTLS),
 `ed25519-dalek` (signature verify), and `sha2` — a real Rust agent can reuse
