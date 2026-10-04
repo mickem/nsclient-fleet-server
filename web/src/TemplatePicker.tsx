@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import {
   Box,
   Button,
@@ -18,21 +18,24 @@ type Props = {
   /** Called with the chosen template, or null to start blank. */
   onPick: (template: BundleTemplate | null) => void;
   onCancel: () => void;
+  /** Text above the templates; defaults to the bundle wording. */
+  intro?: ReactNode;
 };
 
 /** First step of "New bundle": pick a single-concern template (or start blank). The
  *  template's settings are then edited in the editor's visual view. One category is
  *  shown at a time (tabs) so the action buttons stay on screen; the selection is kept
  *  when switching tabs and echoed in the "Use …" button. */
-export function TemplatePicker({ onPick, onCancel }: Props) {
+export function TemplatePicker({ onPick, onCancel, intro }: Props) {
   const [category, setCategory] = useState(TEMPLATE_CATEGORIES[0]);
   const [selected, setSelected] = useState<BundleTemplate | null>(null);
 
   return (
     <Box>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-        Templates each cover one concern — checks, or one delivery mechanism — so you can
-        assign a health bundle and a transport bundle to the same group independently.
+        {intro ??
+          "Templates each cover one concern — checks, or one delivery mechanism — so you " +
+            "can assign a health bundle and a transport bundle to the same group independently."}
       </Typography>
       <Tabs
         value={category}

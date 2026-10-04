@@ -398,6 +398,9 @@ pub struct PutOverrideBody {
     pub patch: serde_json::Value,
     #[serde(default)]
     pub priority: Option<i64>,
+    /// UI template the override was written with, so editing reopens the same form.
+    #[serde(default)]
+    pub template: Option<String>,
 }
 
 pub async fn put_override(
@@ -416,6 +419,18 @@ pub async fn put_override(
     // a stray string here would wipe every setting the host's bundles give it.
     if !body.patch.is_object() {
         return (StatusCode::BAD_REQUEST, "patch must be a JSON object").into_response();
+    }
+    let template = body
+        .template
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if template.is_some_and(|t| !crate::bundles::valid_bundle_token(t)) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "invalid template (allowed: alphanumerics, dot, dash, underscore)",
+        )
+            .into_response();
     }
     let patch_str = match serde_json::to_string(&body.patch) {
         Ok(s) => s,
@@ -437,6 +452,7 @@ pub async fn put_override(
             &host_id,
             &encrypted,
             priority,
+            template,
             Some(who.user_id),
         )
         .await
@@ -453,7 +469,7 @@ pub async fn put_override(
         "host.override.updated",
         "host",
         &host_id,
-        Some(&serde_json::json!({ "priority": priority })),
+        Some(&serde_json::json!({ "priority": priority, "template": template })),
     )
     .await;
     StatusCode::NO_CONTENT.into_response()
@@ -463,6 +479,14 @@ pub async fn put_override(
 pub struct OverrideView {
     pub patch: serde_json::Value,
     pub priority: i64,
+    pub template: Option<String>,
+}
+
+/// A host's override, decrypted.
+struct LoadedOverride {
+    patch: serde_json::Value,
+    priority: i64,
+    template: Option<String>,
 }
 
 /// Decrypt and parse a host's stored override; `Ok(None)` when it has none.
@@ -472,7 +496,7 @@ async fn load_override(
     state: &AppState,
     tenant_id: i64,
     host_id: &str,
-) -> Result<Option<(serde_json::Value, i64)>, Response> {
+) -> Result<Option<LoadedOverride>, Response> {
     let stored = match HostOverridesRepo::new(&state.db)
         .get(tenant_id, host_id)
         .await
@@ -494,7 +518,11 @@ async fn load_override(
         .ok()
         .and_then(|plain| serde_json::from_slice::<serde_json::Value>(&plain).ok());
     match patch {
-        Some(p) => Ok(Some((p, stored.priority))),
+        Some(patch) => Ok(Some(LoadedOverride {
+            patch,
+            priority: stored.priority,
+            template: stored.template,
+        })),
         None => {
             tracing::error!(%host_id, "stored override could not be decrypted or parsed");
             Err((StatusCode::INTERNAL_SERVER_ERROR, "override unreadable").into_response())
@@ -532,9 +560,10 @@ pub async fn get_override_shape(
         return (StatusCode::NOT_FOUND, "host not found").into_response();
     }
     match load_override(&state, who.tenant_id, &host_id).await {
-        Ok(Some((patch, priority))) => Json(OverrideView {
-            patch: override_shape(&patch),
-            priority,
+        Ok(Some(o)) => Json(OverrideView {
+            patch: override_shape(&o.patch),
+            priority: o.priority,
+            template: o.template,
         })
         .into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "no override").into_response(),
@@ -557,7 +586,7 @@ pub async fn get_override(
     if !host_belongs_to(&state, who.tenant_id, &host_id).await {
         return (StatusCode::NOT_FOUND, "host not found").into_response();
     }
-    let (patch, priority) = match load_override(&state, who.tenant_id, &host_id).await {
+    let o = match load_override(&state, who.tenant_id, &host_id).await {
         Ok(Some(o)) => o,
         Ok(None) => return (StatusCode::NOT_FOUND, "no override").into_response(),
         Err(resp) => return resp,
@@ -572,7 +601,12 @@ pub async fn get_override(
         None,
     )
     .await;
-    Json(OverrideView { patch, priority }).into_response()
+    Json(OverrideView {
+        patch: o.patch,
+        priority: o.priority,
+        template: o.template,
+    })
+    .into_response()
 }
 
 pub async fn delete_override(

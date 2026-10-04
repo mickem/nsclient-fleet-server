@@ -9,8 +9,6 @@ import {
   FormControlLabel,
   Stack,
   TextField,
-  ToggleButton,
-  ToggleButtonGroup,
   Tooltip,
   Typography,
 } from "@mui/material";
@@ -25,7 +23,7 @@ import {
 import { buildBundleZip, CarriedEntries, readBundleZip, TOKEN_RE } from "./bundlezip";
 import { decryptBundle, encryptBundle, recalledKey } from "./crypto";
 import { ConfigObject, iniToJson, jsonToIni, suggestNextVersion } from "./ini";
-import { TemplateForm } from "./TemplateForm";
+import { ConfigEditor } from "./ConfigEditor";
 import { TemplatePicker } from "./TemplatePicker";
 import { templateById } from "./templates";
 
@@ -58,9 +56,6 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
   const [ini, setIni] = useState(NEW_BUNDLE_TEMPLATE);
   // Template this bundle was created from (kept through edits via bundle.toml metadata).
   const [template, setTemplate] = useState<string | null>(null);
-  // Visual (form) vs raw INI editing. Both edit the same INI text, so switching is
-  // lossless; visual is only offered while the template is known.
-  const [view, setView] = useState<"form" | "ini">("form");
   const [scripts, setScripts] = useState<string[]>([]);
   const [encrypt, setEncrypt] = useState(editBundle?.format === "enc-v1");
   const [error, setError] = useState<string | null>(null);
@@ -193,8 +188,6 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
   if (loading) return <Typography>Loading bundle…</Typography>;
 
   const tmplInfo = template !== null ? templateById(template) : undefined;
-  const formCapable = tmplInfo !== undefined && tmplInfo.fields.length > 0;
-  const effectiveView = formCapable && view === "form" ? "form" : "ini";
 
   if (picking) {
     return (
@@ -312,35 +305,7 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
             <code>{scripts.join(", ")}</code> (script editing comes later).
           </Alert>
         )}
-        {formCapable && (
-          <ToggleButtonGroup
-            size="small"
-            exclusive
-            value={effectiveView}
-            onChange={(_, v: "form" | "ini" | null) => v !== null && setView(v)}
-            sx={{ mb: 1 }}
-          >
-            <ToggleButton value="form">Visual</ToggleButton>
-            <ToggleButton value="ini">INI</ToggleButton>
-          </ToggleButtonGroup>
-        )}
-        {effectiveView === "form" && tmplInfo ? (
-          <TemplateForm template={tmplInfo} ini={ini} onChange={setIni} />
-        ) : (
-          <TextField
-            multiline
-            minRows={14}
-            fullWidth
-            spellCheck={false}
-            value={ini}
-            onChange={(e) => setIni(e.target.value)}
-            slotProps={{
-              input: {
-                sx: { fontFamily: "monospace", fontSize: "0.9rem", whiteSpace: "pre" },
-              },
-            }}
-          />
-        )}
+        <ConfigEditor template={tmplInfo} ini={ini} onChange={setIni} />
         {error && (
           <Alert severity="error" sx={{ mt: 1 }}>
             {error}

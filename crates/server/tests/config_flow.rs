@@ -1315,3 +1315,64 @@ async fn an_override_shape_carries_no_values_and_is_not_audited() {
             .unwrap();
     assert_eq!(reads, 0, "the shape is not a read of the override");
 }
+
+/// The template an override was written with reads back with it — from the full read and
+/// the shape alike — so editing reopens the same form; a template that is not a token is
+/// refused, and writing without one clears it.
+#[tokio::test]
+async fn an_override_keeps_the_template_it_was_written_with() {
+    let s = start().await;
+    signup_login(&s, "lambda", "lou@example.com").await;
+    let (_agent, host_id) = enroll_a_host(&s).await;
+    let url = format!("{}/api/hosts/{}/override", s.base_url, host_id);
+    let patch = serde_json::json!({ "settings": { "mysql": { "password": "p4ss" } } });
+
+    let r = s
+        .cookie_jar
+        .put(&url)
+        .json(&serde_json::json!({ "patch": patch, "template": "bad template\"" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400, "a template must be a token");
+
+    let r = s
+        .cookie_jar
+        .put(&url)
+        .json(&serde_json::json!({ "patch": patch, "template": "mysql-check" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+    for path in [url.clone(), format!("{url}/shape")] {
+        let body: serde_json::Value = s
+            .cookie_jar
+            .get(&path)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["template"], "mysql-check", "{path}");
+    }
+
+    let r = s
+        .cookie_jar
+        .put(&url)
+        .json(&serde_json::json!({ "patch": patch }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+    let body: serde_json::Value = s
+        .cookie_jar
+        .get(&url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(body["template"].is_null(), "plain INI carries no template");
+}

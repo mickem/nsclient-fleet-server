@@ -127,8 +127,13 @@ export type DesiredBundleView = {
   format: BundleFormat;
 };
 
-/** `GET /api/hosts/:id/override` — config writers only. `null` leaves remove a key. */
-export type HostOverrideView = { patch: Record<string, unknown>; priority: number };
+/** `GET /api/hosts/:id/override` — config writers only. `null` leaves remove a key;
+ *  `template` is the UI template it was written with, null for plain INI. */
+export type HostOverrideView = {
+  patch: Record<string, unknown>;
+  priority: number;
+  template: string | null;
+};
 
 export type DesiredStateView = {
   state_hash: string;
