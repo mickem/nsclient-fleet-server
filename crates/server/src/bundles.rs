@@ -777,11 +777,16 @@ fn read_zip_entries_within(bytes: &[u8], mut budget: u64) -> Result<Vec<(String,
         }
 
         // `enclosed_name` is the library's own answer to "is this name safe to join onto a
-        // directory": it rejects absolute paths, parent components and Windows drive
-        // prefixes. Taking it before normalising means we never have to decide which of
-        // those our own normalisation happened to cover.
-        let Some(safe) = file.enclosed_name() else {
-            anyhow::bail!("bundle entry {:?} escapes the archive", file.name());
+        // directory": it rejects parent components that climb out. Since zip 9 it no longer
+        // rejects a leading root or drive prefix — it drops it, so `/etc/shadow` comes back
+        // as `etc/shadow`. That is contained, but it is still a hand-crafted name we would
+        // be rewriting into a bundle we sign, so absolute names are refused here first.
+        let raw = String::from_utf8_lossy(file.name_raw());
+        let absolute = raw.starts_with(['/', '\\'])
+            || matches!(raw.as_bytes(), [d, b':', ..] if d.is_ascii_alphabetic());
+        let safe = if absolute { None } else { file.enclosed_name() };
+        let Some(safe) = safe else {
+            anyhow::bail!("bundle entry {raw:?} escapes the archive");
         };
         let name = safe
             .components()
@@ -1648,7 +1653,15 @@ mod tests {
 
     #[test]
     fn entries_that_escape_the_archive_are_refused() {
-        for name in ["../../etc/cron.d/pwn", "/etc/shadow", "a/../../b"] {
+        for name in [
+            "../../etc/cron.d/pwn",
+            "/etc/shadow",
+            "a/../../b",
+            "\\Windows\\System32\\evil.dll",
+            "C:\\Windows\\evil.dll",
+            "C:/Windows/evil.dll",
+            "\\\\server\\share\\evil",
+        ] {
             let blob = zip_of(&[(name, b"x".to_vec())]);
             let err = read_zip_entries_within(&blob, 1024 * 1024)
                 .unwrap_err_or_ok_names()
