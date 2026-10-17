@@ -102,7 +102,7 @@ neither read such a bundle nor fabricate one that agents will accept, because AE
 authentication fails for anyone without the key. This is the mechanism that keeps a
 compromised control plane from reaching into agents through bundle content.
 
-Blob layout (`fleet_core::encbundle` and `web/src/crypto.ts` are the reference
+Blob layout (`fleet_core::encbundle` and `web/src/bundles/crypto.ts` are the reference
 implementations — byte-identical constructions):
 
 ```
