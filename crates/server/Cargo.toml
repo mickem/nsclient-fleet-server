@@ -41,6 +41,10 @@ rpassword = "7"
 # record of why one failed to start; daily rotation keeps that from growing without bound.
 tracing-appender = "0.2"
 governor = "0.6"
+# The map behind the per-email rate limiters, held directly so one address can be cleared
+# when a magic link proves it (governor has no per-key reset). Must be the version governor
+# itself uses, or its state-store impl would be for a different type.
+dashmap = "5"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "cookies", "multipart"] }
 url = "2"

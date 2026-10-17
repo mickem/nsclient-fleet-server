@@ -412,7 +412,16 @@ pub async fn exchange_confirm(
     clear.set_path("/");
     let jar = jar.remove(clear);
 
-    issue_session_cookie(&state, jar, tenant_id, user_id).await
+    let response = issue_session_cookie(&state, jar, tenant_id, user_id).await;
+    // The link was redeemed and bought a session, so whoever asked for it reads that
+    // inbox: the per-email send limit has nothing left to protect. Only on success — a
+    // blocked account redeems its link but gets no session, and keeps its limit.
+    if response.status().is_redirection() {
+        if let Ok(Some(user)) = UserRepo::new(&state.db).get(tenant_id, user_id).await {
+            state.rate_limits.forget_email(&user.email);
+        }
+    }
+    response
 }
 
 /// The confirmation interstitial. Self-contained (the operator UI is a separate SPA bundle,

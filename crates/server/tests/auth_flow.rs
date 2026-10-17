@@ -639,3 +639,85 @@ async fn exchange_confirm_requires_the_double_submit_nonce() {
     let ok = complete_exchange(&victim, &s.base_url, token).await;
     assert_eq!(ok.status(), 303);
 }
+
+/// Links in the database for one user. send-link answers 204 whatever it decided and mails
+/// from a detached task, so the row is the only sign a link was actually issued.
+async fn link_count(db: &Db, user_id: i64) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM magic_links WHERE user_id = ?")
+        .bind(user_id)
+        .fetch_one(&db.read)
+        .await
+        .unwrap()
+}
+
+/// Wait for the detached send to land, or give up and return what is there.
+async fn wait_for_links(db: &Db, user_id: i64, want: i64) -> i64 {
+    for _ in 0..100 {
+        let n = link_count(db, user_id).await;
+        if n >= want {
+            return n;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    link_count(db, user_id).await
+}
+
+/// The per-email limit guards an inbox against floods. Redeeming a link proves the person
+/// asking reads that inbox, so it is cleared: signing out and asking again straight away
+/// used to get a silent 204 and no mail until the minute was up.
+#[tokio::test]
+async fn redeeming_a_link_clears_the_per_email_send_limit() {
+    let s = start().await;
+    let c = client();
+
+    let t = TenantRepo::new(&s.db)
+        .create("acme", "Acme", "free", None)
+        .await
+        .unwrap();
+    let u = UserRepo::new(&s.db)
+        .create(t.id, "alice@example.com", fleet_core::user::Role::Owner)
+        .await
+        .unwrap();
+    let send = || async {
+        let res = c
+            .post(format!("{}/api/auth/send-link", s.base_url))
+            .json(&serde_json::json!({ "email": "Alice@Example.com" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 204);
+    };
+
+    send().await;
+    assert_eq!(wait_for_links(&s.db, u.id, 1).await, 1);
+
+    // Within the minute: limited, silently.
+    send().await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        link_count(&s.db, u.id).await,
+        1,
+        "second send must be limited"
+    );
+
+    // Redeem a link (one we planted, as the mailed token is only in the mail).
+    let token = "redeem-token-abcdefghij";
+    MagicLinkRepo::new(&s.db)
+        .create(
+            &hash_token(token),
+            t.id,
+            u.id,
+            fleet_core::time::now_unix() + 600,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        complete_exchange(&c, &s.base_url, token).await.status(),
+        303
+    );
+    let before = link_count(&s.db, u.id).await;
+
+    // The limit is gone: the next request mails a link.
+    send().await;
+    assert_eq!(wait_for_links(&s.db, u.id, before + 1).await, before + 1);
+}
