@@ -295,13 +295,27 @@ pub async fn serve_on(
 /// handshake failure looks like "the agent just doesn't work" from the operator's seat.
 pub(crate) fn log_handshake_failure(err: &std::io::Error, ip: std::net::IpAddr) {
     let msg = err.to_string();
+    // A web browser pointed at this port lands in the first two branches: it refuses our
+    // self-signed certificate (the alert), then, once clicked through, comes back with no
+    // client certificate. The handshake carries nothing that tells it apart from an agent,
+    // so both lines name the browser case as well.
     if msg.contains("sent no certificates") || msg.contains("NoCertificatesPresented") {
         tracing::warn!(
             %ip,
-            "mTLS handshake failed: the client presented NO certificate. Its TLS stack is \
-             not sending the client cert (misconfigured identity, or cert material loaded \
-             after the TLS session was created) — this is an agent-side bug, not a \
-             revoked/expired certificate."
+            "mTLS handshake failed: the client presented NO certificate. If this was a web \
+             browser: this port is for agents only — the operator UI is at BASE_URL. \
+             Otherwise the agent's TLS stack is not sending its client cert (misconfigured \
+             identity, or cert material loaded after the TLS session was created) — an \
+             agent-side bug, not a revoked/expired certificate."
+        );
+    } else if msg.contains("CertificateUnknown") {
+        tracing::info!(
+            %ip,
+            error = %msg,
+            "mTLS handshake failed: the client rejected the server certificate. If this \
+             was a web browser: this port is for agents only — the operator UI is at \
+             BASE_URL. Otherwise the agent is pinning a different server certificate — \
+             re-enroll the host."
         );
     } else if msg.contains("UnknownIssuer") {
         tracing::warn!(
@@ -323,8 +337,8 @@ pub(crate) fn log_handshake_failure(err: &std::io::Error, ip: std::net::IpAddr) 
             "mTLS handshake failed: client certificate rejected"
         );
     } else {
-        // Plain TCP probes, port scanners, TLS-version mismatches, agents pinning a
-        // stale server cert. Common enough to keep at info, but still visible.
+        // Plain TCP probes, port scanners, TLS-version mismatches. Common enough to keep
+        // at info, but still visible.
         tracing::info!(%ip, error = %msg, "mTLS handshake failed");
     }
 }
