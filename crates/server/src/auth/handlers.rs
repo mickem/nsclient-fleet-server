@@ -73,7 +73,7 @@ pub async fn signup(
 
     // Checked before Turnstile: when signups are closed nothing about this request matters,
     // and there is no reason to spend a siteverify round trip refusing it.
-    match crate::platform::settings::signups_enabled(&state.db).await {
+    match crate::admin::platform::settings::signups_enabled(&state.db).await {
         Ok(true) => {}
         Ok(false) => {
             return (
@@ -188,12 +188,12 @@ pub async fn signup(
         }
     };
 
-    if let Err(e) = crate::tenant_setup::ensure_secrets(&state, &tenant).await {
+    if let Err(e) = crate::runtime::tenant_setup::ensure_secrets(&state, &tenant).await {
         tracing::error!(error = %e, tenant_id = tenant.id, "tenant secret generation failed");
         return (StatusCode::INTERNAL_SERVER_ERROR, "create failed").into_response();
     }
 
-    crate::audit::record(
+    crate::admin::audit::record(
         &state,
         tenant.id,
         None,
@@ -284,7 +284,7 @@ pub async fn send_link(
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// Mint a single-use magic link and mail it. Shared with `crate::users::invite`, which is
+/// Mint a single-use magic link and mail it. Shared with `crate::admin::users::invite`, which is
 /// the same operation for a user who has just been created.
 pub(crate) async fn issue_and_send_link(
     state: &AppState,
@@ -323,7 +323,7 @@ pub struct ConfirmForm {
 /// On-prem authenticates one administrator from configuration and has no mail path at all.
 /// `send-link` refused already, but the exchange routes did not — so a platform admin could
 /// mint a link through the console and sign in a second user, which is exactly the invariant
-/// `crate::users` says holds.
+/// `crate::admin::users` says holds.
 fn magic_links_disabled() -> Response {
     (
         StatusCode::NOT_FOUND,
@@ -549,7 +549,7 @@ pub async fn on_prem_login(
 ///
 /// The hash is checked first because a deployment that has one has said which answer it
 /// means; the two cannot both be set (startup refuses that).
-fn verify_admin_password(cfg: &crate::config::Config, offered: &str) -> Option<bool> {
+fn verify_admin_password(cfg: &crate::runtime::config::Config, offered: &str) -> Option<bool> {
     if let Some(phc) = cfg.on_prem_admin_password_hash.as_deref() {
         use argon2::password_hash::{phc::PasswordHash, PasswordVerifier};
         let parsed = match PasswordHash::new(phc) {
@@ -690,7 +690,7 @@ pub async fn logout_everywhere(
         "signed out of every session"
     );
 
-    crate::audit::record(
+    crate::admin::audit::record(
         &state,
         who.tenant_id,
         Some(who.user_id),

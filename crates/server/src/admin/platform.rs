@@ -346,12 +346,12 @@ pub async fn create_tenant(
 
     // Without a CA and a bundle-signing key the tenant cannot enrol a host, so this is part
     // of creating one, exactly as it is at signup.
-    if let Err(e) = crate::tenant_setup::ensure_secrets(&state, &tenant).await {
+    if let Err(e) = crate::runtime::tenant_setup::ensure_secrets(&state, &tenant).await {
         tracing::error!(error = %e, tenant_id = tenant.id, "tenant secret generation failed");
         return (StatusCode::INTERNAL_SERVER_ERROR, "create failed").into_response();
     }
 
-    crate::audit::record(
+    crate::admin::audit::record(
         &state,
         tenant.id,
         Some(who.user_id),
@@ -392,7 +392,7 @@ pub async fn create_tenant(
                         tracing::error!(error = %e, %email, "owner sign-in link could not be sent")
                     }
                 }
-                crate::audit::record(
+                crate::admin::audit::record(
                     &state,
                     tenant.id,
                     Some(who.user_id),
@@ -495,7 +495,7 @@ pub async fn put_subscription(
         }
     }
 
-    crate::audit::record(
+    crate::admin::audit::record(
         &state,
         tenant_id,
         Some(who.user_id),
@@ -608,7 +608,7 @@ pub async fn update_user(
                 tracing::error!(error = %e, "set_blocked failed");
                 return (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response();
             }
-            crate::audit::record(
+            crate::admin::audit::record(
                 &state,
                 target.tenant_id,
                 Some(who.user_id),
@@ -635,7 +635,7 @@ pub async fn update_user(
                 tracing::error!(error = %e, "set_platform_admin failed");
                 return (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response();
             }
-            crate::audit::record(
+            crate::admin::audit::record(
                 &state,
                 target.tenant_id,
                 Some(who.user_id),
@@ -726,7 +726,7 @@ pub async fn delete_user(
         }
     }
 
-    crate::audit::record(
+    crate::admin::audit::record(
         &state,
         target.tenant_id,
         Some(who.user_id),
@@ -783,7 +783,7 @@ pub async fn put_settings(
     // The switch belongs to the whole install, but `audit_log.tenant_id` is NOT NULL — so
     // this is recorded against the acting admin's own tenant, which is where they would go
     // looking for what they changed.
-    crate::audit::record(
+    crate::admin::audit::record(
         &state,
         who.tenant_id,
         Some(who.user_id),

@@ -16,6 +16,8 @@
 //!
 //! See [`fleet_core::facts`] for the wire format and the document diff.
 
+pub mod import;
+
 use axum::{
     body::{Body, Bytes},
     extract::{Path, State},
@@ -36,7 +38,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use crate::auth::AuthedUser;
-use crate::mtls::PeerHostContext;
+use crate::transport::mtls::PeerHostContext;
 use crate::AppState;
 
 /// Largest upload body accepted. The agent caps its own document at `[/settings/facts] max

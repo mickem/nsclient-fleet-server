@@ -17,13 +17,13 @@ maintenance. The triggers that justify it:
   `MASTER_KEY`). It signs host client certs only.
 - The mTLS listener's trust store holds **every** tenant CA and resolves the tenant from
   the leaf's *issuer* — never from the leaf's own claims. Reload it with
-  `trust_store.rebuild().await` (`crates/server/src/mtls.rs`). `notify_change()` also
+  `trust_store.rebuild().await` (`crates/server/src/transport/mtls.rs`). `notify_change()` also
   exists but is fire-and-forget: it can land *after* the response that told a client to
   start using the new material, which is the `UnknownCA` failure mode enrollment used to
   have. Anywhere ordering matters, await the rebuild.
 - Agents pin the material they got at enrollment and refresh **all** of it (client cert,
   `ca_pem`, `mtls_server_cert_pem`, `bundle_signing_pub_pem`) from each
-  `POST /agent/v1/renew` response (`crates/server/src/agent_api.rs`, `renew`).
+  `POST /agent/v1/renew` response (`crates/server/src/agent/api.rs`, `renew`).
 
 That renew response is the distribution channel: anything placed in `tenant_secrets`
 reaches every live agent within one renewal cycle once you force early renewal.
@@ -33,7 +33,7 @@ reaches every live agent within one renewal cycle once you force early renewal.
 The old CA remains trusted during the transition, so nothing breaks mid-flight.
 
 1. **Generate the new CA** for the tenant (same path as tenant creation:
-   `crates/server/src/tenant_setup.rs`). Encrypt the key with the master key.
+   `crates/server/src/runtime/tenant_setup.rs`). Encrypt the key with the master key.
 2. **Add, don't replace**: insert the new CA as an *additional* trusted issuer for the
    tenant. The trust store must contain old + new simultaneously. (The
    `tenant_secrets` table is one-row-per-tenant today — rotation therefore needs a

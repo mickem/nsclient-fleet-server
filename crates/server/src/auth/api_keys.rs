@@ -166,7 +166,7 @@ pub async fn create(
 
     // The token is deliberately absent from the audit metadata — that table is readable by
     // every user in the tenant.
-    crate::audit::record(
+    crate::admin::audit::record(
         &state,
         who.tenant_id,
         Some(who.user_id),
@@ -205,7 +205,7 @@ pub async fn delete_key(
         }
     }
 
-    crate::audit::record(
+    crate::admin::audit::record(
         &state,
         who.tenant_id,
         Some(who.user_id),

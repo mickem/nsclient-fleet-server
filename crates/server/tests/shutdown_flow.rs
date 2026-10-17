@@ -7,7 +7,7 @@
 //! either: the accept loops leave when the signal fires, and they free the port on the way
 //! out rather than lingering as a task nobody is waiting for.
 //!
-//! `crates/server/src/shutdown.rs` unit-tests the signal itself, and `conn.rs` the drain.
+//! `crates/server/src/runtime/shutdown.rs` unit-tests the signal itself, and `transport/conn.rs` the drain.
 //! What is left, and what is here, is that the listeners are actually wired to them.
 
 use std::net::SocketAddr;
@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fleet_core::aead::MasterKey;
-use fleet_server::shutdown;
+use fleet_server::runtime::shutdown;
 use tempfile::TempDir;
 use tokio::net::TcpStream;
 
@@ -43,7 +43,7 @@ async fn harness() -> Harness {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     let bootstrap_jwt_secret = STANDARD.decode(&key_b64).unwrap();
 
-    let cfg = fleet_server::config::Config {
+    let cfg = fleet_server::runtime::config::Config {
         listen: "127.0.0.1:0".into(),
         listen_https: "127.0.0.1:0".into(),
         listen_mtls: String::new(),
@@ -73,11 +73,14 @@ async fn harness() -> Harness {
     };
 
     let (mtls_cert_pem, mtls_key_pem) =
-        fleet_server::mtls::generate_self_signed_server("127.0.0.1").unwrap();
-    let trust_store =
-        fleet_server::mtls::MtlsContext::load(db.clone(), mtls_cert_pem.clone(), mtls_key_pem)
-            .await
-            .unwrap();
+        fleet_server::transport::mtls::generate_self_signed_server("127.0.0.1").unwrap();
+    let trust_store = fleet_server::transport::mtls::MtlsContext::load(
+        db.clone(),
+        mtls_cert_pem.clone(),
+        mtls_key_pem,
+    )
+    .await
+    .unwrap();
 
     let state = fleet_server::AppState {
         db: db.clone(),
@@ -85,8 +88,8 @@ async fn harness() -> Harness {
         email: fleet_server::auth::email::EmailSender::from_config(cfg.smtp.as_ref()).unwrap(),
         turnstile: fleet_server::auth::turnstile::Turnstile::from_secret(None),
         rate_limits: fleet_server::auth::rate_limit::AuthRateLimits::new(cfg.daily_email_budget),
-        agent_limits: fleet_server::agent_limits::AgentRateLimits::new(),
-        enrollment_limits: fleet_server::agent_limits::EnrollmentLimits::new(10_000),
+        agent_limits: fleet_server::agent::limits::AgentRateLimits::new(),
+        enrollment_limits: fleet_server::agent::limits::EnrollmentLimits::new(10_000),
         trust_store,
         mtls_server_cert_pem: Arc::new(mtls_cert_pem),
         bundle_store: Arc::new(fleet_server::bundles::LocalBundleStore::new(
@@ -127,13 +130,13 @@ async fn the_shared_port_listener_stops_when_the_signal_fires() {
     let addr = listener.local_addr().unwrap();
 
     let (trigger, signal) = shutdown::channel();
-    let tls = Arc::new(fleet_server::mux::MuxTls {
+    let tls = Arc::new(fleet_server::transport::mux::MuxTls {
         acme_challenge: None,
         web: web_config(),
         agent_sni: None,
     });
 
-    let served = tokio::spawn(fleet_server::mux::serve_on(
+    let served = tokio::spawn(fleet_server::transport::mux::serve_on(
         listener,
         tls,
         h.state.trust_store.clone(),
@@ -164,7 +167,7 @@ async fn the_agent_listener_stops_when_the_signal_fires() {
     let addr = listener.local_addr().unwrap();
 
     let (trigger, signal) = shutdown::channel();
-    let served = tokio::spawn(fleet_server::mtls::serve_on(
+    let served = tokio::spawn(fleet_server::transport::mtls::serve_on(
         listener,
         h.state.trust_store.clone(),
         fleet_server::mtls_router(h.state.clone()),
@@ -196,7 +199,7 @@ async fn a_listener_handed_an_already_fired_signal_stops_immediately() {
     let (trigger, signal) = shutdown::channel();
     trigger.fire();
 
-    let served = fleet_server::mtls::serve_on(
+    let served = fleet_server::transport::mtls::serve_on(
         listener,
         h.state.trust_store.clone(),
         fleet_server::mtls_router(h.state.clone()),
@@ -217,7 +220,8 @@ use rustls::pki_types::pem::PemObject;
 /// with it is `mux_flow`'s subject, not this file's. Certificate and key come from the same
 /// call, which is the one way to get this wrong.
 fn web_config() -> Arc<rustls::ServerConfig> {
-    let (cert_pem, key_pem) = fleet_server::mtls::generate_self_signed_server("127.0.0.1").unwrap();
+    let (cert_pem, key_pem) =
+        fleet_server::transport::mtls::generate_self_signed_server("127.0.0.1").unwrap();
     let certs: Vec<_> = rustls::pki_types::CertificateDer::pem_slice_iter(cert_pem.as_bytes())
         .collect::<Result<_, _>>()
         .unwrap();

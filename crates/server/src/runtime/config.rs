@@ -288,7 +288,7 @@ impl Config {
         }
 
         // With a TLS terminator of our own, agents share the HTTPS port (routed by ALPN —
-        // see `crate::mux`), so there is nothing to bind separately and the firewall only
+        // see `crate::transport::mux`), so there is nothing to bind separately and the firewall only
         // needs one port. Setting LISTEN_MTLS explicitly opts back into a dedicated port:
         // useful behind a load balancer that can't pass ALPN through, or while migrating a
         // live fleet. Without TLS there is no listener to mux onto, so agents need their own

@@ -16,7 +16,7 @@
 //!
 //! Configuration reaches the service through `--env-file`, not the environment: the SCM
 //! hands a service the machine-wide environment, and `MASTER_KEY` in there would be
-//! readable by every process on the host. See [`fleet_server::env_file`].
+//! readable by every process on the host. See [`fleet_server::runtime::env_file`].
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -100,7 +100,7 @@ fn service_main(_scm_arguments: Vec<OsString>) {
 }
 
 fn run_service() -> Result<()> {
-    let (trigger, shutdown) = fleet_server::shutdown::channel();
+    let (trigger, shutdown) = fleet_server::runtime::shutdown::channel();
 
     let event_handler = move |control| -> ServiceControlHandlerResult {
         match control {

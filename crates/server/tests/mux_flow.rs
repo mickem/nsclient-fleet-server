@@ -73,7 +73,7 @@ async fn start() -> TestServer {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     let bootstrap_jwt_secret = STANDARD.decode(&key_b64).unwrap();
 
-    let cfg = fleet_server::config::Config {
+    let cfg = fleet_server::runtime::config::Config {
         listen: format!("127.0.0.1:{}", http_addr.port()),
         listen_https: format!("127.0.0.1:{mux_port}"),
         // Empty — exactly the production shape when ACME is on: no dedicated agent port,
@@ -105,18 +105,21 @@ async fn start() -> TestServer {
     };
 
     let (mtls_cert_pem, mtls_key_pem) =
-        fleet_server::mtls::generate_self_signed_server("127.0.0.1").unwrap();
+        fleet_server::transport::mtls::generate_self_signed_server("127.0.0.1").unwrap();
     let (web_cert_pem, web_key_pem) =
-        fleet_server::mtls::generate_self_signed_server("127.0.0.1").unwrap();
+        fleet_server::transport::mtls::generate_self_signed_server("127.0.0.1").unwrap();
 
     let email = fleet_server::auth::email::EmailSender::from_config(cfg.smtp.as_ref()).unwrap();
     let turnstile =
         fleet_server::auth::turnstile::Turnstile::from_secret(cfg.turnstile_secret.clone());
     let rate_limits = fleet_server::auth::rate_limit::AuthRateLimits::new(cfg.daily_email_budget);
-    let trust_store =
-        fleet_server::mtls::MtlsContext::load(db.clone(), mtls_cert_pem.clone(), mtls_key_pem)
-            .await
-            .unwrap();
+    let trust_store = fleet_server::transport::mtls::MtlsContext::load(
+        db.clone(),
+        mtls_cert_pem.clone(),
+        mtls_key_pem,
+    )
+    .await
+    .unwrap();
 
     let state = fleet_server::AppState {
         db: db.clone(),
@@ -124,8 +127,8 @@ async fn start() -> TestServer {
         email,
         turnstile,
         rate_limits,
-        agent_limits: fleet_server::agent_limits::AgentRateLimits::new(),
-        enrollment_limits: fleet_server::agent_limits::EnrollmentLimits::new(10_000),
+        agent_limits: fleet_server::agent::limits::AgentRateLimits::new(),
+        enrollment_limits: fleet_server::agent::limits::EnrollmentLimits::new(10_000),
         trust_store: trust_store.clone(),
         mtls_server_cert_pem: Arc::new(mtls_cert_pem.clone()),
         bundle_store: Arc::new(fleet_server::bundles::LocalBundleStore::new(
@@ -135,7 +138,7 @@ async fn start() -> TestServer {
         facts_catalog_cache: Default::default(),
     };
 
-    let mux_tls = Arc::new(fleet_server::mux::MuxTls {
+    let mux_tls = Arc::new(fleet_server::transport::mux::MuxTls {
         // Not the same certificate a real ACME deployment would serve here, but the
         // branch only has to be distinguishable from the web one for the routing test.
         acme_challenge: Some(web_server_config(&web_cert_pem, &web_key_pem)),
@@ -146,13 +149,13 @@ async fn start() -> TestServer {
     let mux_handle = tokio::spawn(async move {
         let web = fleet_server::router(mux_state.clone());
         let agent = fleet_server::mtls_router(mux_state.clone());
-        let _ = fleet_server::mux::serve_on(
+        let _ = fleet_server::transport::mux::serve_on(
             mux_listener,
             mux_tls,
             mux_state.trust_store.clone(),
             web,
             agent,
-            fleet_server::shutdown::Shutdown::never(),
+            fleet_server::runtime::shutdown::Shutdown::never(),
         )
         .await;
     });

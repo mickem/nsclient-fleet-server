@@ -9,7 +9,7 @@ use fleet_storage::{HostCertRepo, HostRepo, HostTagsRepo, TenantRepo, TenantSecr
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::mtls::PeerHostContext;
+use crate::transport::mtls::PeerHostContext;
 use crate::AppState;
 
 /// How stale a host's `last_seen_at` may get before a poll rewrites it.
@@ -105,10 +105,17 @@ pub async fn desired_state(
     // than caching against a version we invented.
     let computed = match config_version {
         Some(v) => {
-            crate::desired_state::compute_desired_state_at(&state, ctx.tenant_id, &ctx.host_id, v)
-                .await
+            crate::agent::desired_state::compute_desired_state_at(
+                &state,
+                ctx.tenant_id,
+                &ctx.host_id,
+                v,
+            )
+            .await
         }
-        None => crate::desired_state::compute_uncached(&state, ctx.tenant_id, &ctx.host_id).await,
+        None => {
+            crate::agent::desired_state::compute_uncached(&state, ctx.tenant_id, &ctx.host_id).await
+        }
     };
     let ds = match computed {
         Ok(d) => d,

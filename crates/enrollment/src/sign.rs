@@ -155,7 +155,7 @@ mod tests {
     /// A tenant CA as stored by the build before the crypto-crate upgrade (see
     /// `testdata/kat`) must keep issuing, for both key types an agent may put in its CSR.
     /// That the result chains to the stored CA, and resolves to its tenant, is checked
-    /// where the leaf is parsed — `fleet_server::mtls`.
+    /// where the leaf is parsed — `fleet_server::transport::mtls`.
     #[test]
     fn stored_tenant_ca_still_issues() {
         for csr in [

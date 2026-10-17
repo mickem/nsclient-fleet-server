@@ -1,29 +1,11 @@
-pub mod admin_password;
-pub mod agent_api;
-pub mod agent_limits;
-pub mod api_keys;
-pub mod audit;
+pub mod admin;
+pub mod agent;
 pub mod auth;
 pub mod bundles;
-pub mod config;
-pub mod config_api;
-pub mod conn;
-pub mod csrf;
-pub mod desired_state;
-pub mod env_file;
 pub mod facts;
-pub mod facts_import;
 pub mod hosts;
-pub mod housekeeping;
-pub mod https;
-pub mod mtls;
-pub mod mux;
-pub mod platform;
-pub mod security_headers;
-pub mod shutdown;
-pub mod tenant_setup;
-pub mod trial_expiry;
-pub mod users;
+pub mod runtime;
+pub mod transport;
 
 use std::sync::Arc;
 
@@ -38,11 +20,11 @@ use axum::{
 use fleet_storage::{Db, TenantRepo, UserRepo};
 use rust_embed::RustEmbed;
 
-use crate::agent_limits::{AgentRateLimits, EnrollmentLimits};
+use crate::agent::limits::{AgentRateLimits, EnrollmentLimits};
 use crate::auth::{email::EmailSender, rate_limit::AuthRateLimits, turnstile::Turnstile};
 use crate::bundles::BundleStore;
-use crate::config::Config;
-use crate::mtls::MtlsContext;
+use crate::runtime::config::Config;
+use crate::transport::mtls::MtlsContext;
 
 #[derive(RustEmbed)]
 #[folder = "../../web/dist/"]
@@ -62,7 +44,7 @@ pub struct AppState {
     pub bundle_store: Arc<dyn BundleStore>,
     /// Memoized desired state, invalidated by the tenant's `config_version`. Shared across
     /// clones of `AppState` — one cache per process.
-    pub desired_state_cache: Arc<crate::desired_state::DesiredStateCache>,
+    pub desired_state_cache: Arc<crate::agent::desired_state::DesiredStateCache>,
     /// The facts catalog per tenant, rebuilt only when a tenant's facts moved. Shared across
     /// clones of `AppState`.
     pub facts_catalog_cache: Arc<crate::facts::CatalogCache>,
@@ -237,23 +219,23 @@ pub fn router(state: AppState) -> Router {
         // own limit rather than raising axum's 2 MiB default for every JSON route.
         .route(
             "/api/facts/import/resolve",
-            post(facts_import::resolve).layer(axum::extract::DefaultBodyLimit::max(
-                facts_import::MAX_IMPORT_BODY_BYTES,
+            post(facts::import::resolve).layer(axum::extract::DefaultBodyLimit::max(
+                facts::import::MAX_IMPORT_BODY_BYTES,
             )),
         )
         .route(
             "/api/facts/import",
-            post(facts_import::commit).layer(axum::extract::DefaultBodyLimit::max(
-                facts_import::MAX_IMPORT_BODY_BYTES,
+            post(facts::import::commit).layer(axum::extract::DefaultBodyLimit::max(
+                facts::import::MAX_IMPORT_BODY_BYTES,
             )),
         )
         .route(
             "/api/facts/sources/{source}",
-            axum::routing::delete(facts_import::delete_source),
+            axum::routing::delete(facts::import::delete_source),
         )
         .route(
             "/api/hosts/{id}/facts/{source}",
-            axum::routing::delete(facts_import::delete_host_source),
+            axum::routing::delete(facts::import::delete_host_source),
         )
         .route(
             "/api/hosts/{id}/revoke-certs",
@@ -261,35 +243,39 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/api/hosts/{id}/tags/{key}",
-            axum::routing::put(config_api::put_tag),
+            axum::routing::put(hosts::config_api::put_tag),
         )
         .route(
             "/api/hosts/{id}/tags/{key}",
-            axum::routing::delete(config_api::delete_tag),
+            axum::routing::delete(hosts::config_api::delete_tag),
         )
         .route(
             "/api/hosts/{id}/override",
-            axum::routing::put(config_api::put_override).get(config_api::get_override),
+            axum::routing::put(hosts::config_api::put_override)
+                .get(hosts::config_api::get_override),
         )
         .route(
             "/api/hosts/{id}/override/shape",
-            get(config_api::get_override_shape),
+            get(hosts::config_api::get_override_shape),
         )
         .route(
             "/api/hosts/{id}/override",
-            axum::routing::delete(config_api::delete_override),
+            axum::routing::delete(hosts::config_api::delete_override),
         )
-        .route("/api/groups", get(config_api::list_groups))
-        .route("/api/groups", post(config_api::create_group))
+        .route("/api/groups", get(hosts::config_api::list_groups))
+        .route("/api/groups", post(hosts::config_api::create_group))
         .route(
             "/api/groups/{id}",
-            axum::routing::patch(config_api::patch_group),
+            axum::routing::patch(hosts::config_api::patch_group),
         )
         .route(
             "/api/groups/{id}",
-            axum::routing::delete(config_api::delete_group),
+            axum::routing::delete(hosts::config_api::delete_group),
         )
-        .route("/api/groups/preview", post(config_api::preview_selector))
+        .route(
+            "/api/groups/preview",
+            post(hosts::config_api::preview_selector),
+        )
         .route(
             "/api/groups/{id}/bundles",
             get(bundles::list_for_group).post(bundles::assign_to_group),
@@ -329,48 +315,54 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/bundles/{id}/config", get(bundles::get_config))
         .route("/api/bundles/{id}/download", get(bundles::ui_download))
-        .route("/api/audit", get(audit::list))
-        .route("/api/keys", get(api_keys::list).post(api_keys::create))
+        .route("/api/audit", get(admin::audit::list))
+        .route(
+            "/api/keys",
+            get(auth::api_keys::list).post(auth::api_keys::create),
+        )
         .route(
             "/api/keys/{id}",
-            axum::routing::delete(api_keys::delete_key),
+            axum::routing::delete(auth::api_keys::delete_key),
         )
-        .route("/api/users", get(users::list).post(users::invite))
+        .route(
+            "/api/users",
+            get(admin::users::list).post(admin::users::invite),
+        )
         .route(
             "/api/users/{id}",
-            axum::routing::patch(users::set_role).delete(users::delete_user),
+            axum::routing::patch(admin::users::set_role).delete(admin::users::delete_user),
         )
         // Anonymous: the sign-in page asks whether signup is open before it can offer it.
-        .route("/api/public-config", get(platform::public_config))
+        .route("/api/public-config", get(admin::platform::public_config))
         // Cross-tenant administration. Every handler below takes the `PlatformAdmin`
         // extractor — see the module docs for why the check lives in the signature.
         .route(
             "/api/platform/tenants",
-            get(platform::list_tenants).post(platform::create_tenant),
+            get(admin::platform::list_tenants).post(admin::platform::create_tenant),
         )
         .route(
             "/api/platform/tenants/{id}/subscription",
-            axum::routing::put(platform::put_subscription),
+            axum::routing::put(admin::platform::put_subscription),
         )
         .route(
             "/api/platform/tenants/{id}/users",
-            get(platform::list_tenant_users),
+            get(admin::platform::list_tenant_users),
         )
         .route(
             "/api/platform/users/{id}",
-            axum::routing::patch(platform::update_user).delete(platform::delete_user),
+            axum::routing::patch(admin::platform::update_user).delete(admin::platform::delete_user),
         )
-        .route("/api/platform/tiers", get(platform::list_tiers))
+        .route("/api/platform/tiers", get(admin::platform::list_tiers))
         .route(
             "/api/platform/settings",
-            get(platform::get_settings).put(platform::put_settings),
+            get(admin::platform::get_settings).put(admin::platform::put_settings),
         )
         .route("/enroll/v1", post(hosts::enroll))
         // Layers wrap the inner service; later .layer() = outer = runs first on the request.
         // We want session_layer to run FIRST (so AuthedUser is in extensions), then trial_expiry.
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            trial_expiry::trial_expiry_layer,
+            auth::trial_expiry::trial_expiry_layer,
         ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -378,13 +370,13 @@ pub fn router(state: AppState) -> Router {
         ))
         // Outside the session layer, so a refused cross-origin request never reaches the
         // point of resolving who it claims to be.
-        .layer(axum::middleware::from_fn(csrf::layer))
+        .layer(axum::middleware::from_fn(transport::csrf::layer))
         .fallback(frontend)
         // Outermost, and deliberately after `.fallback`, so the headers reach the SPA and
         // every error response as well as the API routes.
         .layer(axum::middleware::from_fn_with_state(
-            security_headers::SecurityHeaders::from_config(&state.config),
-            security_headers::layer,
+            transport::security_headers::SecurityHeaders::from_config(&state.config),
+            transport::security_headers::layer,
         ))
         .with_state(state)
 }
@@ -394,9 +386,9 @@ pub fn router(state: AppState) -> Router {
 pub fn mtls_router(state: AppState) -> Router {
     Router::new()
         .route("/agent/v1/heartbeat", get(agent_heartbeat))
-        .route("/agent/v1/desired-state", get(agent_api::desired_state))
-        .route("/agent/v1/state-report", post(agent_api::state_report))
-        .route("/agent/v1/renew", post(agent_api::renew))
+        .route("/agent/v1/desired-state", get(agent::api::desired_state))
+        .route("/agent/v1/state-report", post(agent::api::state_report))
+        .route("/agent/v1/renew", post(agent::api::renew))
         .route("/agent/v1/bundles/{id}", get(bundles::download))
         // The handler reads the body itself, capped at `MAX_FACTS_BODY_BYTES`: the document
         // can legitimately exceed axum's 2 MiB default, and an oversized one has to reach
@@ -404,14 +396,14 @@ pub fn mtls_router(state: AppState) -> Router {
         .route("/agent/v1/facts", post(facts::upload))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            agent_limits::tier_layer,
+            agent::limits::tier_layer,
         ))
         .with_state(state)
 }
 
 async fn agent_heartbeat(
     State(state): State<AppState>,
-    axum::Extension(ctx): axum::Extension<crate::mtls::PeerHostContext>,
+    axum::Extension(ctx): axum::Extension<crate::transport::mtls::PeerHostContext>,
 ) -> Response {
     // Revocation is checked in `tier_layer`, which wraps every agent route including this one,
     // so a cert that reaches here is already active. Heartbeat only refreshes liveness.

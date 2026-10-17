@@ -50,7 +50,7 @@ async fn signup_login(s: &TestServer) {
 async fn fifty_agents_enroll_heartbeat_and_report_state() {
     let s = start_with(|st| {
         // Permissive enrollment quota: fleet bring-up issues 50 tokens in about a second.
-        st.enrollment_limits = fleet_server::agent_limits::EnrollmentLimits::new(10_000);
+        st.enrollment_limits = fleet_server::agent::limits::EnrollmentLimits::new(10_000);
     })
     .await;
     signup_login(&s).await;
@@ -189,7 +189,7 @@ async fn fifty_agents_enroll_heartbeat_and_report_state() {
 async fn fifty_agents_converge_on_assigned_bundle() {
     let s = start_with(|st| {
         // Permissive enrollment quota: fleet bring-up issues 50 tokens in about a second.
-        st.enrollment_limits = fleet_server::agent_limits::EnrollmentLimits::new(10_000);
+        st.enrollment_limits = fleet_server::agent::limits::EnrollmentLimits::new(10_000);
     })
     .await;
     signup_login(&s).await;

@@ -398,7 +398,8 @@ async fn rename_bundle(
 
 /// The orphan sweep, with no grace period.
 async fn sweep_now(s: &TestServer) -> usize {
-    fleet_server::housekeeping::sweep_bundle_files(&s.db, s.state.bundle_store.as_ref(), 0).await
+    fleet_server::runtime::housekeeping::sweep_bundle_files(&s.db, s.state.bundle_store.as_ref(), 0)
+        .await
 }
 
 /// Renaming moves every version of a name: plain versions keep their id, encrypted ones
@@ -1022,7 +1023,7 @@ async fn the_sweep_removes_only_old_files_no_bundle_points_at() {
 
     let store = s.state.bundle_store.as_ref();
     assert_eq!(
-        fleet_server::housekeeping::sweep_bundle_files(&s.db, store, 3_600).await,
+        fleet_server::runtime::housekeeping::sweep_bundle_files(&s.db, store, 3_600).await,
         0,
         "a fresh staged re-seal is waiting for its commit"
     );

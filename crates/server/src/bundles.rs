@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::auth::AuthedUser;
-use crate::mtls::PeerHostContext;
+use crate::transport::mtls::PeerHostContext;
 use crate::AppState;
 
 #[async_trait]
@@ -402,7 +402,7 @@ async fn persist_bundle(
         tracing::error!(error = %e, "config_version bump failed");
     }
 
-    crate::audit::record(
+    crate::admin::audit::record(
         state,
         who.tenant_id,
         Some(who.user_id),
@@ -850,9 +850,9 @@ pub async fn delete_bundle(
     }
 
     // Assignments changed, so every host's memoized state may have.
-    crate::config_api::bump_config_version(&state, who.tenant_id).await;
+    crate::hosts::config_api::bump_config_version(&state, who.tenant_id).await;
 
-    crate::audit::record(
+    crate::admin::audit::record(
         &state,
         who.tenant_id,
         Some(who.user_id),
@@ -1204,7 +1204,7 @@ pub async fn rename(
             .iter()
             .find(|m| m.old_id == b.id)
             .map_or(b.id.as_str(), |m| m.new_id.as_str());
-        crate::audit::record(
+        crate::admin::audit::record(
             &state,
             who.tenant_id,
             Some(who.user_id),
@@ -1291,7 +1291,7 @@ pub async fn assign_to_group(
     {
         tracing::error!(error = %e, "config_version bump failed");
     }
-    crate::audit::record(
+    crate::admin::audit::record(
         &state,
         who.tenant_id,
         Some(who.user_id),
@@ -1374,7 +1374,7 @@ pub async fn unassign_from_group(
             {
                 tracing::error!(error = %e, "config_version bump failed");
             }
-            crate::audit::record(
+            crate::admin::audit::record(
                 &state,
                 who.tenant_id,
                 Some(who.user_id),
@@ -1455,7 +1455,7 @@ pub async fn download(
     axum::Extension(ctx): axum::Extension<PeerHostContext>,
     Path(bundle_id): Path<String>,
 ) -> Response {
-    use crate::desired_state::compute_desired_state;
+    use crate::agent::desired_state::compute_desired_state;
     let ds = match compute_desired_state(&state, ctx.tenant_id, &ctx.host_id).await {
         Ok(d) => d,
         Err(e) => {
@@ -1539,7 +1539,7 @@ pub async fn set_bundle_key(
         tracing::error!(error = %e, "bundle key set failed");
         return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
     }
-    crate::audit::record(
+    crate::admin::audit::record(
         &state,
         who.tenant_id,
         Some(who.user_id),

@@ -469,14 +469,14 @@ async fn cache_speedup_profile() {
 
     let t0 = Instant::now();
     for _ in 0..N {
-        fleet_server::desired_state::compute_uncached(&s.state, tenant_id, &host_id)
+        fleet_server::agent::desired_state::compute_uncached(&s.state, tenant_id, &host_id)
             .await
             .unwrap();
     }
     let uncached = t0.elapsed();
 
     // Warm, then measure steady-state hits.
-    fleet_server::desired_state::compute_desired_state_at(
+    fleet_server::agent::desired_state::compute_desired_state_at(
         &s.state,
         tenant_id,
         &host_id,
@@ -486,7 +486,7 @@ async fn cache_speedup_profile() {
     .unwrap();
     let t1 = Instant::now();
     for _ in 0..N {
-        fleet_server::desired_state::compute_desired_state_at(
+        fleet_server::agent::desired_state::compute_desired_state_at(
             &s.state,
             tenant_id,
             &host_id,

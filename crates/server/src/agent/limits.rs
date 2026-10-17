@@ -15,7 +15,7 @@ use governor::clock::DefaultClock;
 use governor::{Quota, RateLimiter as Governor};
 use std::sync::Mutex;
 
-use crate::mtls::PeerHostContext;
+use crate::transport::mtls::PeerHostContext;
 use crate::AppState;
 
 type HostKey = (i64, String);

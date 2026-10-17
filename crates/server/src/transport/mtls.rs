@@ -17,8 +17,8 @@ use tokio_rustls::TlsAcceptor;
 use tower::Service;
 use x509_parser::prelude::FromDer;
 
-use crate::conn::{http_builder, ConnLimit, HANDSHAKE_TIMEOUT};
-use crate::shutdown::Shutdown;
+use crate::runtime::shutdown::Shutdown;
+use crate::transport::conn::{http_builder, ConnLimit, HANDSHAKE_TIMEOUT};
 use fleet_storage::{Db, TenantSecretsRepo};
 
 #[derive(Clone, Debug)]
@@ -30,7 +30,7 @@ pub struct PeerHostContext {
 }
 
 /// ALPN protocol the agent offers so a shared-port listener can route it to the mTLS
-/// branch without needing a dedicated port or a second hostname. See `crate::mux`.
+/// branch without needing a dedicated port or a second hostname. See `crate::transport::mux`.
 pub use fleet_proto::AGENT_ALPN;
 
 pub(crate) struct MtlsState {
@@ -255,7 +255,7 @@ pub async fn serve_on(
     let stopping = shutdown.wait();
     tokio::pin!(stopping);
     loop {
-        // Taken before `accept` — see `crate::conn::ConnLimit` for why the backpressure
+        // Taken before `accept` — see `crate::transport::conn::ConnLimit` for why the backpressure
         // belongs in the kernel backlog rather than in an accept-then-drop.
         let permit = tokio::select! {
             p = limit.acquire() => p,
@@ -285,7 +285,7 @@ pub async fn serve_on(
     // that has issued a certificate and not yet delivered it costs that agent a manual
     // re-enrollment — so this drain is worth more than the operator UI's.
     tracing::info!("mTLS listener draining");
-    let drained = limit.drain(crate::shutdown::DRAIN_TIMEOUT).await;
+    let drained = limit.drain(crate::runtime::shutdown::DRAIN_TIMEOUT).await;
     tracing::info!(drained, "mTLS listener stopped");
     Ok(())
 }
@@ -367,7 +367,7 @@ async fn handle_conn(
 /// Everything after a successful agent handshake: authenticate the peer from its client
 /// certificate, then run the agent router over the connection.
 ///
-/// Split out from `handle_conn` so the shared-port mux (`crate::mux`), which performs the
+/// Split out from `handle_conn` so the shared-port mux (`crate::transport::mux`), which performs the
 /// handshake itself in order to pick a `ServerConfig` from the ClientHello, can reuse the
 /// identical authentication path. There must be exactly one implementation of this — it is
 /// the boundary that turns a TLS peer into a `PeerHostContext`.
@@ -835,7 +835,11 @@ mod tests {
     // fleet-enrollment's tests. See that crate's `testdata/kat/README.md`.
     macro_rules! kat {
         ($name:literal) => {
-            include_str!(concat!("../../enrollment/testdata/kat/", $name))
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../enrollment/testdata/kat/",
+                $name
+            ))
         };
     }
 

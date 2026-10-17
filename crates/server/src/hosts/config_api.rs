@@ -59,7 +59,7 @@ pub async fn put_tag(
         state
             .desired_state_cache
             .invalidate_host(who.tenant_id, &host_id);
-        crate::audit::record(
+        crate::admin::audit::record(
             &state,
             who.tenant_id,
             Some(who.user_id),
@@ -90,7 +90,7 @@ pub async fn delete_tag(
             state
                 .desired_state_cache
                 .invalidate_host(who.tenant_id, &host_id);
-            crate::audit::record(
+            crate::admin::audit::record(
                 &state,
                 who.tenant_id,
                 Some(who.user_id),
@@ -157,7 +157,7 @@ pub async fn create_group(
     {
         Ok(g) => {
             bump_config_version(&state, who.tenant_id).await;
-            crate::audit::record(
+            crate::admin::audit::record(
                 &state,
                 who.tenant_id,
                 Some(who.user_id),
@@ -217,7 +217,7 @@ pub async fn patch_group(
     {
         Ok(true) => {
             bump_config_version(&state, who.tenant_id).await;
-            crate::audit::record(
+            crate::admin::audit::record(
                 &state,
                 who.tenant_id,
                 Some(who.user_id),
@@ -249,7 +249,7 @@ pub async fn delete_group(
     match groups.delete(who.tenant_id, &group_id).await {
         Ok(true) => {
             bump_config_version(&state, who.tenant_id).await;
-            crate::audit::record(
+            crate::admin::audit::record(
                 &state,
                 who.tenant_id,
                 Some(who.user_id),
@@ -462,7 +462,7 @@ pub async fn put_override(
     }
     bump_config_version(&state, who.tenant_id).await;
     // Audit entry — payload is intentionally NOT included so secrets never land in audit_log.
-    crate::audit::record(
+    crate::admin::audit::record(
         &state,
         who.tenant_id,
         Some(who.user_id),
@@ -591,7 +591,7 @@ pub async fn get_override(
         Ok(None) => return (StatusCode::NOT_FOUND, "no override").into_response(),
         Err(resp) => return resp,
     };
-    crate::audit::record(
+    crate::admin::audit::record(
         &state,
         who.tenant_id,
         Some(who.user_id),
@@ -624,7 +624,7 @@ pub async fn delete_override(
     match repo.delete(who.tenant_id, &host_id).await {
         Ok(true) => {
             bump_config_version(&state, who.tenant_id).await;
-            crate::audit::record(
+            crate::admin::audit::record(
                 &state,
                 who.tenant_id,
                 Some(who.user_id),

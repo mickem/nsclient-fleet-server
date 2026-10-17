@@ -199,7 +199,7 @@ impl EnrolledAgent {
             )?;
 
         // Declare ourselves an agent in the ClientHello. This is what lets the server run
-        // agent mTLS on the same :443 as the operator UI — see `fleet_server::mux`. Kept
+        // agent mTLS on the same :443 as the operator UI — see `fleet_server::transport::mux`. Kept
         // first with http/1.1 behind it so a server on a dedicated mTLS port, which has no
         // reason to know about `nsclient-fleet/1`, still negotiates something.
         //

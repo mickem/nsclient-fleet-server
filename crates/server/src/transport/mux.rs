@@ -20,7 +20,7 @@
 //! Why not one config with optional client auth: browsers would prompt for a certificate on
 //! the login page. (The other half of this reason — that rustls puts the DN of every trusted
 //! root in the CertificateRequest, listing every tenant — no longer holds: the agent branch
-//! now sends no hint list at all. See `NoRootHints` in `crate::mtls`.)
+//! now sends no hint list at all. See `NoRootHints` in `crate::transport::mtls`.)
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -37,9 +37,9 @@ use tokio::time::{timeout_at, Instant};
 use tokio_rustls::LazyConfigAcceptor;
 use tower::Service;
 
-use crate::conn::{http_builder, ConnLimit, HANDSHAKE_TIMEOUT};
-use crate::mtls::{self, MtlsContext, AGENT_ALPN};
-use crate::shutdown::Shutdown;
+use crate::runtime::shutdown::Shutdown;
+use crate::transport::conn::{http_builder, ConnLimit, HANDSHAKE_TIMEOUT};
+use crate::transport::mtls::{self, MtlsContext, AGENT_ALPN};
 
 const ACME_ALPN: &[u8] = b"acme-tls/1";
 
@@ -101,7 +101,7 @@ pub async fn serve(
     serve_on(listener, tls, mtls_ctx, web_router, agent_router, shutdown).await
 }
 
-/// As [`serve`], on an already-bound listener — see [`crate::mtls::serve_on`] for why
+/// As [`serve`], on an already-bound listener — see [`crate::transport::mtls::serve_on`] for why
 /// callers that need the port up front must not bind, drop, and re-bind.
 pub async fn serve_on(
     listener: TcpListener,
@@ -147,9 +147,9 @@ pub async fn serve_on(
     }
 
     // The loop is out, so no new connection can take a permit; what is left is whatever
-    // was already mid-request. See `crate::shutdown` for why this is worth waiting for.
+    // was already mid-request. See `crate::runtime::shutdown` for why this is worth waiting for.
     tracing::info!("shared-port listener draining");
-    let drained = limit.drain(crate::shutdown::DRAIN_TIMEOUT).await;
+    let drained = limit.drain(crate::runtime::shutdown::DRAIN_TIMEOUT).await;
     tracing::info!(drained, "shared-port listener stopped");
     Ok(())
 }
@@ -158,7 +158,7 @@ async fn handle_conn(
     stream: tokio::net::TcpStream,
     peer_addr: SocketAddr,
     tls: Arc<MuxTls>,
-    mtls_state: Arc<crate::mtls::MtlsState>,
+    mtls_state: Arc<crate::transport::mtls::MtlsState>,
     web_router: Router,
     agent_router: Router,
 ) -> Result<()> {

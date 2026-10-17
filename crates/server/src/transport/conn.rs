@@ -7,7 +7,7 @@
 //! out of descriptors. On the shared port that is the operator UI, every agent and ACME
 //! renewal going down together, from an unauthenticated peer.
 //!
-//! Three limits, applied by both [`crate::mux`] and [`crate::mtls`]:
+//! Three limits, applied by both [`crate::transport::mux`] and [`crate::transport::mtls`]:
 //!
 //! - a deadline covering TCP accept through finished TLS handshake ([`HANDSHAKE_TIMEOUT`]),
 //! - a header-read timeout on the HTTP connection ([`HEADER_READ_TIMEOUT`]) — hyper has a

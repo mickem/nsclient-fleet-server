@@ -10,7 +10,7 @@
 //! - [`serve_static`] — `TLS_CERT`/`TLS_KEY`, or `TLS_SELF_SIGNED=true`. For the installs
 //!   ACME cannot serve: on-prem, air-gapped, a lab, an IP address with no name at all.
 //!
-//! Agent mTLS shares the port either way — see `crate::mux` for how the ClientHello selects
+//! Agent mTLS shares the port either way — see `crate::transport::mux` for how the ClientHello selects
 //! between the challenge, the agent, and the browser configs. That the two paths differ
 //! only in where `MuxTls::web` comes from is the point: on-prem is not a second, lesser
 //! serving mode, it is the same mux with a different certificate source.
@@ -26,10 +26,10 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
 use rustls_acme::{caches::DirCache, AcmeConfig};
 
-use crate::config::{AcmeConfig as Cfg, StaticTlsConfig};
-use crate::mtls::MtlsContext;
-use crate::mux::{self, MuxTls};
-use crate::shutdown::Shutdown;
+use crate::runtime::config::{AcmeConfig as Cfg, StaticTlsConfig};
+use crate::runtime::shutdown::Shutdown;
+use crate::transport::mtls::MtlsContext;
+use crate::transport::mux::{self, MuxTls};
 
 /// ALPN offered on the browser branch, in preference order. rustls-acme sets this for us on
 /// the ACME path; the static path has to say it, or every browser falls back to HTTP/1.1.
@@ -160,10 +160,10 @@ fn ensure_self_signed(cfg: &StaticTlsConfig) -> Result<()> {
     if let Some(dir) = cfg.cert_path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
-    let (cert_pem, key_pem) = crate::mtls::generate_self_signed(&cfg.self_signed_hosts)?;
+    let (cert_pem, key_pem) = crate::transport::mtls::generate_self_signed(&cfg.self_signed_hosts)?;
     std::fs::write(&cfg.cert_path, &cert_pem)
         .with_context(|| format!("write {}", cfg.cert_path.display()))?;
-    crate::mtls::write_key_restricted(&cfg.key_path, &key_pem)?;
+    crate::transport::mtls::write_key_restricted(&cfg.key_path, &key_pem)?;
     tracing::info!(
         path = %cfg.cert_path.display(),
         hosts = ?cfg.self_signed_hosts,
@@ -179,7 +179,7 @@ fn ensure_self_signed(cfg: &StaticTlsConfig) -> Result<()> {
 /// Regenerating on every `BASE_URL` tweak would churn browser exceptions for no gain.
 fn self_signed_still_valid(cert_path: &Path) -> std::result::Result<(), String> {
     let pem = std::fs::read_to_string(cert_path).map_err(|e| format!("unreadable: {e}"))?;
-    crate::mtls::cert_valid_for_at_least(&pem, 30 * 86_400)
+    crate::transport::mtls::cert_valid_for_at_least(&pem, 30 * 86_400)
 }
 
 /// Build a rustls config from a PEM certificate chain and private key.

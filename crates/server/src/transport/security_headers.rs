@@ -19,7 +19,7 @@ use axum::http::{header, HeaderName, HeaderValue, Request};
 use axum::middleware::Next;
 use axum::response::Response;
 
-use crate::config::Config;
+use crate::runtime::config::Config;
 
 /// Precomputed headers, cloned per request as an `Arc` rather than rebuilt.
 #[derive(Clone)]
