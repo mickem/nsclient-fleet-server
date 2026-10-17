@@ -89,4 +89,14 @@ mod tests {
         assert_eq!(phc.matches("$argon2id$").count(), 1);
         assert!(verifies(&phc, password));
     }
+
+    /// A hash made by the build before the crypto-crate upgrade. An operator's
+    /// `ON_PREM_ADMIN_PASSWORD_HASH` was made by whatever build they had then, and must keep
+    /// signing them in.
+    #[test]
+    fn hashes_from_earlier_builds_still_verify() {
+        const PHC: &str = "$argon2id$v=19$m=19456,t=2,p=1$xxBD+RMHsBLgEaVFCBigsA$bZXJZlJKlcy89Vg2+1xWP69hYgO8TBOS4gYwerHbMtE";
+        assert!(verifies(PHC, "correct horse battery staple"));
+        assert!(!verifies(PHC, "correct horse battery stapler"));
+    }
 }

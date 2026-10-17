@@ -343,4 +343,66 @@ mod tests {
             Err(AeadError::KeyLength(16))
         ));
     }
+
+    // Known answers, written by the build before the crypto-crate upgrade. Every test above
+    // encrypts and decrypts in one process, so it would keep passing across a change to the
+    // wire format or the key derivation that stranded every secret already in a database.
+    // These were made once; never regenerate them to make a failing upgrade pass.
+    const KAT_MASTER_KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    const KAT_HOST: &str = "01JTESTHOST0000000000000000";
+
+    fn kat_blob(b64: &str) -> Vec<u8> {
+        STANDARD.decode(b64).unwrap()
+    }
+
+    #[test]
+    fn ciphertexts_from_earlier_builds_still_decrypt() {
+        let key = MasterKey::from_b64(KAT_MASTER_KEY).unwrap();
+        let cases: [(Purpose<'_>, &str, &[u8]); 3] = [
+            (
+                Purpose::TenantCaKey { tenant_id: 7 },
+                "Z1MGaClJBJ/Z41fHoni1eMljINqmFJSI6K78A2tGU9j5sndCF/x9Ri4=",
+                b"tenant ca key",
+            ),
+            (
+                Purpose::TenantBundleSigningKey { tenant_id: 7 },
+                "bwjYuS6SPBD4/IaWDV4dMgZHUx0hqDC1pcUb6ZAU0IUQCPHwWqHqVUIt4k49dQ==",
+                b"bundle signing key",
+            ),
+            (
+                Purpose::HostOverride {
+                    tenant_id: 7,
+                    host_id: KAT_HOST,
+                },
+                "5rSHlgvIvdGSG3kbSc+x/mKcq9LCpRqsU/elgTOyfh0T/2kWbw==",
+                b"{\"k\":\"v\"}",
+            ),
+        ];
+        for (purpose, blob, plaintext) in cases {
+            assert_eq!(
+                key.decrypt(purpose, &kat_blob(blob)).unwrap(),
+                plaintext,
+                "{purpose:?}"
+            );
+        }
+        // Written before purposes existed: empty associated data, read once by the
+        // startup rewrite.
+        let legacy = kat_blob("CQkJCQkJCQkJCQkJXRrsz0mHSHi6tnmpbxIMmiyIrMWyClIO8rlPlZA=");
+        assert_eq!(key.decrypt_unbound(&legacy).unwrap(), b"legacy secret");
+    }
+
+    /// The bootstrap-token key and the override hashes both come out of these, so a change
+    /// here invalidates every outstanding enrollment token and every stored hash at once.
+    #[test]
+    fn derived_subkeys_and_macs_do_not_move() {
+        let key = MasterKey::from_b64(KAT_MASTER_KEY).unwrap();
+        assert_eq!(
+            crate::digest::hex(&key.derive_subkey("bootstrap-jwt/v1")),
+            "3fcb13fd54513444948162f16243c9e6c237a64acf8eb9238f1f32856eb84da4"
+        );
+        assert_eq!(
+            crate::digest::hex(&key.mac("override-hash/v1", b"hello")),
+            "f8915aefa0a406492510ba96884ff1e039025c05be4882537fd52fc5fd2bcc61"
+        );
+    }
 }

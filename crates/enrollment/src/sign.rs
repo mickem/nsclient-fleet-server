@@ -152,4 +152,27 @@ mod tests {
             );
         }
     }
+
+    /// A tenant CA as stored by the build before the crypto-crate upgrade (see
+    /// `testdata/kat`) must keep issuing, for both key types an agent may put in its CSR.
+    /// That the result chains to the stored CA, and resolves to its tenant, is checked
+    /// where the leaf is parsed — `fleet_server::mtls`.
+    #[test]
+    fn stored_tenant_ca_still_issues() {
+        for csr in [
+            include_str!("../testdata/kat/csr-ed25519.pem"),
+            include_str!("../testdata/kat/csr-p256.pem"),
+        ] {
+            let issued = sign_client_cert(
+                csr,
+                include_str!("../testdata/kat/tenant-ca.crt"),
+                include_str!("../testdata/kat/tenant-ca.key"),
+                "acme",
+                "host-xyz",
+                90,
+            )
+            .unwrap();
+            assert!(issued.cert_pem.contains("BEGIN CERTIFICATE"));
+        }
+    }
 }

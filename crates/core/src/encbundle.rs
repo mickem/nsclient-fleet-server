@@ -289,4 +289,23 @@ mod tests {
         let blob = key.encrypt("pinned", "0.1", b"vector");
         assert_eq!(key.decrypt("pinned", "0.1", &blob).unwrap(), b"vector");
     }
+
+    /// A bundle encrypted by the build before the crypto-crate upgrade. Operators hold
+    /// encrypted bundles outside the server and agents decrypt them with their own copy of
+    /// the key, so a format change would strand both. Never regenerate this to make a
+    /// failing upgrade pass.
+    #[test]
+    fn bundles_from_earlier_builds_still_decrypt() {
+        let key = BundleKey::from_b64(&STANDARD.encode([0x42u8; 32])).unwrap();
+        assert_eq!(key.fingerprint_hex(), "425ed4e4a36b30ea");
+        let blob = STANDARD
+            .decode(
+                "TlNFQjFCXtTko2sw6hr19+lFjr9FB6yXwY9F+ww9o7j748VgoWMvkgHKDPq3cJ9g3DMBNv4Xj759j46qZlw=",
+            )
+            .unwrap();
+        assert_eq!(
+            key.decrypt("demo", "1.2.3", &blob).unwrap(),
+            b"PK\x03\x04 not really a zip"
+        );
+    }
 }
