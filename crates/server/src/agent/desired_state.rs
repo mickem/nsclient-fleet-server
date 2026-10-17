@@ -422,7 +422,7 @@ pub async fn compute_uncached(
         field(&b.priority.to_le_bytes());
     }
     let tag = state.config.master_key.mac(STATE_HASH_INFO, &msg);
-    let state_hash = tag.iter().map(|b| format!("{b:02x}")).collect();
+    let state_hash = fleet_core::crypto::digest::hex(&tag);
 
     Ok(DesiredState {
         state_hash,

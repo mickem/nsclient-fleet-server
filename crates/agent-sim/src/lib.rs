@@ -392,7 +392,6 @@ impl EnrolledAgent {
         use base64::{engine::general_purpose::STANDARD, Engine as _};
         use ed25519_dalek::pkcs8::DecodePublicKey;
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-        use sha2::{Digest, Sha256};
 
         let client = self.mtls_client()?;
         let url = format!(
@@ -409,8 +408,7 @@ impl EnrolledAgent {
         let bytes = res.bytes().await?.to_vec();
 
         // 1. sha256
-        let actual = Sha256::digest(&bytes);
-        let actual_hex: String = actual.iter().map(|b| format!("{b:02x}")).collect();
+        let actual_hex = fleet_core::crypto::digest::sha256_hex(&bytes);
         if actual_hex != expected_sha256_hex {
             return Err(anyhow!(
                 "sha256 mismatch (expected {expected_sha256_hex}, got {actual_hex})"
