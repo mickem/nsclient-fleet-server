@@ -491,7 +491,7 @@ export function buildDocuments(
 export const MAX_IMPORT_NAME_LEN = 64 - "import:".length;
 
 /** Why `name` cannot name an import, or null when it can. Mirrors `valid_source` in
- *  crates/core/src/facts.rs, less the `:` the prefix already uses. */
+ *  crates/core/src/facts/mod.rs, less the `:` the prefix already uses. */
 export function importNameError(name: string): string | null {
   if (name === "") return "Required";
   if (name.length > MAX_IMPORT_NAME_LEN) return `At most ${MAX_IMPORT_NAME_LEN} characters`;

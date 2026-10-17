@@ -1,6 +1,6 @@
 // Client-side bundle encryption (enc-v1 / NSEB1).
 //
-// Mirrors `crates/core/src/encbundle.rs` exactly — keep the two in sync:
+// Mirrors `crates/core/src/crypto/encbundle.rs` exactly — keep the two in sync:
 //
 //   "NSEB1" (5) || key fingerprint (8 = first bytes of SHA-256 over the raw key)
 //              || nonce (12) || AES-256-GCM ciphertext + 16-byte tag

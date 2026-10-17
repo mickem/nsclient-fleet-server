@@ -14,8 +14,8 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use ed25519_dalek::pkcs8::DecodePrivateKey;
 use ed25519_dalek::{Signer, SigningKey};
-use fleet_core::digest::sha256_hex;
-use fleet_core::encbundle;
+use fleet_core::crypto::digest::sha256_hex;
+use fleet_core::crypto::encbundle;
 use fleet_storage::{
     BundleAssignmentsRepo, BundlesRepo, GroupsRepo, MovedBundle, RenameOutcome, RenamedInPlace,
     TenantBundleKeysRepo, TenantRepo, TenantSecretsRepo,
@@ -132,7 +132,7 @@ pub struct BundleView {
     pub signature: String,
     pub uploaded_at: i64,
     /// `plain` or `enc-v1`. Encrypted bundles are client-side AES-256-GCM envelopes the
-    /// server cannot read or edit — see `fleet_core::encbundle`.
+    /// server cannot read or edit — see `fleet_core::crypto::encbundle`.
     pub format: String,
     pub key_fingerprint: Option<String>,
 }
@@ -349,10 +349,10 @@ async fn persist_bundle(
     let sha = sha256_hex(&bytes);
 
     // The id is chosen here rather than by the insert, because the signature covers it —
-    // see `fleet_core::bundlesig` for why a signature over the digest alone was worth so
+    // see `fleet_core::crypto::bundlesig` for why a signature over the digest alone was worth so
     // little.
-    let bundle_id = fleet_core::bundlesig::new_bundle_id();
-    let descriptor = fleet_core::bundlesig::BundleDescriptor {
+    let bundle_id = fleet_core::crypto::bundlesig::new_bundle_id();
+    let descriptor = fleet_core::crypto::bundlesig::BundleDescriptor {
         tenant_id: who.tenant_id,
         bundle_id: &bundle_id,
         name,
@@ -985,7 +985,7 @@ pub async fn stage_reseal(
     if let Err(e) = check_resealed(&version, &bytes) {
         return (StatusCode::BAD_REQUEST, e).into_response();
     }
-    let staged_id = fleet_core::bundlesig::new_bundle_id();
+    let staged_id = fleet_core::crypto::bundlesig::new_bundle_id();
     if let Err(e) = state
         .bundle_store
         .put(who.tenant_id, &staged_id, &bytes)
@@ -1109,7 +1109,7 @@ pub async fn rename(
     let sign = |id: &str, version: &fleet_storage::BundleRow, sha256: &str| {
         sign_descriptor(
             &signing_key,
-            &fleet_core::bundlesig::BundleDescriptor {
+            &fleet_core::crypto::bundlesig::BundleDescriptor {
                 tenant_id: who.tenant_id,
                 bundle_id: id,
                 name: &to,
@@ -1565,7 +1565,7 @@ pub(crate) async fn load_tenant_signing_key(
         .await?
         .ok_or_else(|| anyhow!("tenant secrets missing for {tenant_id}"))?;
     let key_bytes = state.config.master_key.decrypt(
-        fleet_core::aead::Purpose::TenantBundleSigningKey { tenant_id },
+        fleet_core::crypto::aead::Purpose::TenantBundleSigningKey { tenant_id },
         &secrets.bundle_signing_key_encrypted,
     )?;
     let key_pem = std::str::from_utf8(&key_bytes).context("bundle key utf8")?;
@@ -1576,10 +1576,10 @@ pub(crate) async fn load_tenant_signing_key(
 ///
 /// The descriptor, not the bytes: a signature over the digest alone binds nothing about
 /// *which* bundle those bytes are, so an old signed blob could be re-advertised under a new
-/// name, version or id and still verify. See [`fleet_core::bundlesig`].
+/// name, version or id and still verify. See [`fleet_core::crypto::bundlesig`].
 pub(crate) fn sign_descriptor(
     key: &SigningKey,
-    descriptor: &fleet_core::bundlesig::BundleDescriptor<'_>,
+    descriptor: &fleet_core::crypto::bundlesig::BundleDescriptor<'_>,
 ) -> String {
     // Ed25519 hashes internally, so the descriptor is signed directly rather than digested
     // first — one fewer step for an agent implementation to get wrong.
@@ -1591,7 +1591,7 @@ pub(crate) fn sign_descriptor(
 pub(crate) async fn sign_with_tenant_key(
     state: &AppState,
     tenant_id: i64,
-    descriptor: &fleet_core::bundlesig::BundleDescriptor<'_>,
+    descriptor: &fleet_core::crypto::bundlesig::BundleDescriptor<'_>,
 ) -> Result<String> {
     Ok(sign_descriptor(
         &load_tenant_signing_key(state, tenant_id).await?,

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use fleet_core::aead::MasterKey;
+use fleet_core::crypto::aead::MasterKey;
 use fleet_server::runtime::shutdown;
 use tempfile::TempDir;
 use tokio::net::TcpStream;

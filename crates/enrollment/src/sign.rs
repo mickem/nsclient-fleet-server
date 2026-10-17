@@ -75,8 +75,8 @@ pub fn sign_client_cert(
 
     Ok(IssuedCert {
         cert_pem,
-        serial_hex: fleet_core::digest::hex(&serial_bytes),
-        fingerprint_sha256_hex: fleet_core::digest::sha256_hex(der.as_ref()),
+        serial_hex: fleet_core::crypto::digest::hex(&serial_bytes),
+        fingerprint_sha256_hex: fleet_core::crypto::digest::sha256_hex(der.as_ref()),
         not_before_unix,
         not_after_unix,
     })

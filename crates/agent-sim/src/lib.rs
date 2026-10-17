@@ -113,13 +113,13 @@ impl DesiredState {
     pub fn descriptor<'a>(
         &'a self,
         bundle: &'a serde_json::Value,
-    ) -> Result<fleet_core::bundlesig::BundleDescriptor<'a>> {
+    ) -> Result<fleet_core::crypto::bundlesig::BundleDescriptor<'a>> {
         let field = |k: &str| -> Result<&'a str> {
             bundle[k]
                 .as_str()
                 .ok_or_else(|| anyhow!("bundle entry is missing a string `{k}`"))
         };
-        Ok(fleet_core::bundlesig::BundleDescriptor {
+        Ok(fleet_core::crypto::bundlesig::BundleDescriptor {
             tenant_id: self.tenant_id,
             bundle_id: field("id")?,
             name: field("name")?,
@@ -380,11 +380,11 @@ impl EnrolledAgent {
     ///
     /// The signature is Ed25519 over the bundle's *descriptor* — tenant, id, name, version,
     /// format and digest — not over the digest alone, so it says which bundle these bytes
-    /// are and not merely that the server once saw them. See `fleet_core::bundlesig`.
+    /// are and not merely that the server once saw them. See `fleet_core::crypto::bundlesig`.
     #[allow(clippy::too_many_arguments)]
     pub async fn fetch_bundle_verified(
         &self,
-        descriptor: fleet_core::bundlesig::BundleDescriptor<'_>,
+        descriptor: fleet_core::crypto::bundlesig::BundleDescriptor<'_>,
         signature_b64: &str,
     ) -> Result<Vec<u8>> {
         let bundle_id = descriptor.bundle_id;
@@ -440,7 +440,7 @@ impl EnrolledAgent {
     /// `name`/`version` must be the identity the server advertised for this bundle; they
     /// are bound into the AEAD, so decryption doubles as a substitution check.
     pub fn open_bundle(&self, name: &str, version: &str, bytes: Vec<u8>) -> Result<Vec<u8>> {
-        use fleet_core::encbundle::{self, BundleKey, EncBundleError};
+        use fleet_core::crypto::encbundle::{self, BundleKey, EncBundleError};
 
         if !encbundle::is_encrypted(&bytes) {
             if self.require_encrypted_bundles {

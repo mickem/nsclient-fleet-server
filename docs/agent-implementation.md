@@ -200,14 +200,14 @@ For each entry in `bundles` (process in ascending `priority` order):
    A signature over the digest alone would say only "this tenant's server saw
    these bytes once", which lets an old signed blob be re-advertised under a
    different name, version or id. Reference implementation:
-   `fleet_core::bundlesig`.
+   `fleet_core::crypto::bundlesig`.
 4. **Decrypt if sealed**: bytes starting with the `NSEB1` magic are a
    client-side-encrypted envelope (`format: "enc-v1"`); decrypt with the
    locally-configured bundle key, using the advertised `name`/`version` as
    AAD. Detect by the magic, not the `format` field. Full format, key
    provisioning, and the `require_encrypted_bundles` hardening flag:
    `agent-integration.md` §1.2.1; reference implementations in
-   `fleet_core::encbundle` and `EnrolledAgent::open_bundle` in
+   `fleet_core::crypto::encbundle` and `EnrolledAgent::open_bundle` in
    `crates/agent-sim`.
 5. Only then unpack (bundles are zip archives) and apply the contents.
 
@@ -336,7 +336,7 @@ loop:
 | Wire-level client (all endpoints)                   | `crates/agent-sim/src/lib.rs`                                           |
 | Enrollment server-side                              | `crates/server/src/hosts/mod.rs` (`enroll`)                                 |
 | Desired-state / state-report / renew handlers       | `crates/server/src/agent/api.rs`                                        |
-| Host facts: hash exchange, upload, operator view    | `crates/server/src/facts/mod.rs`, `crates/core/src/facts.rs` (wire format, diff); protocol in [agent-integration.md §3](agent-integration.md#3-host-facts-inventory) |
+| Host facts: hash exchange, upload, operator view    | `crates/server/src/facts/mod.rs`, `crates/core/src/facts/mod.rs` (wire format, diff); protocol in [agent-integration.md §3](agent-integration.md#3-host-facts-inventory) |
 | Desired-state computation (tags → groups → bundles) | `crates/server/src/agent/desired_state.rs`                                    |
 | Bundle download authz                               | `crates/server/src/bundles.rs` (`download`)                             |
 | Route wiring (public vs mTLS router)                | `crates/server/src/lib.rs`                                              |

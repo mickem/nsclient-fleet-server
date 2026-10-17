@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use fleet_core::aead::MasterKey;
+use fleet_core::crypto::aead::MasterKey;
 
 #[derive(Clone)]
 pub struct Config {

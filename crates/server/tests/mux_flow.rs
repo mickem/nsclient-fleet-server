@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use fleet_core::aead::MasterKey;
+use fleet_core::crypto::aead::MasterKey;
 use fleet_storage::Db;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
@@ -215,7 +215,7 @@ async fn signup_and_login(s: &TestServer) {
         .unwrap()
         .unwrap();
     let token = "test-magic-link-XXXXXXXX";
-    let hash = fleet_core::digest::sha256_hex(token.as_bytes());
+    let hash = fleet_core::crypto::digest::sha256_hex(token.as_bytes());
     links
         .create(&hash, t.id, u.id, fleet_core::time::now_unix() + 600)
         .await

@@ -11,7 +11,7 @@
 //!   the one write path for facts.
 //!
 //! Keys are import-time only: they find the host, and the document is then stored by host
-//! id. The matching itself is [`fleet_core::facts_import`]; this module gathers each host's
+//! id. The matching itself is [`fleet_core::facts::import`]; this module gathers each host's
 //! values for the key targets, which needs the database.
 //!
 //! Also here: deleting one host's document from a source, and a source tenant-wide.
@@ -27,11 +27,11 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use fleet_core::facts::{sha256_hex, valid_source, AGENT_SOURCE, MAX_COLLECTED_AT_LEN};
-use fleet_core::facts_import::{
+use fleet_core::facts::import::{
     fact_key_values, import_source, resolve_rows, valid_import_name, HostField, KeyIndex,
     KeyTarget, Normalize, Resolution, RowKey, MAX_IMPORT_KEYS, MAX_IMPORT_ROWS,
 };
+use fleet_core::facts::{sha256_hex, valid_source, AGENT_SOURCE, MAX_COLLECTED_AT_LEN};
 use fleet_core::selector::{scalar_text, FactPath};
 use fleet_core::Host;
 use fleet_storage::{HostFactsRepo, HostRepo, HostTagsRepo, ReplaceOutcome};
