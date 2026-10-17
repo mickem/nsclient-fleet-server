@@ -1006,6 +1006,7 @@ dependencies = [
  "axum",
  "axum-extra",
  "base64 0.22.1",
+ "dashmap",
  "ed25519-dalek",
  "fleet-agent-sim",
  "fleet-core",

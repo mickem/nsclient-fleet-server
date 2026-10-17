@@ -10,13 +10,69 @@ use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicI64, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use std::hash::Hash;
+
+use dashmap::DashMap;
 use fleet_core::time::now_unix;
 use governor::clock::DefaultClock;
-use governor::state::{InMemoryState, NotKeyed};
+use governor::nanos::Nanos;
+use governor::state::keyed::ShrinkableKeyedStateStore;
+use governor::state::{InMemoryState, NotKeyed, StateStore};
 use governor::{Quota, RateLimiter as Governor};
 
 type DirectLimiter = Governor<NotKeyed, InMemoryState, DefaultClock>;
 type KeyedLimiter<K> = Governor<K, governor::state::keyed::DefaultKeyedStateStore<K>, DefaultClock>;
+type EmailLimiter = Governor<String, SharedStore<String>, DefaultClock>;
+
+/// governor's own DashMap store, with the map held behind an `Arc` we keep a copy of.
+///
+/// governor has no way to reset one key, and the per-email limiters need one: a redeemed
+/// magic link proves the address belongs to whoever is asking, so the quota guarding that
+/// inbox against floods has nothing left to protect, and holding it against the owner only
+/// makes their next sign-in silently send nothing. Every rate-limiting decision is still
+/// governor's — this delegates to its store and adds [`SharedStore::forget`].
+struct SharedStore<K: Hash + Eq + Clone>(Arc<DashMap<K, InMemoryState>>);
+
+impl<K: Hash + Eq + Clone> SharedStore<K> {
+    fn new() -> (Self, Arc<DashMap<K, InMemoryState>>) {
+        let map = Arc::new(DashMap::default());
+        (Self(map.clone()), map)
+    }
+}
+
+impl<K: Hash + Eq + Clone> StateStore for SharedStore<K> {
+    type Key = K;
+
+    fn measure_and_replace<T, F, E>(&self, key: &K, f: F) -> Result<T, E>
+    where
+        F: Fn(Option<Nanos>) -> Result<(T, Nanos), E>,
+    {
+        StateStore::measure_and_replace(&*self.0, key, f)
+    }
+}
+
+impl<K: Hash + Eq + Clone> ShrinkableKeyedStateStore<K> for SharedStore<K> {
+    fn retain_recent(&self, drop_below: Nanos) {
+        ShrinkableKeyedStateStore::retain_recent(&*self.0, drop_below)
+    }
+
+    fn shrink_to_fit(&self) {
+        ShrinkableKeyedStateStore::shrink_to_fit(&*self.0)
+    }
+
+    fn len(&self) -> usize {
+        ShrinkableKeyedStateStore::len(&*self.0)
+    }
+
+    fn is_empty(&self) -> bool {
+        ShrinkableKeyedStateStore::is_empty(&*self.0)
+    }
+}
+
+fn email_limiter(quota: Quota) -> (EmailLimiter, Arc<DashMap<String, InMemoryState>>) {
+    let (store, map) = SharedStore::new();
+    (Governor::new(quota, store, &DefaultClock::default()), map)
+}
 
 #[derive(Clone)]
 pub struct AuthRateLimits {
@@ -24,8 +80,10 @@ pub struct AuthRateLimits {
 }
 
 struct Inner {
-    per_email_minute: KeyedLimiter<String>,
-    per_email_hour: KeyedLimiter<String>,
+    per_email_minute: EmailLimiter,
+    per_email_hour: EmailLimiter,
+    /// The maps behind the two limiters above, for [`AuthRateLimits::forget_email`].
+    email_maps: [Arc<DashMap<String, InMemoryState>>; 2],
     per_ip_minute: KeyedLimiter<IpAddr>,
     per_ip_hour: KeyedLimiter<IpAddr>,
     daily_budget: u32,
@@ -74,9 +132,14 @@ pub enum RateDecision {
 
 impl AuthRateLimits {
     pub fn new(daily_budget: u32) -> Self {
+        let (per_email_minute, minute_map) =
+            email_limiter(Quota::per_minute(NonZeroU32::new(1).unwrap()));
+        let (per_email_hour, hour_map) =
+            email_limiter(Quota::per_hour(NonZeroU32::new(5).unwrap()));
         let inner = Inner {
-            per_email_minute: Governor::keyed(Quota::per_minute(NonZeroU32::new(1).unwrap())),
-            per_email_hour: Governor::keyed(Quota::per_hour(NonZeroU32::new(5).unwrap())),
+            per_email_minute,
+            per_email_hour,
+            email_maps: [minute_map, hour_map],
             per_ip_minute: Governor::keyed(Quota::per_minute(NonZeroU32::new(10).unwrap())),
             per_ip_hour: Governor::keyed(Quota::per_hour(NonZeroU32::new(60).unwrap())),
             daily_budget,
@@ -143,6 +206,22 @@ impl AuthRateLimits {
             && self.inner.per_ip_hour.check_key(&ip).is_ok()
     }
 
+    /// Clear an address's per-email quota, once a magic link sent to it has been redeemed.
+    ///
+    /// Those limits keep anyone from flooding an inbox with sign-in mail. Redeeming a link
+    /// proves the person asking reads that inbox, so the protection is spent: keeping the
+    /// count meant an owner who signed in, signed out and asked again within the minute (or
+    /// for the sixth time in the hour) got a silent 204 and no mail. The per-IP limits and
+    /// the daily budget are untouched — they bound the caller and the server, not the inbox.
+    ///
+    /// `email` is normalized the way the endpoints key it: trimmed and lowercased.
+    pub fn forget_email(&self, email: &str) {
+        let key = email.trim().to_lowercase();
+        for map in &self.inner.email_maps {
+            map.remove(&key);
+        }
+    }
+
     fn maybe_prune(&self) {
         if self.inner.since_prune.fetch_add(1, Ordering::Relaxed) + 1 >= PRUNE_EVERY {
             self.inner.since_prune.store(0, Ordering::Relaxed);
@@ -201,6 +280,41 @@ mod tests {
         assert_eq!(rl.check("a@b.com", ip), RateDecision::EmailLimited);
         // Different email is still OK (under per-IP minute cap of 10)
         assert_eq!(rl.check("c@d.com", ip), RateDecision::Allow);
+    }
+
+    #[test]
+    fn forgetting_an_address_clears_only_its_email_limits() {
+        let rl = AuthRateLimits::new(1000);
+        let ip: IpAddr = "10.0.3.1".parse().unwrap();
+        assert_eq!(rl.check("owner@example.com", ip), RateDecision::Allow);
+        assert_eq!(rl.check("other@example.com", ip), RateDecision::Allow);
+        assert_eq!(
+            rl.check("owner@example.com", ip),
+            RateDecision::EmailLimited
+        );
+
+        // Spelled the way a stored address might be; keyed the way the endpoints key it.
+        rl.forget_email(" Owner@Example.com ");
+        assert_eq!(rl.check("owner@example.com", ip), RateDecision::Allow);
+        // Someone else's limit stands.
+        assert_eq!(
+            rl.check("other@example.com", ip),
+            RateDecision::EmailLimited
+        );
+    }
+
+    #[test]
+    fn forgetting_an_address_does_not_reset_the_ip_limit() {
+        let rl = AuthRateLimits::new(1000);
+        let ip: IpAddr = "10.0.3.2".parse().unwrap();
+        for i in 0..10 {
+            assert_eq!(
+                rl.check(&format!("u{i}@example.com"), ip),
+                RateDecision::Allow
+            );
+        }
+        rl.forget_email("u0@example.com");
+        assert_eq!(rl.check("u0@example.com", ip), RateDecision::IpLimited);
     }
 
     #[test]
