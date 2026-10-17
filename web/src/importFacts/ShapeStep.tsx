@@ -87,7 +87,11 @@ export function ShapeStep({
   return (
     <Stack spacing={2}>
       {format === "csv" ? (
-        <Stack direction="row" spacing={2} alignItems="center" useFlexGap flexWrap="wrap">
+        <Stack
+          direction="row"
+          spacing={2}
+          useFlexGap
+          sx={{ alignItems: "center", flexWrap: "wrap" }}>
           <TextField
             select
             size="small"
@@ -114,7 +118,7 @@ export function ShapeStep({
         table.note && <Alert severity="info">{table.note}</Alert>
       )}
       {format !== "csv" && (
-        <Typography variant="body2" color="text.secondary">
+        <Typography variant="body2" sx={{ color: "text.secondary" }}>
           Nested objects are shown as dotted columns; the stored document nests them again from
           the target paths you choose in the next step.
         </Typography>

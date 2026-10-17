@@ -88,11 +88,15 @@ export function ApiKeysPage({ me }: { me: Me }) {
 
   return (
     <Box>
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
+      <Stack
+        direction="row"
+        sx={{ justifyContent: "space-between", alignItems: "center", mb: 1 }}>
         <Typography variant="h4">API keys</Typography>
         <RefreshButton refreshing={refreshing} onClick={refresh} />
       </Stack>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+      <Typography
+        variant="body2"
+        sx={{ color: "text.secondary", mb: 2 }}>
         Your own keys, for scripting this API. A key acts as you — it can do exactly what your
         role ({ROLE_LABELS[me.role]}) allows, no more, and it stops working the moment your
         role changes or your account is removed. Nobody else can see or revoke your keys.
@@ -111,7 +115,7 @@ export function ApiKeysPage({ me }: { me: Me }) {
           <Typography variant="h6" gutterBottom>
             Create a key
           </Typography>
-          <Stack direction="row" spacing={1} alignItems="center">
+          <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
             <TextField
               size="small"
               label="Name"
@@ -150,7 +154,7 @@ export function ApiKeysPage({ me }: { me: Me }) {
               {busy ? "Creating…" : "Create key"}
             </Button>
           </Stack>
-          <Typography variant="caption" color="text.secondary">
+          <Typography variant="caption" sx={{ color: "text.secondary" }}>
             The token is shown once, here, and never again — only its hash is stored. A key
             acts as you do, so it can neither create another key nor reach the platform
             console.
@@ -163,7 +167,7 @@ export function ApiKeysPage({ me }: { me: Me }) {
       ) : keys.length === 0 ? (
         <Card>
           <CardContent>
-            <Typography color="text.secondary">No API keys yet.</Typography>
+            <Typography sx={{ color: "text.secondary" }}>No API keys yet.</Typography>
           </CardContent>
         </Card>
       ) : (
@@ -233,7 +237,9 @@ function IssuedKeyCard({
   return (
     <Card sx={{ mb: 2 }}>
       <CardContent>
-        <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
+        <Stack
+          direction="row"
+          sx={{ justifyContent: "space-between", alignItems: "flex-start" }}>
           <Typography variant="h5" gutterBottom>
             Key created — copy it now
           </Typography>
@@ -241,7 +247,7 @@ function IssuedKeyCard({
             <CloseIcon fontSize="small" />
           </IconButton>
         </Stack>
-        <Typography variant="body2" color="text.secondary">
+        <Typography variant="body2" sx={{ color: "text.secondary" }}>
           This is the only time the token is shown. Store it somewhere your scripts can read
           it; if you lose it, revoke the key and create another.
         </Typography>
@@ -250,7 +256,9 @@ function IssuedKeyCard({
         </Box>
         {canAddHosts(me.role) ? (
           <>
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+            <Typography
+              variant="body2"
+              sx={{ color: "text.secondary", mt: 2 }}>
               Provision an installer token with it — the response carries{" "}
               <code>install_command</code> to run on the new host:
             </Typography>
@@ -259,7 +267,9 @@ function IssuedKeyCard({
             </Box>
           </>
         ) : (
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+          <Typography
+            variant="body2"
+            sx={{ color: "text.secondary", mt: 2 }}>
             Your role is read-only, so this key can read the API but cannot provision
             installers or change anything.
           </Typography>

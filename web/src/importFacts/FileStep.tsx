@@ -78,7 +78,7 @@ export function FileStep({
       >
         <UploadFileIcon color="action" sx={{ fontSize: 40 }} />
         <Typography>Drop a CSV, JSON or YAML file here, or click to choose one.</Typography>
-        <Typography variant="body2" color="text.secondary">
+        <Typography variant="body2" sx={{ color: "text.secondary" }}>
           Each row becomes one facts document on the host it matches. The file is read in the
           browser; nothing is sent until you resolve.
         </Typography>
@@ -95,7 +95,11 @@ export function FileStep({
       </Box>
       {loadError && <Alert severity="error">{loadError}</Alert>}
       {file && (
-        <Stack direction="row" spacing={2} alignItems="center" useFlexGap flexWrap="wrap">
+        <Stack
+          direction="row"
+          spacing={2}
+          useFlexGap
+          sx={{ alignItems: "center", flexWrap: "wrap" }}>
           <Typography>
             <strong>{file.name}</strong> · {fmtBytes(file.size)}
           </Typography>

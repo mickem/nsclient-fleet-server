@@ -173,7 +173,7 @@ function TableField({
           {rows.length === 0 && (
             <TableRow>
               <TableCell colSpan={3}>
-                <Typography variant="body2" color="text.secondary">
+                <Typography variant="body2" sx={{ color: "text.secondary" }}>
                   {field.emptyText ?? "No checks yet — add one below."}
                 </Typography>
               </TableCell>
@@ -232,7 +232,10 @@ function TableField({
           <MenuItem key={i} value={String(i)} disabled={field.uniqueKeys && taken.has(p.key)}>
             {p.label}
             {taken.has(p.key) && !field.uniqueKeys && (
-              <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+              <Typography
+                component="span"
+                variant="caption"
+                sx={{ color: "text.secondary", ml: 1 }}>
                 (again)
               </Typography>
             )}
@@ -245,7 +248,10 @@ function TableField({
         )}
       </TextField>
       {field.custom && customOpen && (
-        <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mt: 1.5 }} alignItems="flex-start">
+        <Stack
+          direction={{ xs: "column", sm: "row" }}
+          spacing={1}
+          sx={{ alignItems: "flex-start", mt: 1.5 }}>
           <TextField
             size="small"
             label={field.custom.keyLabel}
@@ -320,7 +326,7 @@ function FactsField({
           const state = factSetState(ini, set);
           const platforms = [...new Set(set.targets.map((t) => t.platform))].join(", ");
           return (
-            <Stack key={set.id} direction="row" spacing={1} alignItems="flex-start">
+            <Stack key={set.id} direction="row" spacing={1} sx={{ alignItems: "flex-start" }}>
               <Checkbox
                 size="small"
                 sx={{ mt: -0.5 }}
@@ -330,8 +336,12 @@ function FactsField({
                 slotProps={{ input: { "aria-label": set.label } }}
               />
               <div>
-                <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
-                  <Typography variant="body2" fontWeight={500}>
+                <Stack
+                  direction="row"
+                  spacing={1}
+                  useFlexGap
+                  sx={{ alignItems: "center", flexWrap: "wrap" }}>
+                  <Typography variant="body2" sx={{ fontWeight: 500 }}>
                     {set.label}
                   </Typography>
                   <Chip
@@ -341,10 +351,10 @@ function FactsField({
                     sx={{ fontFamily: "monospace", height: 20 }}
                   />
                 </Stack>
-                <Typography variant="caption" color="text.secondary" component="div">
+                <Typography variant="caption" component="div" sx={{ color: "text.secondary" }}>
                   {set.description}
                 </Typography>
-                <Typography variant="caption" color="text.secondary" component="div">
+                <Typography variant="caption" component="div" sx={{ color: "text.secondary" }}>
                   Cost: {set.cost} · {platforms}
                   {state === "partial" && " · switched on for some platforms only"}
                 </Typography>

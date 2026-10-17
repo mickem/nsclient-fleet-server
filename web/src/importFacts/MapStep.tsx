@@ -82,7 +82,7 @@ export function MapStep({
           `Stored as the facts source "import:${name}". Importing again under the same name ` +
             "replaces these documents; selectors read them as that source."
         }
-        inputProps={{ maxLength: MAX_IMPORT_NAME_LEN }}
+        slotProps={{ htmlInput: { maxLength: MAX_IMPORT_NAME_LEN } }}
         sx={{ maxWidth: 520 }}
       />
 
@@ -112,10 +112,15 @@ export function MapStep({
                     </Typography>
                     <Typography
                       variant="caption"
-                      color="text.secondary"
-                      sx={{ display: "block", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
                       title={sample(i)}
-                    >
+                      sx={{
+                        color: "text.secondary",
+                        display: "block",
+                        maxWidth: 220,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap"
+                      }}>
                       {sample(i) || "(empty)"}
                     </Typography>
                   </TableCell>
@@ -186,7 +191,9 @@ export function MapStep({
                                   {o.label}
                                 </Typography>
                                 {o.hosts !== undefined && (
-                                  <Typography variant="caption" color="text.secondary" sx={{ whiteSpace: "nowrap" }}>
+                                  <Typography
+                                    variant="caption"
+                                    sx={{ color: "text.secondary", whiteSpace: "nowrap" }}>
                                     {o.hosts} host{o.hosts === 1 ? "" : "s"}
                                   </Typography>
                                 )}
@@ -207,13 +214,13 @@ export function MapStep({
         </MuiTable>
       </Box>
 
-      <Typography variant="body2" color="text.secondary">
+      <Typography variant="body2" sx={{ color: "text.secondary" }}>
         Keys only find the host; they are not stored unless the column is also included.
         Several key columns must all match the same host. Dots in a target path nest:{" "}
         <code>cmdb.owner</code> stores <code>{'{"cmdb": {"owner": …}}'}</code>.
       </Typography>
 
-      <Stack direction="row" spacing={2} useFlexGap flexWrap="wrap">
+      <Stack direction="row" spacing={2} useFlexGap sx={{ flexWrap: "wrap" }}>
         <FormControlLabel
           control={
             <Switch

@@ -121,11 +121,15 @@ export function PlatformPage({ me }: { me: Me }) {
 
   return (
     <Box>
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
+      <Stack
+        direction="row"
+        sx={{ justifyContent: "space-between", alignItems: "center", mb: 1 }}>
         <Typography variant="h4">Platform</Typography>
         <RefreshButton refreshing={refreshing} onClick={refresh} />
       </Stack>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+      <Typography
+        variant="body2"
+        sx={{ color: "text.secondary", mb: 2 }}>
         Every tenant on this install, their subscriptions and their users. Changes here apply
         on the affected tenant's next request — nobody has to sign in again.
       </Typography>
@@ -143,7 +147,9 @@ export function PlatformPage({ me }: { me: Me }) {
 
       <SignupCard settings={settings} onChanged={setSettings} onError={setError} />
 
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
+      <Stack
+        direction="row"
+        sx={{ justifyContent: "space-between", alignItems: "center", mb: 1 }}>
         <Typography variant="h6">Tenants</Typography>
         <Button variant="contained" startIcon={<AddIcon />} onClick={() => setCreating(true)}>
           New tenant
@@ -256,7 +262,7 @@ function SignupCard({
           }
           label="Allow self-service signups"
         />
-        <Typography variant="body2" color="text.secondary">
+        <Typography variant="body2" sx={{ color: "text.secondary" }}>
           {settings?.on_prem
             ? "This is an on-prem install: signup and magic links are disabled outright, and the switch has nothing to do."
             : settings?.signups_enabled
@@ -294,13 +300,17 @@ function TenantRow({
         </TableCell>
         <TableCell>
           <Typography variant="body2">{tenant.name}</Typography>
-          <Typography variant="caption" color="text.secondary" component="code">
+          <Typography variant="caption" component="code" sx={{ color: "text.secondary" }}>
             {tenant.slug}
           </Typography>
           {tenant.id === me.tenant_id && <Chip label="yours" size="small" sx={{ ml: 1 }} />}
         </TableCell>
         <TableCell>
-          <Stack direction="row" spacing={0.5} alignItems="center" useFlexGap flexWrap="wrap">
+          <Stack
+            direction="row"
+            spacing={0.5}
+            useFlexGap
+            sx={{ alignItems: "center", flexWrap: "wrap" }}>
             <Chip label={tenant.tier} size="small" color="primary" variant="outlined" />
             {overridden.length > 0 && (
               <Tooltip
@@ -314,7 +324,11 @@ function TenantRow({
           </Stack>
         </TableCell>
         <TableCell>
-          <Stack direction="row" spacing={0.5} alignItems="center" useFlexGap flexWrap="wrap">
+          <Stack
+            direction="row"
+            spacing={0.5}
+            useFlexGap
+            sx={{ alignItems: "center", flexWrap: "wrap" }}>
             <span>
               {tenant.host_count} / {fmtLimit(tenant.effective.max_hosts)}
             </span>
@@ -431,10 +445,11 @@ function TenantUsers({
   if (users === null) return <LinearProgress />;
   if (users.length === 0) {
     return (
-      <Typography variant="body2" color="text.secondary">
-        No users — nobody can sign into this tenant. Its owner has to be invited from inside
-        it, or the tenant deleted directly in the database.
-      </Typography>
+      <Typography variant="body2" sx={{
+        color: "text.secondary"
+      }}>No users — nobody can sign into this tenant. Its owner has to be invited from inside
+                it, or the tenant deleted directly in the database.
+              </Typography>
     );
   }
 
@@ -490,7 +505,7 @@ function TenantUsers({
                 </Tooltip>
               </TableCell>
               <TableCell align="right">
-                <Stack direction="row" spacing={1} justifyContent="flex-end">
+                <Stack direction="row" spacing={1} sx={{ justifyContent: "flex-end" }}>
                   <Tooltip
                     title={
                       u.is_self
@@ -644,7 +659,9 @@ function SubscriptionDialog({
             <Typography variant="subtitle2" gutterBottom>
               Limit overrides
             </Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            <Typography
+              variant="body2"
+              sx={{ color: "text.secondary", mb: 2 }}>
               Blank inherits the tier's value, shown as the placeholder. Use these for a
               one-off arrangement rather than to invent a new tier.
             </Typography>

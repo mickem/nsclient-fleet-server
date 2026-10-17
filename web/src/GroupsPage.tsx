@@ -90,9 +90,11 @@ export function GroupsPage({ me }: { me: Me }) {
 
   return (
     <Box>
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
+      <Stack
+        direction="row"
+        sx={{ justifyContent: "space-between", alignItems: "center", mb: 1 }}>
         <Typography variant="h4">Groups</Typography>
-        <Stack direction="row" spacing={1} alignItems="center">
+        <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
           <RefreshButton refreshing={refreshing} onClick={refresh} />
           {!creating && canWriteConfig(me.role) && (
             <Button variant="contained" startIcon={<AddIcon />} onClick={() => navigate("/groups/new")}>
@@ -101,7 +103,9 @@ export function GroupsPage({ me }: { me: Me }) {
           )}
         </Stack>
       </Stack>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+      <Typography
+        variant="body2"
+        sx={{ color: "text.secondary", mb: 2 }}>
         A group is a saved rule over host tags and facts. Bundles assigned to a group apply to
         every host the rule matches.
       </Typography>
@@ -129,7 +133,7 @@ export function GroupsPage({ me }: { me: Me }) {
       ) : groups.length === 0 && !creating ? (
         <Card>
           <CardContent>
-            <Typography color="text.secondary">No groups yet.</Typography>
+            <Typography sx={{ color: "text.secondary" }}>No groups yet.</Typography>
           </CardContent>
         </Card>
       ) : (
@@ -188,7 +192,9 @@ function GroupCard({
   return (
     <Card variant="outlined">
       <CardContent>
-        <Stack direction="row" justifyContent="space-between" alignItems="center">
+        <Stack
+          direction="row"
+          sx={{ justifyContent: "space-between", alignItems: "center" }}>
           <Typography variant="h5">{group.name}</Typography>
           {canWrite && (
             <Stack direction="row" spacing={1}>
@@ -294,7 +300,10 @@ function GroupEditor({
           {error}
         </Alert>
       )}
-      <Stack direction="row" spacing={1} sx={{ mt: 2 }} alignItems="center">
+      <Stack
+        direction="row"
+        spacing={1}
+        sx={{ alignItems: "center", mt: 2 }}>
         <Button size="small" onClick={runPreview}>
           Preview matching hosts
         </Button>
@@ -369,7 +378,7 @@ function AssignmentsPanel({ groupId, bundles }: { groupId: string; bundles: Bund
         {assignments === null ? (
           <Typography variant="body2">Loading…</Typography>
         ) : assignments.length === 0 ? (
-          <Typography variant="body2" color="text.secondary">
+          <Typography variant="body2" sx={{ color: "text.secondary" }}>
             No bundles assigned.
           </Typography>
         ) : (
@@ -384,7 +393,7 @@ function AssignmentsPanel({ groupId, bundles }: { groupId: string; bundles: Bund
           ))
         )}
       </Stack>
-      <Stack direction="row" spacing={1} alignItems="center">
+      <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
         <Select
           size="small"
           displayEmpty

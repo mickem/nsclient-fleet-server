@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 import { styled } from "@mui/material/styles";
 import MuiDrawer, { drawerClasses } from "@mui/material/Drawer";
 import Box from "@mui/material/Box";

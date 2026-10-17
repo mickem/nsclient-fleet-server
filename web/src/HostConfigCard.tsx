@@ -359,7 +359,11 @@ export function HostConfigCard({ host, desired, desiredError, canWrite, onChange
   return (
     <Card variant="outlined">
       <CardContent>
-        <Stack direction="row" alignItems="center" spacing={2} sx={{ mb: 1 }} useFlexGap flexWrap="wrap">
+        <Stack
+          direction="row"
+          spacing={2}
+          useFlexGap
+          sx={{ alignItems: "center", flexWrap: "wrap", mb: 1 }}>
           <Typography variant="h5" sx={{ flexGrow: 1 }}>
             Configuration
           </Typography>
@@ -384,7 +388,9 @@ export function HostConfigCard({ host, desired, desiredError, canWrite, onChange
             }}
           />
         </Stack>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+        <Typography
+          variant="body2"
+          sx={{ color: "text.secondary", mb: 1.5 }}>
           What this host's agent writes to its fleet.ini: each setting with the bundle it comes
           from, lowest priority first, and the host override on top. The override is for this
           host alone and may hold secrets — it is encrypted at rest, its values stay hidden here
@@ -424,9 +430,10 @@ export function HostConfigCard({ host, desired, desiredError, canWrite, onChange
         ))}
 
         {rows === null ? (
-          !desiredError && <Typography color="text.secondary">Loading…</Typography>
+          !desiredError && <Typography sx={{ color: "text.secondary" }}>Loading…</Typography>
         ) : rows.length === 0 ? (
-          <Typography color="text.secondary" sx={{ mb: 2 }}>
+          <Typography
+            sx={{ color: "text.secondary", mb: 2 }}>
             Nothing configured — no bundle applies to this host{hasOverride ? "" : " and it has no override"}.
           </Typography>
         ) : (
@@ -449,18 +456,24 @@ export function HostConfigCard({ host, desired, desiredError, canWrite, onChange
                     <TableCell sx={{ fontFamily: "monospace", fontSize: "0.8rem" }}>{r.key}</TableCell>
                     <TableCell sx={{ fontFamily: "monospace", fontSize: "0.8rem", wordBreak: "break-all" }}>
                       {r.value === null ? (
-                        <Typography component="span" variant="body2" color="text.secondary">
+                        <Typography component="span" variant="body2" sx={{
+                          color: "text.secondary"
+                        }}>
                           {last ? <s>{last.value}</s> : null} removed on this host
                         </Typography>
                       ) : fromOverride && valuesHidden ? (
-                        <Typography component="span" variant="body2" color="text.secondary">
+                        <Typography component="span" variant="body2" sx={{
+                          color: "text.secondary"
+                        }}>
                           {HIDDEN}
                         </Typography>
                       ) : (
                         r.value
                       )}
                       {r.value !== null && last && (
-                        <Typography variant="caption" color="text.secondary" component="div">
+                        <Typography variant="caption" component="div" sx={{
+                          color: "text.secondary"
+                        }}>
                           replaces <s>{last.value}</s> from {last.layer.label}
                         </Typography>
                       )}
@@ -543,7 +556,11 @@ export function HostConfigCard({ host, desired, desiredError, canWrite, onChange
 
         {canWrite && editing && !picking && (
           <Stack spacing={1.5}>
-            <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
+            <Stack
+              direction="row"
+              spacing={1}
+              useFlexGap
+              sx={{ alignItems: "center", flexWrap: "wrap" }}>
               <Typography variant="subtitle1" sx={{ flexGrow: 1 }}>
                 Host override
               </Typography>
@@ -567,7 +584,7 @@ export function HostConfigCard({ host, desired, desiredError, canWrite, onChange
                 </Button>
               )}
             </Stack>
-            <Typography variant="body2" color="text.secondary">
+            <Typography variant="body2" sx={{ color: "text.secondary" }}>
               This host's whole configuration — the table above previews the result. Only what
               you change is saved as the override; a setting you delete is removed on this host.
             </Typography>
@@ -589,7 +606,7 @@ export function HostConfigCard({ host, desired, desiredError, canWrite, onChange
                 <Typography variant="body2" sx={{ mb: 0.5 }}>
                   Removed on this host
                 </Typography>
-                <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+                <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
                   {draftRemovals.map((r) => (
                     <Tooltip key={r.join("/")} title="Keep it: back to what the bundles give">
                       <Chip

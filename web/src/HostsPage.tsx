@@ -196,9 +196,11 @@ export function HostsPage({ me }: Props) {
 
   return (
     <Box>
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
+      <Stack
+        direction="row"
+        sx={{ justifyContent: "space-between", alignItems: "center", mb: 2 }}>
         <Typography variant="h4">Hosts</Typography>
-        <Stack direction="row" spacing={1} alignItems="center">
+        <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
           <RefreshButton refreshing={refreshing} onClick={refresh} />
           {canWrite && (
             <Button
@@ -226,7 +228,11 @@ export function HostsPage({ me }: Props) {
       {issued && <IssuedHostCard issued={issued} onClose={() => setIssued(null)} />}
 
       {hosts !== null && hosts.length > 0 && (
-        <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap" sx={{ mb: 2 }}>
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ alignItems: "center", flexWrap: "wrap", mb: 2 }}>
           <TextField
             select
             size="small"
@@ -262,7 +268,7 @@ export function HostsPage({ me }: Props) {
             sx={{ minWidth: 180 }}
           />
           {filtering && (
-            <Typography variant="body2" color="text.secondary">
+            <Typography variant="body2" sx={{ color: "text.secondary" }}>
               {filtered.length} of {hosts.length} hosts
             </Typography>
           )}
@@ -270,7 +276,11 @@ export function HostsPage({ me }: Props) {
       )}
 
       {selected.size > 0 && (
-        <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap" sx={{ mb: 2 }}>
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ alignItems: "center", flexWrap: "wrap", mb: 2 }}>
           <Typography variant="body2" sx={{ fontWeight: 500 }}>
             {selected.size} selected
           </Typography>
@@ -303,7 +313,7 @@ export function HostsPage({ me }: Props) {
       ) : hosts.length === 0 ? (
         <Card>
           <CardContent>
-            <Typography color="text.secondary">
+            <Typography sx={{ color: "text.secondary" }}>
               No hosts yet. Click "Add host" to get a one-line install command.
             </Typography>
           </CardContent>
@@ -311,7 +321,9 @@ export function HostsPage({ me }: Props) {
       ) : filtered.length === 0 ? (
         <Card>
           <CardContent>
-            <Typography color="text.secondary">No hosts match the current filters.</Typography>
+            <Typography sx={{
+              color: "text.secondary"
+            }}>No hosts match the current filters.</Typography>
           </CardContent>
         </Card>
       ) : (
@@ -360,13 +372,17 @@ export function HostsPage({ me }: Props) {
                   <TableCell>{h.hostname ?? <em>(not reported)</em>}</TableCell>
                   <TableCell>{h.os ?? "—"}</TableCell>
                   <TableCell>
-                    <Stack direction="row" spacing={0.5} alignItems="center" useFlexGap flexWrap="wrap">
+                    <Stack
+                      direction="row"
+                      spacing={0.5}
+                      useFlexGap
+                      sx={{ alignItems: "center", flexWrap: "wrap" }}>
                       <HostStatusChip host={h} />
                       <LocalConfigChip host={h} />
                     </Stack>
                   </TableCell>
                   <TableCell>
-                    <Stack direction="row" spacing={0.5} useFlexGap flexWrap="wrap">
+                    <Stack direction="row" spacing={0.5} useFlexGap sx={{ flexWrap: "wrap" }}>
                       {h.tags.map((t) => (
                         <Chip
                           key={`${t.source}:${t.key}`}

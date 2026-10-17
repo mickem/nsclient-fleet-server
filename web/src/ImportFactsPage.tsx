@@ -291,7 +291,10 @@ export function ImportFactsPage() {
 
   return (
     <Box>
-      <Stack direction="row" alignItems="center" spacing={2} sx={{ mb: 2 }}>
+      <Stack
+        direction="row"
+        spacing={2}
+        sx={{ alignItems: "center", mb: 2 }}>
         <Button startIcon={<ArrowBackIcon />} onClick={() => navigate("/hosts")}>
           Hosts
         </Button>
@@ -413,7 +416,10 @@ export function ImportFactsPage() {
       </Card>
 
       {!result && (
-        <Stack direction="row" spacing={1} justifyContent="flex-end" sx={{ mt: 2 }}>
+        <Stack
+          direction="row"
+          spacing={1}
+          sx={{ justifyContent: "flex-end", mt: 2 }}>
           <Button disabled={step === 0 || commitBusy} onClick={() => setStep((s) => s - 1)}>
             Back
           </Button>

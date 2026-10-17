@@ -117,7 +117,7 @@ export function CommitStep({
           </Table>
         </CardContent>
       </Card>
-      <Typography variant="body2" color="text.secondary">
+      <Typography variant="body2" sx={{ color: "text.secondary" }}>
         Each matched host&apos;s {summary.source} document is replaced by its row. The server
         resolves the rows again when committing and refuses if any no longer match one host.
       </Typography>
