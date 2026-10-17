@@ -81,13 +81,13 @@ Two things every role can see, deliberately, and worth knowing before you invite
   cost is that the member list is not private within a tenant.
 - **A host's `state_hash`**, which is derived from its configuration. It is an HMAC under a
   key only the server holds, so it is not a way to read that configuration back — see
-  `crates/server/src/desired_state.rs`.
+  `crates/server/src/agent/desired_state.rs`.
 
 Encrypted bundles are the exception that goes the other way: their contents are unreadable to
 *every* role, and to the server. The key lives in the browser, in `sessionStorage`, so an
 operator who unlocks it on a shared machine should close the tab. That placement is what
 makes the Content-Security-Policy on this origin load-bearing rather than decorative —
-`crates/server/src/security_headers.rs`.
+`crates/server/src/transport/security_headers.rs`.
 
 The owner cannot be re-roled or removed, and nobody can change their own role or delete their
 own account — together that keeps a tenant from locking itself out. Deleting a user signs them
@@ -208,7 +208,7 @@ Full reference: **[docs/deployment.md](docs/deployment.md)**.
 The short version: one statically-linked binary on one small Linux VM, SQLite on local disk,
 TLS terminated in-process — no container runtime, no reverse proxy, no external database.
 **Inbound 443 is the only application port** — the operator UI, agent mTLS, and Let's Encrypt
-challenges share it, dispatched on the ClientHello's ALPN (`crates/server/src/mux.rs`). Agents
+challenges share it, dispatched on the ClientHello's ALPN (`crates/server/src/transport/mux.rs`). Agents
 must offer ALPN `nsclient-fleet/1`; anything that terminates TLS in front of the server (a reverse proxy
 that re-encrypts, an inspecting middlebox, most L7 load balancers) breaks them.
 

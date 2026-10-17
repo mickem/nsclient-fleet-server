@@ -400,7 +400,7 @@ impl<'a> TenantBundleKeysRepo<'a> {
 /// Key/value on purpose: these are rare, unrelated, and read at most once per request that
 /// cares. A typed column per switch would mean a migration for each one and a struct that
 /// every caller has to fetch in full. Values are strings; the server owns their meaning
-/// (see `crate::platform::settings`), including what an absent key defaults to.
+/// (see `fleet_server::admin::platform::settings`), including what an absent key defaults to.
 pub struct PlatformSettingsRepo<'a> {
     db: &'a Db,
 }

@@ -587,7 +587,7 @@ pub async fn commit(
             .facts_catalog_cache
             .bump(who.tenant_id, CatalogChange::Operator);
     }
-    crate::audit::record(
+    crate::admin::audit::record(
         &state,
         who.tenant_id,
         Some(who.user_id),
@@ -657,7 +657,7 @@ pub async fn delete_host_source(
     }
     match crate::facts::remove(&state, who.tenant_id, &host_id, &source, true).await {
         Ok(true) => {
-            crate::audit::record(
+            crate::admin::audit::record(
                 &state,
                 who.tenant_id,
                 Some(who.user_id),
@@ -695,7 +695,7 @@ pub async fn delete_source(
     }
     match crate::facts::remove_source(&state, who.tenant_id, &source).await {
         Ok(deleted) => {
-            crate::audit::record(
+            crate::admin::audit::record(
                 &state,
                 who.tenant_id,
                 Some(who.user_id),

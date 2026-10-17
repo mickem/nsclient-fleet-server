@@ -148,7 +148,7 @@ pub async fn invite(
             .into_response();
     }
 
-    crate::audit::record(
+    crate::admin::audit::record(
         &state,
         who.tenant_id,
         Some(who.user_id),
@@ -208,7 +208,7 @@ pub async fn set_role(
         }
     }
 
-    crate::audit::record(
+    crate::admin::audit::record(
         &state,
         who.tenant_id,
         Some(who.user_id),
@@ -264,7 +264,7 @@ pub async fn delete_user(
         }
     }
 
-    crate::audit::record(
+    crate::admin::audit::record(
         &state,
         who.tenant_id,
         Some(who.user_id),

@@ -1,6 +1,6 @@
 //! A shutdown signal every listener watches.
 //!
-//! The accept loops in [`crate::mux`] and [`crate::mtls`] used to be `loop { accept }` with
+//! The accept loops in [`crate::transport::mux`] and [`crate::transport::mtls`] used to be `loop { accept }` with
 //! no way out, which was fine while the only way to stop the process was a signal that
 //! killed it outright. A Windows service cannot be stopped that way: the service control
 //! manager sends `SERVICE_CONTROL_STOP` and expects the process to report

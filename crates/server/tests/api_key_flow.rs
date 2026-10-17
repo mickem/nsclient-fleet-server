@@ -33,15 +33,18 @@ async fn start() -> TestServer {
 
     let cfg = test_config(db_path);
     let (mtls_cert_pem, mtls_key_pem) =
-        fleet_server::mtls::generate_self_signed_server("127.0.0.1").unwrap();
+        fleet_server::transport::mtls::generate_self_signed_server("127.0.0.1").unwrap();
     let email = fleet_server::auth::email::EmailSender::from_config(cfg.smtp.as_ref()).unwrap();
     let turnstile =
         fleet_server::auth::turnstile::Turnstile::from_secret(cfg.turnstile_secret.clone());
     let rate_limits = fleet_server::auth::rate_limit::AuthRateLimits::new(cfg.daily_email_budget);
-    let trust_store =
-        fleet_server::mtls::MtlsContext::load(db.clone(), mtls_cert_pem.clone(), mtls_key_pem)
-            .await
-            .unwrap();
+    let trust_store = fleet_server::transport::mtls::MtlsContext::load(
+        db.clone(),
+        mtls_cert_pem.clone(),
+        mtls_key_pem,
+    )
+    .await
+    .unwrap();
 
     let state = fleet_server::AppState {
         db: db.clone(),
@@ -49,8 +52,8 @@ async fn start() -> TestServer {
         email,
         turnstile,
         rate_limits,
-        agent_limits: fleet_server::agent_limits::AgentRateLimits::new(),
-        enrollment_limits: fleet_server::agent_limits::EnrollmentLimits::default(),
+        agent_limits: fleet_server::agent::limits::AgentRateLimits::new(),
+        enrollment_limits: fleet_server::agent::limits::EnrollmentLimits::default(),
         trust_store,
         mtls_server_cert_pem: Arc::new(mtls_cert_pem),
         bundle_store: Arc::new(fleet_server::bundles::LocalBundleStore::new(
@@ -94,12 +97,12 @@ async fn start() -> TestServer {
     }
 }
 
-fn test_config(db_path: PathBuf) -> fleet_server::config::Config {
+fn test_config(db_path: PathBuf) -> fleet_server::runtime::config::Config {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     let key_b64 = MasterKey::generate_b64();
     let master_key = MasterKey::from_b64(&key_b64).unwrap();
     let bootstrap_jwt_secret = STANDARD.decode(&key_b64).unwrap();
-    fleet_server::config::Config {
+    fleet_server::runtime::config::Config {
         listen: "127.0.0.1:0".into(),
         listen_https: "127.0.0.1:0".into(),
         listen_mtls: "127.0.0.1:0".into(),

@@ -162,7 +162,7 @@ pub fn hash_password_interactively() -> Result<String> {
         err,
         "\nSet ON_PREM_ADMIN_PASSWORD_HASH to the line below (quote it — it contains $):"
     );
-    fleet_server::admin_password::hash(&password)
+    fleet_server::auth::admin_password::hash(&password)
 }
 
 #[cfg(test)]

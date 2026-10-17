@@ -134,7 +134,7 @@ impl MasterKey {
 
     /// Decrypt a ciphertext written before purposes existed, i.e. with empty associated
     /// data. Only the one-time startup rewrite has any business calling this — see
-    /// `fleet_server::tenant_setup::rebind_legacy_ciphertexts`.
+    /// `fleet_server::runtime::tenant_setup::rebind_legacy_ciphertexts`.
     pub fn decrypt_unbound(&self, blob: &[u8]) -> Result<Vec<u8>, AeadError> {
         self.open(blob, b"")
     }

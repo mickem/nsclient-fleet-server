@@ -1,3 +1,5 @@
+pub mod config_api;
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use std::net::SocketAddr;
@@ -123,7 +125,7 @@ pub async fn create(
     let server_url = state.config.base_url.trim_end_matches('/').to_string();
     let install_command = format!("nscp enroll --server {server_url} --token {token}");
 
-    crate::audit::record(
+    crate::admin::audit::record(
         &state,
         tenant.id,
         Some(who.user_id),
@@ -262,7 +264,7 @@ pub async fn list(State(state): State<AppState>, who: AuthedUser) -> Response {
         // A host that never enrolled has nothing to be in sync with, and computing a desired
         // state for one would be work spent on an answer its status cannot use.
         let desired = if host.enrolled_at.is_some() {
-            match crate::desired_state::compute_desired_state_at(
+            match crate::agent::desired_state::compute_desired_state_at(
                 &state,
                 who.tenant_id,
                 &host.id,
@@ -384,7 +386,7 @@ async fn status_inputs(
 
     let desired = if host.enrolled_at.is_some() {
         Some(
-            crate::desired_state::compute_desired_state_at(
+            crate::agent::desired_state::compute_desired_state_at(
                 state,
                 tenant_id,
                 &host.id,
@@ -474,7 +476,7 @@ pub async fn revoke_host_certs(
         token
     );
 
-    crate::audit::record(
+    crate::admin::audit::record(
         &state,
         who.tenant_id,
         Some(who.user_id),
@@ -524,7 +526,7 @@ pub async fn delete_host(
             state
                 .facts_catalog_cache
                 .bump(who.tenant_id, crate::facts::CatalogChange::Removed);
-            crate::audit::record(
+            crate::admin::audit::record(
                 &state,
                 who.tenant_id,
                 Some(who.user_id),
@@ -602,7 +604,7 @@ pub async fn bulk_delete(
                 state
                     .desired_state_cache
                     .forget_host(who.tenant_id, &host_id);
-                crate::audit::record(
+                crate::admin::audit::record(
                     &state,
                     who.tenant_id,
                     Some(who.user_id),
@@ -657,7 +659,7 @@ pub struct BulkTagsBody {
 }
 
 /// Set and/or remove manual tags on many hosts at once. Same semantics as
-/// [`crate::config_api::put_tag`] / `delete_tag` per (host, key), but the tenant's
+/// [`crate::hosts::config_api::put_tag`] / `delete_tag` per (host, key), but the tenant's
 /// config_version is bumped once at the end — one rollout, not one per host.
 pub async fn bulk_tags(
     State(state): State<AppState>,
@@ -740,7 +742,7 @@ pub async fn bulk_tags(
             .invalidate_host(who.tenant_id, host_id);
     }
     if !touched.is_empty() {
-        crate::audit::record(
+        crate::admin::audit::record(
             &state,
             who.tenant_id,
             Some(who.user_id),
@@ -815,7 +817,9 @@ pub async fn desired(
         }
     };
     let ds =
-        match crate::desired_state::compute_desired_state(&state, who.tenant_id, &host_id).await {
+        match crate::agent::desired_state::compute_desired_state(&state, who.tenant_id, &host_id)
+            .await
+        {
             Ok(d) => d,
             Err(e) => {
                 tracing::error!(error = %e, "compute_desired_state failed");
@@ -991,8 +995,8 @@ pub async fn enroll(
             claims.tenant_id,
             &claims.host_id,
             &nonce_hash,
-            crate::agent_api::clamp_descriptor(body.hostname.as_deref()).as_deref(),
-            crate::agent_api::clamp_descriptor(body.os.as_deref()).as_deref(),
+            crate::agent::api::clamp_descriptor(body.hostname.as_deref()).as_deref(),
+            crate::agent::api::clamp_descriptor(body.os.as_deref()).as_deref(),
             fleet_storage::EnrolledCert {
                 serial: &issued.serial_hex,
                 fingerprint_sha256: &issued.fingerprint_sha256_hex,
@@ -1040,7 +1044,7 @@ pub async fn enroll(
         );
     }
 
-    crate::audit::record(
+    crate::admin::audit::record(
         &state,
         claims.tenant_id,
         None,

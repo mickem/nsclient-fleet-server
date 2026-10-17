@@ -5,7 +5,7 @@ use lettre::{
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
 
-use crate::config::SmtpConfig;
+use crate::runtime::config::SmtpConfig;
 
 #[derive(Clone)]
 pub enum EmailSender {

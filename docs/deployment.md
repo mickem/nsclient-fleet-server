@@ -51,7 +51,7 @@ every locked-down site.
 ### How one port carries three protocols
 
 The server reads the ClientHello *before* choosing a TLS configuration, and dispatches on
-ALPN (`crates/server/src/mux.rs`):
+ALPN (`crates/server/src/transport/mux.rs`):
 
 | Client offers        | Gets                                            | Router          |
 | -------------------- | ----------------------------------------------- | --------------- |
@@ -244,7 +244,7 @@ to trust it.
 | `PLATFORM_ADMIN_EMAILS`                                 | unset   | Comma-separated. Grants the platform console — see below |
 | `HOST_LOST_AFTER_HOURS`                                 | `48`    | Silence after which a host reads **lost** — see below  |
 | `LOG_FILE`                                              | unset   | Write logs to this file, rotated daily as `<name>.YYYY-MM-DD`, instead of stdout. Required on Windows as a service, which has nowhere to write stdout; on Linux leave it unset and let journald keep them |
-| `RUST_LOG`                                              | `info`  | Standard `tracing` filter, e.g. `info,fleet_server::mtls=debug` |
+| `RUST_LOG`                                              | `info`  | Standard `tracing` filter, e.g. `info,fleet_server::transport::mtls=debug` |
 
 Two things are not environment variables, because they have to work before configuration is
 read: `--env-file <path>` loads `KEY=VALUE` lines into the environment (the systemd unit uses

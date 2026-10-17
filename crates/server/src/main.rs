@@ -7,12 +7,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use fleet_server::{
-    config::Config, ensure_on_prem_admin, ensure_platform_admins, mtls, mtls_router, router,
-    shutdown::Shutdown, tenant_setup::backfill_all, AppState,
+    ensure_on_prem_admin, ensure_platform_admins, mtls_router, router,
+    runtime::{config::Config, shutdown::Shutdown, tenant_setup::backfill_all},
+    transport::mtls,
+    AppState,
 };
 
 use fleet_server::auth::{email::EmailSender, rate_limit::AuthRateLimits, turnstile::Turnstile};
-use fleet_server::config::host_of;
+use fleet_server::runtime::config::host_of;
 
 /// The version this binary reports.
 ///
@@ -66,9 +68,9 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Before anything reads the environment. On Windows this is how a service gets its
-    // configuration at all — see `crate::service` and `fleet_server::env_file`.
+    // configuration at all — see `crate::service` and `fleet_server::runtime::env_file`.
     let from_file = match &args.env_file {
-        Some(path) => fleet_server::env_file::load(path)?,
+        Some(path) => fleet_server::runtime::env_file::load(path)?,
         None => Vec::new(),
     };
 
@@ -85,7 +87,7 @@ fn main() -> anyhow::Result<()> {
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async move {
-        let (trigger, shutdown) = fleet_server::shutdown::channel();
+        let (trigger, shutdown) = fleet_server::runtime::shutdown::channel();
         tokio::spawn(async move {
             wait_for_signal().await;
             tracing::info!("shutdown signal received");
@@ -276,8 +278,8 @@ async fn serve(shutdown: Shutdown, env_file_vars: &[String]) -> anyhow::Result<(
         );
     }
     let rate_limits = AuthRateLimits::new(cfg.daily_email_budget);
-    let agent_limits = fleet_server::agent_limits::AgentRateLimits::new();
-    let enrollment_limits = fleet_server::agent_limits::EnrollmentLimits::default();
+    let agent_limits = fleet_server::agent::limits::AgentRateLimits::new();
+    let enrollment_limits = fleet_server::agent::limits::EnrollmentLimits::default();
     let trust_store =
         mtls::MtlsContext::load(db.clone(), mtls_cert_pem.clone(), mtls_key_pem).await?;
 
@@ -307,15 +309,15 @@ async fn serve(shutdown: Shutdown, env_file_vars: &[String]) -> anyhow::Result<(
     };
 
     // Both cleanups existed and neither was ever called, so these two tables only grew.
-    tokio::spawn(fleet_server::housekeeping::run(
+    tokio::spawn(fleet_server::runtime::housekeeping::run(
         db.clone(),
         cfg.session_idle_ttl_secs,
         state.bundle_store.clone(),
     ));
 
     backfill_all(&state, &db).await?;
-    fleet_server::tenant_setup::rebind_legacy_ciphertexts(&state, &db).await?;
-    fleet_server::tenant_setup::resign_bundles(&state, &db).await?;
+    fleet_server::runtime::tenant_setup::rebind_legacy_ciphertexts(&state, &db).await?;
+    fleet_server::runtime::tenant_setup::resign_bundles(&state, &db).await?;
     trust_store.rebuild().await?;
 
     // A dedicated agent port is bound only when LISTEN_MTLS is set (always, when ACME is
@@ -351,7 +353,7 @@ async fn serve(shutdown: Shutdown, env_file_vars: &[String]) -> anyhow::Result<(
         // TLS-ALPN-01 challenge. No :80 listener is needed for issuance.
         let https_addr = cfg.listen_https.clone();
         tracing::info!("ACME enabled — running HTTPS on {https_addr}");
-        let serve = fleet_server::https::serve_acme(
+        let serve = fleet_server::transport::https::serve_acme(
             &https_addr,
             acme_cfg,
             app,
@@ -365,7 +367,7 @@ async fn serve(shutdown: Shutdown, env_file_vars: &[String]) -> anyhow::Result<(
         // Same mux as the ACME branch, same single port — only the certificate's origin
         // differs. This is the path for a deployment Let's Encrypt cannot reach.
         let https_addr = cfg.listen_https.clone();
-        let serve = fleet_server::https::serve_static(
+        let serve = fleet_server::transport::https::serve_static(
             &https_addr,
             tls_cfg,
             app,
@@ -380,7 +382,7 @@ async fn serve(shutdown: Shutdown, env_file_vars: &[String]) -> anyhow::Result<(
         tracing::info!(addr = %cfg.listen, "HTTP listening (no ACME — set ACME_DOMAINS for production)");
         // The one listener axum serves directly, so it is also the one place its own
         // graceful shutdown applies; the TLS listeners are our accept loops and stop
-        // through the same signal in `crate::mux` and `crate::mtls`.
+        // through the same signal in `crate::transport::mux` and `crate::transport::mtls`.
         let http = axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -430,7 +432,8 @@ async fn run_until_stopped(
     if !agent_listener_finished {
         // A second of headroom over the drain itself, so the deadline that decides the
         // outcome is the listener's own rather than this one.
-        let grace = fleet_server::shutdown::DRAIN_TIMEOUT + std::time::Duration::from_secs(1);
+        let grace =
+            fleet_server::runtime::shutdown::DRAIN_TIMEOUT + std::time::Duration::from_secs(1);
         if tokio::time::timeout(grace, handle).await.is_err() {
             tracing::warn!("agent listener did not finish draining; exiting anyway");
         }

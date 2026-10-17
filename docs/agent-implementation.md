@@ -162,7 +162,7 @@ Notes:
 - `merged_config_json` is the host override (`{}` when there is none). The
   agent unpacks and applies the bundles in ascending priority, then merges this
   last so it wins, and says so with `"host_override_last": true` in every state
-  report (see `crates/server/src/desired_state.rs`).
+  report (see `crates/server/src/agent/desired_state.rs`).
 - `state_hash` covers the merged config **and** every bundle entry in full (id, name,
   version, format, sha256, signature, priority). Store it only
   after a successful apply, and echo it as `current_hash` on subsequent polls.
@@ -233,7 +233,7 @@ Content-Type: application/json
 }
 ```
 
-All fields are optional server-side (`crates/server/src/agent_api.rs`,
+All fields are optional server-side (`crates/server/src/agent/api.rs`,
 `StateReport`). Semantics:
 
 - `applied_state_hash` set → server records it and updates `last_seen_at`.
@@ -334,10 +334,10 @@ loop:
 | Concern                                             | Reference                                                               |
 |-----------------------------------------------------|-------------------------------------------------------------------------|
 | Wire-level client (all endpoints)                   | `crates/agent-sim/src/lib.rs`                                           |
-| Enrollment server-side                              | `crates/server/src/hosts.rs` (`enroll`)                                 |
-| Desired-state / state-report / renew handlers       | `crates/server/src/agent_api.rs`                                        |
-| Host facts: hash exchange, upload, operator view    | `crates/server/src/facts.rs`, `crates/core/src/facts.rs` (wire format, diff); protocol in [agent-integration.md §3](agent-integration.md#3-host-facts-inventory) |
-| Desired-state computation (tags → groups → bundles) | `crates/server/src/desired_state.rs`                                    |
+| Enrollment server-side                              | `crates/server/src/hosts/mod.rs` (`enroll`)                                 |
+| Desired-state / state-report / renew handlers       | `crates/server/src/agent/api.rs`                                        |
+| Host facts: hash exchange, upload, operator view    | `crates/server/src/facts/mod.rs`, `crates/core/src/facts.rs` (wire format, diff); protocol in [agent-integration.md §3](agent-integration.md#3-host-facts-inventory) |
+| Desired-state computation (tags → groups → bundles) | `crates/server/src/agent/desired_state.rs`                                    |
 | Bundle download authz                               | `crates/server/src/bundles.rs` (`download`)                             |
 | Route wiring (public vs mTLS router)                | `crates/server/src/lib.rs`                                              |
 | End-to-end lifecycle tests                          | `crates/server/tests/fleet_flow.rs`, `crates/server/tests/poll_flow.rs`, `crates/server/tests/facts_flow.rs` |

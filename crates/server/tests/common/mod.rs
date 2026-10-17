@@ -24,7 +24,7 @@ pub struct TestServer {
     pub _tempdir: TempDir,
     pub handles: Vec<tokio::task::JoinHandle<()>>,
     pub db: Db,
-    pub agent_limits: fleet_server::agent_limits::AgentRateLimits,
+    pub agent_limits: fleet_server::agent::limits::AgentRateLimits,
     /// The state the routers were built with: its caches, trust store and config are the
     /// live ones.
     pub state: fleet_server::AppState,
@@ -64,7 +64,7 @@ pub async fn start_with(tweak: impl FnOnce(&mut fleet_server::AppState)) -> Test
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     let bootstrap_jwt_secret = STANDARD.decode(&key_b64).unwrap();
 
-    let cfg = fleet_server::config::Config {
+    let cfg = fleet_server::runtime::config::Config {
         listen: format!("127.0.0.1:{}", http_addr.port()),
         listen_https: "127.0.0.1:0".into(),
         listen_mtls: format!("127.0.0.1:{}", mtls_addr.port()),
@@ -94,17 +94,20 @@ pub async fn start_with(tweak: impl FnOnce(&mut fleet_server::AppState)) -> Test
     };
 
     let (mtls_cert_pem, mtls_key_pem) =
-        fleet_server::mtls::generate_self_signed_server("127.0.0.1").unwrap();
+        fleet_server::transport::mtls::generate_self_signed_server("127.0.0.1").unwrap();
 
     let email = fleet_server::auth::email::EmailSender::from_config(cfg.smtp.as_ref()).unwrap();
     let turnstile =
         fleet_server::auth::turnstile::Turnstile::from_secret(cfg.turnstile_secret.clone());
     let rate_limits = fleet_server::auth::rate_limit::AuthRateLimits::new(cfg.daily_email_budget);
-    let agent_limits = fleet_server::agent_limits::AgentRateLimits::new();
-    let trust_store =
-        fleet_server::mtls::MtlsContext::load(db.clone(), mtls_cert_pem.clone(), mtls_key_pem)
-            .await
-            .unwrap();
+    let agent_limits = fleet_server::agent::limits::AgentRateLimits::new();
+    let trust_store = fleet_server::transport::mtls::MtlsContext::load(
+        db.clone(),
+        mtls_cert_pem.clone(),
+        mtls_key_pem,
+    )
+    .await
+    .unwrap();
 
     let agent_limits_handle = agent_limits.clone();
     let mut state = fleet_server::AppState {
@@ -114,7 +117,7 @@ pub async fn start_with(tweak: impl FnOnce(&mut fleet_server::AppState)) -> Test
         turnstile,
         rate_limits,
         agent_limits,
-        enrollment_limits: fleet_server::agent_limits::EnrollmentLimits::default(),
+        enrollment_limits: fleet_server::agent::limits::EnrollmentLimits::default(),
         trust_store: trust_store.clone(),
         mtls_server_cert_pem: Arc::new(mtls_cert_pem),
         bundle_store: Arc::new(fleet_server::bundles::LocalBundleStore::new(
@@ -129,11 +132,11 @@ pub async fn start_with(tweak: impl FnOnce(&mut fleet_server::AppState)) -> Test
     let mtls_state = state.clone();
     let mtls_handle = tokio::spawn(async move {
         let r = fleet_server::mtls_router(mtls_state.clone());
-        let _ = fleet_server::mtls::serve_on(
+        let _ = fleet_server::transport::mtls::serve_on(
             mtls_listener,
             mtls_state.trust_store,
             r,
-            fleet_server::shutdown::Shutdown::never(),
+            fleet_server::runtime::shutdown::Shutdown::never(),
         )
         .await;
     });
