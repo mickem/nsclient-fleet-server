@@ -490,7 +490,7 @@ struct LoadedOverride {
 }
 
 /// Decrypt and parse a host's stored override; `Ok(None)` when it has none.
-// result_large_err: the Err is a ready-to-send Response by design, as in bundles.rs.
+// result_large_err: the Err is a ready-to-send Response by design, as in bundles/.
 #[allow(clippy::result_large_err)]
 async fn load_override(
     state: &AppState,
