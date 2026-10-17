@@ -918,7 +918,7 @@ impl<'a> GroupsRepo<'a> {
         selector_json: &str,
     ) -> Result<GroupRow> {
         use ulid::Ulid;
-        let id = Ulid::new().to_string();
+        let id = Ulid::generate().to_string();
         let now = now_unix();
         sqlx::query(
             "INSERT INTO groups (id, tenant_id, name, selector_json, created_at)
@@ -2901,7 +2901,7 @@ impl<'a> ApiKeyRepo<'a> {
         token_prefix: &str,
         expires_at: Option<i64>,
     ) -> Result<ApiKey> {
-        let id = ulid::Ulid::new().to_string();
+        let id = ulid::Ulid::generate().to_string();
         let now = now_unix();
         sqlx::query(
             "INSERT INTO api_keys

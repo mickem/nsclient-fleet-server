@@ -199,7 +199,7 @@ impl Host {
 }
 
 pub fn new_host_id() -> String {
-    Ulid::new().to_string()
+    Ulid::generate().to_string()
 }
 
 #[cfg(test)]
