@@ -54,13 +54,8 @@ pub fn decode_bootstrap(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     fn now() -> usize {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as usize
+        fleet_core::time::now_unix() as usize
     }
 
     #[test]

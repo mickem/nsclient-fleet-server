@@ -30,6 +30,8 @@ use rand::rngs::SysRng;
 use rand::TryRng;
 use sha2::{Digest, Sha256};
 
+use crate::crypto::digest::hex;
+
 /// First bytes of every encrypted bundle. Version the format by bumping the digit.
 pub const MAGIC: &[u8; 5] = b"NSEB1";
 /// `format` column / API value for bundles in this envelope.
@@ -186,10 +188,6 @@ fn aad_for(name: &str, version: &str) -> Vec<u8> {
     aad.push(0);
     aad.extend_from_slice(version.as_bytes());
     aad
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]

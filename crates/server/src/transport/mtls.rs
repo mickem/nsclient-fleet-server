@@ -474,12 +474,7 @@ fn parse_leaf(
     // Use the raw DER serial bytes and zero-pad each. Matches the encoding produced by
     // sign.rs at issuance — `to_str_radix(16)` would strip leading zero nibbles and break
     // the comparison against the stored cert row.
-    let serial_hex: String = parsed
-        .tbs_certificate
-        .raw_serial()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let serial_hex = fleet_core::crypto::digest::hex(parsed.tbs_certificate.raw_serial());
 
     Ok(PeerHostContext {
         tenant_id,
@@ -770,12 +765,7 @@ mod tests {
 
             let der = parse_first_cert_pem(&issued.cert_pem).unwrap();
             let (_, parsed) = x509_parser::certificate::X509Certificate::from_der(&der).unwrap();
-            let on_the_wire: String = parsed
-                .tbs_certificate
-                .raw_serial()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect();
+            let on_the_wire = fleet_core::crypto::digest::hex(parsed.tbs_certificate.raw_serial());
 
             assert_eq!(
                 on_the_wire, issued.serial_hex,

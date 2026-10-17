@@ -1,7 +1,5 @@
 pub mod config_api;
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use std::net::SocketAddr;
 
 use axum::{
@@ -107,10 +105,7 @@ pub async fn create(
         }
     };
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as usize;
+    let now = now_unix() as usize;
     let claims = BootstrapClaims {
         host_id: host.id.clone(),
         tenant_id: tenant.id,
@@ -456,10 +451,7 @@ pub async fn revoke_host_certs(
         .desired_state_cache
         .forget_host(who.tenant_id, &host_id);
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as usize;
+    let now = now_unix() as usize;
     let claims = BootstrapClaims {
         host_id: host_id.clone(),
         tenant_id: tenant.id,
