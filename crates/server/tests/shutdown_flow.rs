@@ -10,6 +10,8 @@
 //! `crates/server/src/runtime/shutdown.rs` unit-tests the signal itself, and `transport/conn.rs` the drain.
 //! What is left, and what is here, is that the listeners are actually wired to them.
 
+mod common;
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,32 +46,12 @@ async fn harness() -> Harness {
     let bootstrap_jwt_secret = STANDARD.decode(&key_b64).unwrap();
 
     let cfg = fleet_server::runtime::config::Config {
-        listen: "127.0.0.1:0".into(),
-        listen_https: "127.0.0.1:0".into(),
         listen_mtls: String::new(),
         agent_mtls_url: "https://127.0.0.1:0".into(),
-        acme: None,
-        tls: None,
-        database_path: PathBuf::from(&db_path),
         base_url: "http://127.0.0.1:0".into(),
-        on_prem: false,
-        on_prem_admin_email: None,
-        on_prem_admin_password: None,
-        on_prem_admin_password_hash: None,
-        platform_admin_emails: Vec::new(),
-        magic_link_ttl_secs: 900,
-        session_ttl_secs: 3600,
-        session_idle_ttl_secs: 3600,
-        bootstrap_ttl_secs: 3600,
-        host_lost_after_secs: 172_800,
-        client_cert_lifetime_days: 90,
-        cookie_secure: false,
-        daily_email_budget: 1_000_000,
-        smtp: None,
-        turnstile_secret: None,
-        turnstile_site_key: None,
         master_key,
         bootstrap_jwt_secret,
+        ..common::test_config(PathBuf::from(&db_path))
     };
 
     let (mtls_cert_pem, mtls_key_pem) =

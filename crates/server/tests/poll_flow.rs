@@ -1,6 +1,6 @@
 mod common;
 
-use common::{signup_login, start, TestServer};
+use common::{enroll_a_host, signup_login, start};
 
 use std::collections::BTreeMap;
 
@@ -9,29 +9,6 @@ use fleet_storage::Db;
 /// A well-formed applied_state_hash. The server requires 64 hex characters — it is a
 /// SHA-256 and nothing else is meaningful — so tests cannot use a readable placeholder.
 const TEST_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-async fn enroll_a_host(s: &TestServer) -> fleet_agent_sim::EnrolledAgent {
-    let r = s
-        .cookie_jar
-        .post(format!("{}/api/hosts", s.base_url))
-        .json(&serde_json::json!({}))
-        .send()
-        .await
-        .unwrap();
-    let body: serde_json::Value = r.json().await.unwrap();
-    let token = body["bootstrap_token"].as_str().unwrap().to_string();
-
-    // Trust store rebuild can lag; retry briefly
-    let mut last = String::new();
-    for _ in 0..20 {
-        match fleet_agent_sim::enroll(&s.base_url, &token, Some("alpha"), Some("linux")).await {
-            Ok(a) => return a,
-            Err(e) => last = format!("{e:?}"),
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    panic!("enroll never succeeded: {last}");
-}
 
 #[tokio::test]
 async fn desired_state_roundtrip_with_304() {

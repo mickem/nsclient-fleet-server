@@ -5,32 +5,9 @@
 
 mod common;
 
-use common::{signup_login, start, TestServer};
+use common::{enroll_a_host_with_id, signup_login, start, TestServer};
 
 use fleet_core::crypto::encbundle::BundleKey;
-
-async fn enroll_a_host(s: &TestServer) -> (fleet_agent_sim::EnrolledAgent, String) {
-    let r = s
-        .cookie_jar
-        .post(format!("{}/api/hosts", s.base_url))
-        .json(&serde_json::json!({}))
-        .send()
-        .await
-        .unwrap();
-    let body: serde_json::Value = r.json().await.unwrap();
-    let token = body["bootstrap_token"].as_str().unwrap().to_string();
-    let host_id = body["host_id"].as_str().unwrap().to_string();
-
-    let mut last = String::new();
-    for _ in 0..20 {
-        match fleet_agent_sim::enroll(&s.base_url, &token, Some("alpha"), Some("linux")).await {
-            Ok(a) => return (a, host_id),
-            Err(e) => last = format!("{e:?}"),
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    panic!("enroll never succeeded: {last}");
-}
 
 async fn upload_bundle(
     s: &TestServer,
@@ -61,7 +38,7 @@ async fn upload_bundle(
 async fn encrypted_bundle_end_to_end() {
     let s = start().await;
     signup_login(&s, "acme", "alice@example.com").await;
-    let (mut agent, host_id) = enroll_a_host(&s).await;
+    let (mut agent, host_id) = enroll_a_host_with_id(&s).await;
 
     // 1. No key registered yet.
     let r = s
@@ -410,7 +387,7 @@ async fn sweep_now(s: &TestServer) -> usize {
 async fn rename_keeps_assignments_and_reseals_encrypted_versions() {
     let s = start().await;
     signup_login(&s, "acme", "alice@example.com").await;
-    let (mut agent, host_id) = enroll_a_host(&s).await;
+    let (mut agent, host_id) = enroll_a_host_with_id(&s).await;
 
     let key = BundleKey::generate();
     let r = s
@@ -644,7 +621,7 @@ async fn rename_keeps_assignments_and_reseals_encrypted_versions() {
 async fn renaming_a_plain_bundle_reaches_hosts_already_in_sync() {
     let s = start().await;
     signup_login(&s, "acme", "alice@example.com").await;
-    let (agent, host_id) = enroll_a_host(&s).await;
+    let (agent, host_id) = enroll_a_host_with_id(&s).await;
 
     let r = upload_bundle(&s, "base", "1", None, b"PK\x03\x04-base".to_vec()).await;
     assert_eq!(r.status(), 200);
@@ -750,7 +727,7 @@ async fn assigned_plain_bundle(s: &TestServer, host_id: &str, name: &str, bytes:
 async fn a_rename_never_vouches_for_bytes_changed_on_disk() {
     let s = start().await;
     signup_login(&s, "acme", "alice@example.com").await;
-    let (agent, host_id) = enroll_a_host(&s).await;
+    let (agent, host_id) = enroll_a_host_with_id(&s).await;
     let id = assigned_plain_bundle(&s, &host_id, "base", b"PK\x03\x04-original").await;
 
     let stored = s

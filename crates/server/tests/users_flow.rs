@@ -4,169 +4,13 @@
 //! controls a role cannot use, but that is a courtesy — every check below is made against
 //! the HTTP API with a real session cookie for a real user.
 
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::Arc;
+mod common;
 
-use fleet_core::crypto::aead::MasterKey;
+use common::{complete_exchange, signed_in, start_http};
+use fleet_server::auth::tokens::hash_token;
+
 use fleet_core::user::Role;
-use fleet_storage::{Db, MagicLinkRepo, SessionRepo, TenantRepo, UserRepo};
-use tempfile::TempDir;
-
-struct TestServer {
-    base_url: String,
-    _tempdir: TempDir,
-    handle: tokio::task::JoinHandle<()>,
-    db: Db,
-    tenant_id: i64,
-}
-
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        self.handle.abort();
-    }
-}
-
-async fn start() -> TestServer {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("test.db");
-
-    let db = fleet_storage::open(&db_path).await.unwrap();
-    fleet_storage::run_migrations(&db.write).await.unwrap();
-
-    let cfg = test_config(db_path);
-    let (mtls_cert_pem, mtls_key_pem) =
-        fleet_server::transport::mtls::generate_self_signed_server("127.0.0.1").unwrap();
-    let email = fleet_server::auth::email::EmailSender::from_config(cfg.smtp.as_ref()).unwrap();
-    let turnstile =
-        fleet_server::auth::turnstile::Turnstile::from_secret(cfg.turnstile_secret.clone());
-    let rate_limits = fleet_server::auth::rate_limit::AuthRateLimits::new(cfg.daily_email_budget);
-    let trust_store = fleet_server::transport::mtls::MtlsContext::load(
-        db.clone(),
-        mtls_cert_pem.clone(),
-        mtls_key_pem,
-    )
-    .await
-    .unwrap();
-
-    let state = fleet_server::AppState {
-        db: db.clone(),
-        config: cfg,
-        email,
-        turnstile,
-        rate_limits,
-        agent_limits: fleet_server::agent::limits::AgentRateLimits::new(),
-        enrollment_limits: fleet_server::agent::limits::EnrollmentLimits::default(),
-        trust_store,
-        mtls_server_cert_pem: Arc::new(mtls_cert_pem),
-        bundle_store: Arc::new(fleet_server::bundles::LocalBundleStore::new(
-            dir.path().join("bundles"),
-        )),
-        desired_state_cache: Default::default(),
-        facts_catalog_cache: Default::default(),
-    };
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let base_url = format!("http://{addr}");
-
-    let app = fleet_server::router(state);
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await;
-    });
-
-    for _ in 0..50 {
-        if reqwest::get(format!("{base_url}/healthz")).await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-
-    let tenant = TenantRepo::new(&db)
-        .create("acme", "Acme", "free", None)
-        .await
-        .unwrap();
-
-    TestServer {
-        base_url,
-        _tempdir: dir,
-        handle,
-        db,
-        tenant_id: tenant.id,
-    }
-}
-
-fn test_config(db_path: PathBuf) -> fleet_server::runtime::config::Config {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let key_b64 = MasterKey::generate_b64();
-    let master_key = MasterKey::from_b64(&key_b64).unwrap();
-    let bootstrap_jwt_secret = STANDARD.decode(&key_b64).unwrap();
-    fleet_server::runtime::config::Config {
-        listen: "127.0.0.1:0".into(),
-        listen_https: "127.0.0.1:0".into(),
-        listen_mtls: "127.0.0.1:0".into(),
-        agent_mtls_url: "https://127.0.0.1".into(),
-        acme: None,
-        tls: None,
-        database_path: db_path,
-        base_url: "http://localhost".into(),
-        on_prem: false,
-        on_prem_admin_email: None,
-        on_prem_admin_password: None,
-        on_prem_admin_password_hash: None,
-        platform_admin_emails: Vec::new(),
-        magic_link_ttl_secs: 900,
-        session_ttl_secs: 3600,
-        session_idle_ttl_secs: 3600,
-        bootstrap_ttl_secs: 3600,
-        host_lost_after_secs: 172_800,
-        client_cert_lifetime_days: 90,
-        cookie_secure: false,
-        daily_email_budget: 1_000_000,
-        smtp: None,
-        turnstile_secret: None,
-        turnstile_site_key: None,
-        master_key,
-        bootstrap_jwt_secret,
-    }
-}
-
-fn hash_token(token: &str) -> String {
-    fleet_core::crypto::digest::sha256_hex(token.as_bytes())
-}
-
-/// A user of the given role, plus a client already holding their session cookie.
-///
-/// The session is minted directly rather than through the magic-link flow: this file is
-/// about what a role may do once signed in, and `auth_flow` already covers getting there.
-async fn signed_in(s: &TestServer, email: &str, role: Role) -> (i64, reqwest::Client) {
-    let user = UserRepo::new(&s.db)
-        .create(s.tenant_id, email, role)
-        .await
-        .unwrap();
-
-    let token = format!("session-for-{email}");
-    SessionRepo::new(&s.db)
-        .create(&hash_token(&token), s.tenant_id, user.id, 3600)
-        .await
-        .unwrap();
-
-    let jar = reqwest::cookie::Jar::default();
-    jar.add_cookie_str(
-        &format!("fleet_session={token}; Path=/"),
-        &s.base_url.parse().unwrap(),
-    );
-    let client = reqwest::Client::builder()
-        .cookie_provider(Arc::new(jar))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap();
-    (user.id, client)
-}
+use fleet_storage::{MagicLinkRepo, TenantRepo, UserRepo};
 
 async fn status(r: reqwest::Response) -> u16 {
     r.status().as_u16()
@@ -174,7 +18,7 @@ async fn status(r: reqwest::Response) -> u16 {
 
 #[tokio::test]
 async fn the_permission_matrix_is_enforced_by_the_server() {
-    let s = start().await;
+    let s = start_http().await;
     let (_, owner) = signed_in(&s, "owner@example.com", Role::Owner).await;
     let (_, admin) = signed_in(&s, "admin@example.com", Role::Admin).await;
     let (_, adder) = signed_in(&s, "adder@example.com", Role::AddHosts).await;
@@ -314,7 +158,7 @@ async fn the_permission_matrix_is_enforced_by_the_server() {
 
 #[tokio::test]
 async fn invite_creates_a_user_with_the_requested_role() {
-    let s = start().await;
+    let s = start_http().await;
     let (_, admin) = signed_in(&s, "admin@example.com", Role::Admin).await;
 
     let r = admin
@@ -382,7 +226,7 @@ async fn invite_creates_a_user_with_the_requested_role() {
 
 #[tokio::test]
 async fn invite_rejects_owner_role_and_duplicate_addresses() {
-    let s = start().await;
+    let s = start_http().await;
     let (_, admin) = signed_in(&s, "admin@example.com", Role::Admin).await;
 
     // `owner` is not in the assignable set — it is established at signup.
@@ -421,7 +265,7 @@ async fn invite_rejects_owner_role_and_duplicate_addresses() {
 
 #[tokio::test]
 async fn role_changes_take_effect_on_the_next_request() {
-    let s = start().await;
+    let s = start_http().await;
     let (_, admin) = signed_in(&s, "admin@example.com", Role::Admin).await;
     let (viewer_id, viewer) = signed_in(&s, "viewer@example.com", Role::ViewOnly).await;
 
@@ -472,7 +316,7 @@ async fn role_changes_take_effect_on_the_next_request() {
 
 #[tokio::test]
 async fn delete_removes_the_user_and_signs_them_out() {
-    let s = start().await;
+    let s = start_http().await;
     let (_, admin) = signed_in(&s, "admin@example.com", Role::Admin).await;
     let (victim_id, victim) = signed_in(&s, "victim@example.com", Role::AddHosts).await;
 
@@ -515,7 +359,7 @@ async fn delete_removes_the_user_and_signs_them_out() {
 
 #[tokio::test]
 async fn a_tenant_cannot_lock_itself_out() {
-    let s = start().await;
+    let s = start_http().await;
     let (owner_id, _owner) = signed_in(&s, "owner@example.com", Role::Owner).await;
     let (admin_id, admin) = signed_in(&s, "admin@example.com", Role::Admin).await;
 
@@ -599,26 +443,4 @@ async fn a_tenant_cannot_lock_itself_out() {
         serde_json::json!("admin"),
         "the caller still manages users"
     );
-}
-
-/// Complete a magic-link sign-in the browser way: GET renders the confirmation page and sets
-/// the `fleet_exchange` double-submit cookie, then the form POST redeems the token. The
-/// client must carry a cookie store so the cookie is resent on the POST.
-async fn complete_exchange(c: &reqwest::Client, base_url: &str, token: &str) -> reqwest::Response {
-    let page = c
-        .get(format!("{base_url}/api/auth/exchange?t={token}"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(page.status(), 200, "confirmation page must render on GET");
-    let html = page.text().await.unwrap();
-    let marker = "name=\"csrf\" value=\"";
-    let start = html.find(marker).expect("csrf field present") + marker.len();
-    let end = html[start..].find('"').expect("csrf value terminated");
-    let csrf = html[start..start + end].to_string();
-    c.post(format!("{base_url}/api/auth/exchange"))
-        .form(&[("t", token), ("csrf", csrf.as_str())])
-        .send()
-        .await
-        .unwrap()
 }

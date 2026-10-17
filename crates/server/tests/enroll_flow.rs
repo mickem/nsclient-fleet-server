@@ -1,40 +1,17 @@
 mod common;
 
-use common::{complete_exchange, start, TestServer};
+use common::{sign_up_and_in, start, TestServer};
 
 async fn signup_and_login(s: &TestServer) {
-    // Signup creates the tenant + tenant secrets
-    s.cookie_jar
-        .post(format!("{}/api/auth/signup", s.base_url))
-        .json(&serde_json::json!({
-            "email": "alice@example.com",
-            "tenant_slug": "acme",
-            "tenant_name": "Acme",
-            "turnstile_token": ""
-        }))
-        .send()
-        .await
-        .unwrap();
-
-    // Send-link is uniform 204; instead, fabricate a magic link directly via repos.
-    let tenants = fleet_storage::TenantRepo::new(&s.db);
-    let users = fleet_storage::UserRepo::new(&s.db);
-    let links = fleet_storage::MagicLinkRepo::new(&s.db);
-    let t = tenants.get_by_slug("acme").await.unwrap().unwrap();
-    let u = users
-        .find_by_email("alice@example.com")
-        .await
-        .unwrap()
-        .unwrap();
-    let token = "test-magic-link-XXXXXXXX";
-    let hash = fleet_core::crypto::digest::sha256_hex(token.as_bytes());
-    links
-        .create(&hash, t.id, u.id, fleet_core::time::now_unix() + 600)
-        .await
-        .unwrap();
-
-    let r = complete_exchange(&s.cookie_jar, &s.base_url, token).await;
-    assert_eq!(r.status(), 303);
+    sign_up_and_in(
+        &s.cookie_jar,
+        &s.base_url,
+        &s.db,
+        "acme",
+        "Acme",
+        "alice@example.com",
+    )
+    .await;
 }
 
 #[tokio::test]
