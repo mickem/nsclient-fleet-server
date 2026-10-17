@@ -463,11 +463,13 @@ async fn deleted_host_is_cut_off_and_gone() {
         "host_fact_changes",
         "host_certs",
     ] {
-        let n: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE host_id = ?"))
-            .bind(&host_id)
-            .fetch_one(&s.db.read)
-            .await
-            .unwrap();
+        let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT COUNT(*) FROM {table} WHERE host_id = ?"
+        )))
+        .bind(&host_id)
+        .fetch_one(&s.db.read)
+        .await
+        .unwrap();
         assert_eq!(n, 0, "{table} rows must be deleted");
     }
 

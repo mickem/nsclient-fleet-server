@@ -75,7 +75,6 @@ pub mod settings {
 /// method to call and no way to write a handler in this module that skips it.
 pub struct PlatformAdmin(pub AuthedUser);
 
-#[axum::async_trait]
 impl<S> axum::extract::FromRequestParts<S> for PlatformAdmin
 where
     S: Send + Sync,

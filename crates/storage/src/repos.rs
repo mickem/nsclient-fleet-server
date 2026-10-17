@@ -6,7 +6,7 @@ use fleet_core::session::Session;
 use fleet_core::tenant::Tenant;
 use fleet_core::time::now_unix;
 use fleet_core::user::{Role, User};
-use sqlx::Row;
+use sqlx::{AssertSqlSafe, Row};
 
 use crate::Db;
 
@@ -124,7 +124,7 @@ impl<'a> TenantRepo<'a> {
                 ""
             }
         );
-        let mut q = sqlx::query(&sql).bind(now_unix() - 86_400);
+        let mut q = sqlx::query(AssertSqlSafe(sql)).bind(now_unix() - 86_400);
         if let Some(id) = only_tenant {
             q = q.bind(id);
         }
@@ -458,9 +458,9 @@ impl<'a> HostRepo<'a> {
             "host_fact_changes",
             "host_certs",
         ] {
-            sqlx::query(&format!(
+            sqlx::query(AssertSqlSafe(format!(
                 "DELETE FROM {table} WHERE tenant_id = ? AND host_id = ?"
-            ))
+            )))
             .bind(tenant_id)
             .bind(host_id)
             .execute(&mut *tx)
@@ -1382,7 +1382,7 @@ impl<'a> BundleAssignmentsRepo<'a> {
              INNER JOIN bundles b ON b.id = ba.bundle_id
              WHERE ba.tenant_id = ? AND ba.group_id IN ({placeholders})"
         );
-        let mut q = sqlx::query(&sql).bind(tenant_id);
+        let mut q = sqlx::query(AssertSqlSafe(sql)).bind(tenant_id);
         for gid in group_ids {
             q = q.bind(gid);
         }
@@ -2071,7 +2071,7 @@ impl<'a> HostFactsRepo<'a> {
               WHERE tenant_id = ? AND source IN ({placeholders})
               ORDER BY host_id, source"
         );
-        let mut query = sqlx::query(&sql).bind(tenant_id);
+        let mut query = sqlx::query(AssertSqlSafe(sql)).bind(tenant_id);
         for s in sources {
             query = query.bind(s);
         }
