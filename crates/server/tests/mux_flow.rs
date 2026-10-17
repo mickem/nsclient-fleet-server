@@ -4,6 +4,9 @@
 //! stock reqwest client that would not trust a self-signed test certificate); the mux is
 //! bound separately and is what both the browser-shaped client and the agent actually dial.
 
+mod common;
+
+use common::{sign_up_and_in, test_config};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -80,28 +83,10 @@ async fn start() -> TestServer {
         // agents reach /agent/v1/* through the mux.
         listen_mtls: String::new(),
         agent_mtls_url: format!("https://127.0.0.1:{mux_port}"),
-        acme: None,
-        tls: None,
-        database_path: PathBuf::from(&db_path),
         base_url: base_url.clone(),
-        on_prem: false,
-        on_prem_admin_email: None,
-        on_prem_admin_password: None,
-        on_prem_admin_password_hash: None,
-        platform_admin_emails: Vec::new(),
-        magic_link_ttl_secs: 900,
-        session_ttl_secs: 3600,
-        session_idle_ttl_secs: 3600,
-        bootstrap_ttl_secs: 3600,
-        host_lost_after_secs: 172_800,
-        client_cert_lifetime_days: 90,
-        cookie_secure: false,
-        daily_email_budget: 1_000_000,
-        smtp: None,
-        turnstile_secret: None,
-        turnstile_site_key: None,
         master_key,
         bootstrap_jwt_secret,
+        ..test_config(PathBuf::from(&db_path))
     };
 
     let (mtls_cert_pem, mtls_key_pem) =
@@ -192,39 +177,6 @@ async fn start() -> TestServer {
     }
 }
 
-async fn signup_and_login(s: &TestServer) {
-    s.cookie_jar
-        .post(format!("{}/api/auth/signup", s.base_url))
-        .json(&serde_json::json!({
-            "email": "alice@example.com",
-            "tenant_slug": "acme",
-            "tenant_name": "Acme",
-            "turnstile_token": ""
-        }))
-        .send()
-        .await
-        .unwrap();
-
-    let tenants = fleet_storage::TenantRepo::new(&s.db);
-    let users = fleet_storage::UserRepo::new(&s.db);
-    let links = fleet_storage::MagicLinkRepo::new(&s.db);
-    let t = tenants.get_by_slug("acme").await.unwrap().unwrap();
-    let u = users
-        .find_by_email("alice@example.com")
-        .await
-        .unwrap()
-        .unwrap();
-    let token = "test-magic-link-XXXXXXXX";
-    let hash = fleet_core::crypto::digest::sha256_hex(token.as_bytes());
-    links
-        .create(&hash, t.id, u.id, fleet_core::time::now_unix() + 600)
-        .await
-        .unwrap();
-
-    let r = complete_exchange(&s.cookie_jar, &s.base_url, token).await;
-    assert_eq!(r.status(), 303);
-}
-
 /// A browser: standard ALPN, no client certificate, trusts the web certificate only.
 fn browser_client(s: &TestServer) -> reqwest::Client {
     reqwest::Client::builder()
@@ -236,7 +188,15 @@ fn browser_client(s: &TestServer) -> reqwest::Client {
 #[tokio::test]
 async fn one_port_serves_both_the_ui_and_the_fleet() {
     let s = start().await;
-    signup_and_login(&s).await;
+    sign_up_and_in(
+        &s.cookie_jar,
+        &s.base_url,
+        &s.db,
+        "acme",
+        "Acme",
+        "alice@example.com",
+    )
+    .await;
 
     // --- the browser branch -------------------------------------------------------
     let r = browser_client(&s)
@@ -348,26 +308,4 @@ async fn agent_alpn_without_a_client_cert_is_rejected() {
         res.is_err(),
         "a certificate-less client on the agent branch must not get a response: {res:?}"
     );
-}
-
-/// Complete a magic-link sign-in the browser way: GET renders the confirmation page and sets
-/// the `fleet_exchange` double-submit cookie, then the form POST redeems the token. The
-/// client must carry a cookie store so the cookie is resent on the POST.
-async fn complete_exchange(c: &reqwest::Client, base_url: &str, token: &str) -> reqwest::Response {
-    let page = c
-        .get(format!("{base_url}/api/auth/exchange?t={token}"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(page.status(), 200, "confirmation page must render on GET");
-    let html = page.text().await.unwrap();
-    let marker = "name=\"csrf\" value=\"";
-    let start = html.find(marker).expect("csrf field present") + marker.len();
-    let end = html[start..].find('"').expect("csrf value terminated");
-    let csrf = html[start..start + end].to_string();
-    c.post(format!("{base_url}/api/auth/exchange"))
-        .form(&[("t", token), ("csrf", csrf.as_str())])
-        .send()
-        .await
-        .unwrap()
 }

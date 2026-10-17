@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{complete_exchange, start, TestServer};
+use common::{sign_up_and_in, start, TestServer};
 
 fn fresh_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -14,29 +14,7 @@ fn fresh_client() -> reqwest::Client {
 }
 
 async fn signup_and_login(s: &TestServer, c: &reqwest::Client, slug: &str, email: &str) {
-    c.post(format!("{}/api/auth/signup", s.base_url))
-        .json(&serde_json::json!({
-            "email": email,
-            "tenant_slug": slug,
-            "tenant_name": slug.to_uppercase(),
-            "turnstile_token": "",
-        }))
-        .send()
-        .await
-        .unwrap();
-
-    let tenants = fleet_storage::TenantRepo::new(&s.db);
-    let users = fleet_storage::UserRepo::new(&s.db);
-    let links = fleet_storage::MagicLinkRepo::new(&s.db);
-    let t = tenants.get_by_slug(slug).await.unwrap().unwrap();
-    let u = users.find_by_email(email).await.unwrap().unwrap();
-    let token = format!("magic-{slug}-XXXXXXXX");
-    let hash = fleet_core::crypto::digest::sha256_hex(token.as_bytes());
-    links
-        .create(&hash, t.id, u.id, fleet_core::time::now_unix() + 600)
-        .await
-        .unwrap();
-    let _ = complete_exchange(c, &s.base_url, &token).await;
+    sign_up_and_in(c, &s.base_url, &s.db, slug, &slug.to_uppercase(), email).await;
 }
 
 struct Provisioned {

@@ -3,41 +3,22 @@
 
 mod common;
 
-use common::{complete_exchange, start_with, TestServer};
+use common::{sign_up_and_in, start_with, TestServer};
 
 use std::collections::BTreeMap;
 
 const FLEET_SIZE: usize = 50;
 
 async fn signup_login(s: &TestServer) {
-    s.cookie_jar
-        .post(format!("{}/api/auth/signup", s.base_url))
-        .json(&serde_json::json!({
-            "email": "ops@fleet.example.com",
-            "tenant_slug": "fleet",
-            "tenant_name": "Fleet",
-            "turnstile_token": "",
-        }))
-        .send()
-        .await
-        .unwrap();
-
-    let tenants = fleet_storage::TenantRepo::new(&s.db);
-    let users = fleet_storage::UserRepo::new(&s.db);
-    let links = fleet_storage::MagicLinkRepo::new(&s.db);
-    let t = tenants.get_by_slug("fleet").await.unwrap().unwrap();
-    let u = users
-        .find_by_email("ops@fleet.example.com")
-        .await
-        .unwrap()
-        .unwrap();
-    let token = "magic-fleet-XXXXXXXX";
-    let hash = fleet_core::crypto::digest::sha256_hex(token.as_bytes());
-    links
-        .create(&hash, t.id, u.id, fleet_core::time::now_unix() + 600)
-        .await
-        .unwrap();
-    let _ = complete_exchange(&s.cookie_jar, &s.base_url, token).await;
+    sign_up_and_in(
+        &s.cookie_jar,
+        &s.base_url,
+        &s.db,
+        "fleet",
+        "Fleet",
+        "ops@fleet.example.com",
+    )
+    .await;
 
     // Bump tenant to enterprise — free tier caps at 5 hosts.
     sqlx::query("UPDATE tenants SET tier = 'enterprise' WHERE slug = 'fleet'")

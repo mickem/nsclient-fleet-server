@@ -1,8 +1,10 @@
+mod common;
+
+use common::{complete_exchange, test_config};
+use fleet_server::auth::tokens::hash_token;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use fleet_core::crypto::aead::MasterKey;
 use fleet_storage::{Db, MagicLinkRepo, TenantRepo, UserRepo};
 use tempfile::TempDir;
 
@@ -97,80 +99,12 @@ async fn start_with(adjust: impl FnOnce(&mut fleet_server::runtime::config::Conf
     }
 }
 
-fn test_config(db_path: PathBuf) -> fleet_server::runtime::config::Config {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let key_b64 = MasterKey::generate_b64();
-    let master_key = MasterKey::from_b64(&key_b64).unwrap();
-    let bootstrap_jwt_secret = STANDARD.decode(&key_b64).unwrap();
-    fleet_server::runtime::config::Config {
-        listen: "127.0.0.1:0".into(),
-        listen_https: "127.0.0.1:0".into(),
-        listen_mtls: "127.0.0.1:0".into(),
-        agent_mtls_url: "https://127.0.0.1".into(),
-        acme: None,
-        tls: None,
-        database_path: db_path,
-        base_url: "http://localhost".into(),
-        on_prem: false,
-        on_prem_admin_email: None,
-        on_prem_admin_password: None,
-        on_prem_admin_password_hash: None,
-        platform_admin_emails: Vec::new(),
-        magic_link_ttl_secs: 900,
-        session_ttl_secs: 3600,
-        session_idle_ttl_secs: 3600,
-        bootstrap_ttl_secs: 3600,
-        host_lost_after_secs: 172_800,
-        client_cert_lifetime_days: 90,
-        cookie_secure: false,
-        daily_email_budget: 1_000_000,
-        smtp: None,
-        turnstile_secret: None,
-        turnstile_site_key: None,
-        master_key,
-        bootstrap_jwt_secret,
-    }
-}
-
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .cookie_store(true)
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap()
-}
-
-/// Complete a magic-link sign-in the way a browser does: GET renders the confirmation page
-/// and sets the `fleet_exchange` double-submit cookie, then the form POST redeems the token.
-/// Returns the POST response (a 303 on success). The client must carry a cookie store so the
-/// cookie rides along.
-async fn complete_exchange(c: &reqwest::Client, base_url: &str, token: &str) -> reqwest::Response {
-    let page = c
-        .get(format!("{base_url}/api/auth/exchange?t={token}"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(page.status(), 200, "confirmation page must render on GET");
-    let html = page.text().await.unwrap();
-    let csrf = extract_csrf(&html);
-    c.post(format!("{base_url}/api/auth/exchange"))
-        .form(&[("t", token), ("csrf", csrf.as_str())])
-        .send()
-        .await
-        .unwrap()
-}
-
-/// Pull the double-submit nonce out of the rendered confirmation form.
-fn extract_csrf(html: &str) -> String {
-    let marker = "name=\"csrf\" value=\"";
-    let start = html.find(marker).expect("csrf field present") + marker.len();
-    let rest = &html[start..];
-    let end = rest.find('"').expect("csrf value terminated");
-    rest[..end].to_string()
-}
-
-fn hash_token(token: &str) -> String {
-    fleet_core::crypto::digest::sha256_hex(token.as_bytes())
 }
 
 /// Every response carries the headers, including the SPA fallback — which is served by

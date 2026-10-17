@@ -3,38 +3,15 @@
 
 mod common;
 
-use common::{signup_login, start, TestServer};
+use common::{enroll_a_host_with_id, signup_login, start};
 
 use std::collections::BTreeMap;
-
-async fn enroll_a_host(s: &TestServer) -> (fleet_agent_sim::EnrolledAgent, String) {
-    let r = s
-        .cookie_jar
-        .post(format!("{}/api/hosts", s.base_url))
-        .json(&serde_json::json!({}))
-        .send()
-        .await
-        .unwrap();
-    let body: serde_json::Value = r.json().await.unwrap();
-    let token = body["bootstrap_token"].as_str().unwrap().to_string();
-    let host_id = body["host_id"].as_str().unwrap().to_string();
-
-    let mut last = String::new();
-    for _ in 0..20 {
-        match fleet_agent_sim::enroll(&s.base_url, &token, Some("alpha"), Some("linux")).await {
-            Ok(a) => return (a, host_id),
-            Err(e) => last = format!("{e:?}"),
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    panic!("enroll never succeeded: {last}");
-}
 
 #[tokio::test]
 async fn end_to_end_tag_group_bundle_assign_and_fetch() {
     let s = start().await;
     signup_login(&s, "acme", "alice@example.com").await;
-    let (agent, host_id) = enroll_a_host(&s).await;
+    let (agent, host_id) = enroll_a_host_with_id(&s).await;
 
     // 1. Operator creates a group selecting hosts where role = sql_server
     let g = s
@@ -152,7 +129,7 @@ async fn end_to_end_tag_group_bundle_assign_and_fetch() {
 async fn a_selector_that_opts_into_agent_tags_matches_what_the_host_reports() {
     let s = start().await;
     signup_login(&s, "delta", "dave@example.com").await;
-    let (agent, host_id) = enroll_a_host(&s).await;
+    let (agent, host_id) = enroll_a_host_with_id(&s).await;
 
     let g = s
         .cookie_jar
@@ -237,7 +214,7 @@ async fn a_selector_that_opts_into_agent_tags_matches_what_the_host_reports() {
 async fn an_agent_tag_cannot_supplement_a_manual_one_into_matching() {
     let s = start().await;
     signup_login(&s, "epsilon", "erin@example.com").await;
-    let (agent, host_id) = enroll_a_host(&s).await;
+    let (agent, host_id) = enroll_a_host_with_id(&s).await;
 
     let g = s
         .cookie_jar
@@ -322,7 +299,7 @@ async fn an_agent_tag_cannot_supplement_a_manual_one_into_matching() {
 async fn a_manual_tag_write_changes_that_host_and_leaves_the_tenant_alone() {
     let s = start().await;
     signup_login(&s, "beta", "bob@example.com").await;
-    let (agent, host_id) = enroll_a_host(&s).await;
+    let (agent, host_id) = enroll_a_host_with_id(&s).await;
 
     let config_version = || async {
         sqlx::query_scalar::<_, i64>("SELECT config_version FROM tenants WHERE slug = 'beta'")
@@ -436,7 +413,7 @@ async fn a_manual_tag_write_changes_that_host_and_leaves_the_tenant_alone() {
 async fn an_agent_report_replaces_its_tags_rather_than_accumulating_them() {
     let s = start().await;
     signup_login(&s, "replace", "rep@example.com").await;
-    let (agent, host_id) = enroll_a_host(&s).await;
+    let (agent, host_id) = enroll_a_host_with_id(&s).await;
 
     let agent_tags = || async {
         sqlx::query_scalar::<_, String>(
@@ -484,8 +461,8 @@ async fn an_agent_report_replaces_its_tags_rather_than_accumulating_them() {
 async fn an_override_ciphertext_moved_to_another_host_is_refused() {
     let s = start().await;
     signup_login(&s, "zeta", "zoe@example.com").await;
-    let (_a1, host_a) = enroll_a_host(&s).await;
-    let (_a2, host_b) = enroll_a_host(&s).await;
+    let (_a1, host_a) = enroll_a_host_with_id(&s).await;
+    let (_a2, host_b) = enroll_a_host_with_id(&s).await;
 
     let r = s
         .cookie_jar
@@ -545,7 +522,7 @@ async fn an_override_ciphertext_moved_to_another_host_is_refused() {
 async fn group_with_no_matching_hosts_yields_empty_state() {
     let s = start().await;
     signup_login(&s, "delta", "dave@example.com").await;
-    let (agent, _host_id) = enroll_a_host(&s).await;
+    let (agent, _host_id) = enroll_a_host_with_id(&s).await;
 
     // Create a group that won't match (host has no role=ghost tag)
     s.cookie_jar
@@ -1207,7 +1184,7 @@ async fn bulk_tags_and_bulk_delete() {
 async fn an_override_reads_back_and_the_read_is_audited() {
     let s = start().await;
     signup_login(&s, "eta", "eli@example.com").await;
-    let (_agent, host_id) = enroll_a_host(&s).await;
+    let (_agent, host_id) = enroll_a_host_with_id(&s).await;
     let url = format!("{}/api/hosts/{}/override", s.base_url, host_id);
 
     let r = s.cookie_jar.get(&url).send().await.unwrap();
@@ -1283,7 +1260,7 @@ async fn an_override_reads_back_and_the_read_is_audited() {
 async fn an_override_shape_carries_no_values_and_is_not_audited() {
     let s = start().await;
     signup_login(&s, "kappa", "kim@example.com").await;
-    let (_agent, host_id) = enroll_a_host(&s).await;
+    let (_agent, host_id) = enroll_a_host_with_id(&s).await;
     let url = format!("{}/api/hosts/{}/override", s.base_url, host_id);
     let r = s
         .cookie_jar
@@ -1323,7 +1300,7 @@ async fn an_override_shape_carries_no_values_and_is_not_audited() {
 async fn an_override_keeps_the_template_it_was_written_with() {
     let s = start().await;
     signup_login(&s, "lambda", "lou@example.com").await;
-    let (_agent, host_id) = enroll_a_host(&s).await;
+    let (_agent, host_id) = enroll_a_host_with_id(&s).await;
     let url = format!("{}/api/hosts/{}/override", s.base_url, host_id);
     let patch = serde_json::json!({ "settings": { "mysql": { "password": "p4ss" } } });
 
