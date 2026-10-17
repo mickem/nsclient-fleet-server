@@ -24,7 +24,7 @@ const DOMAIN: &[u8] = b"nsclient-fleet/bundle-sig/v2";
 /// A fresh bundle id. Server-generated, like every other id the filesystem sees; it lives
 /// here because the signature covers it, so minting it and signing it belong together.
 pub fn new_bundle_id() -> String {
-    ulid::Ulid::new().to_string()
+    ulid::Ulid::generate().to_string()
 }
 
 /// A bundle's identity, as the signature covers it.

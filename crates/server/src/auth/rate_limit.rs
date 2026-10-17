@@ -71,7 +71,7 @@ impl<K: Hash + Eq + Clone> ShrinkableKeyedStateStore<K> for SharedStore<K> {
 
 fn email_limiter(quota: Quota) -> (EmailLimiter, Arc<DashMap<String, InMemoryState>>) {
     let (store, map) = SharedStore::new();
-    (Governor::new(quota, store, &DefaultClock::default()), map)
+    (Governor::new(quota, store, DefaultClock::default()), map)
 }
 
 #[derive(Clone)]
