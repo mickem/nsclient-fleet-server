@@ -23,10 +23,11 @@
 //! The browser implementation in `web/src/crypto.ts` mirrors this construction exactly —
 //! keep the two in sync.
 
-use aes_gcm::aead::{Aead, KeyInit, OsRng, Payload};
+use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use rand::RngCore;
+use rand::rngs::SysRng;
+use rand::TryRng;
 use sha2::{Digest, Sha256};
 
 /// First bytes of every encrypted bundle. Version the format by bumping the digit.
@@ -65,7 +66,7 @@ pub struct BundleKey([u8; 32]);
 impl BundleKey {
     pub fn generate() -> Self {
         let mut bytes = [0u8; 32];
-        OsRng.fill_bytes(&mut bytes);
+        SysRng.try_fill_bytes(&mut bytes).expect("OS RNG");
         Self(bytes)
     }
 
@@ -97,13 +98,13 @@ impl BundleKey {
     /// Encrypt a bundle zip. `name`/`version` are bound into the AAD and must match what
     /// the server later advertises for this bundle, or agents will refuse it.
     pub fn encrypt(&self, name: &str, version: &str, plaintext: &[u8]) -> Vec<u8> {
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&self.0));
+        let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(self.0));
         let mut nonce_bytes = [0u8; NONCE_LEN];
-        OsRng.fill_bytes(&mut nonce_bytes);
+        SysRng.try_fill_bytes(&mut nonce_bytes).expect("OS RNG");
         let aad = aad_for(name, version);
         let ct = cipher
             .encrypt(
-                Nonce::from_slice(&nonce_bytes),
+                &Nonce::from(nonce_bytes),
                 Payload {
                     msg: plaintext,
                     aad: &aad,
@@ -129,11 +130,11 @@ impl BundleKey {
         if header.fingerprint != self.fingerprint() {
             return Err(EncBundleError::WrongKey);
         }
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&self.0));
+        let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(self.0));
         let aad = aad_for(name, version);
         cipher
             .decrypt(
-                Nonce::from_slice(&header.nonce),
+                &Nonce::from(header.nonce),
                 Payload {
                     msg: &blob[HEADER_LEN..],
                     aad: &aad,
@@ -288,5 +289,24 @@ mod tests {
         // the fixed key proves key parsing; the AAD tests above pin the framing.
         let blob = key.encrypt("pinned", "0.1", b"vector");
         assert_eq!(key.decrypt("pinned", "0.1", &blob).unwrap(), b"vector");
+    }
+
+    /// A bundle encrypted by the build before the crypto-crate upgrade. Operators hold
+    /// encrypted bundles outside the server and agents decrypt them with their own copy of
+    /// the key, so a format change would strand both. Never regenerate this to make a
+    /// failing upgrade pass.
+    #[test]
+    fn bundles_from_earlier_builds_still_decrypt() {
+        let key = BundleKey::from_b64(&STANDARD.encode([0x42u8; 32])).unwrap();
+        assert_eq!(key.fingerprint_hex(), "425ed4e4a36b30ea");
+        let blob = STANDARD
+            .decode(
+                "TlNFQjFCXtTko2sw6hr19+lFjr9FB6yXwY9F+ww9o7j748VgoWMvkgHKDPq3cJ9g3DMBNv4Xj759j46qZlw=",
+            )
+            .unwrap();
+        assert_eq!(
+            key.decrypt("demo", "1.2.3", &blob).unwrap(),
+            b"PK\x03\x04 not really a zip"
+        );
     }
 }

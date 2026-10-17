@@ -830,4 +830,70 @@ mod tests {
         let (cert, _) = generate_self_signed_server("Control.Example.Com").unwrap();
         assert!(stored_cert_usable(&cert, "control.example.com").is_ok());
     }
+
+    // Known answers from the build before the crypto-crate upgrade, shared with
+    // fleet-enrollment's tests. See that crate's `testdata/kat/README.md`.
+    macro_rules! kat {
+        ($name:literal) => {
+            include_str!(concat!("../../enrollment/testdata/kat/", $name))
+        };
+    }
+
+    fn kat_tenant_map() -> HashMap<Vec<u8>, (i64, String)> {
+        let der = parse_first_cert_pem(kat!("tenant-ca.crt")).unwrap();
+        HashMap::from([(ca_subject_der(&der).unwrap(), (7, "acme".to_string()))])
+    }
+
+    fn kat_leaf(pem: &str) -> Result<PeerHostContext> {
+        let der = parse_first_cert_pem(pem).unwrap();
+        parse_leaf(&CertificateDer::from(der), &kat_tenant_map())
+    }
+
+    /// Certificates agents already hold. If parsing one stops yielding the serial it was
+    /// issued with, its host is rejected as revoked and cannot renew — renewal is itself an
+    /// mTLS call — so every enrolled agent would need re-enrolling by hand.
+    #[test]
+    fn issued_agent_certs_still_resolve_to_their_host() {
+        for (pem, serial) in [
+            (kat!("leaf-ed25519.crt"), "738faf507429ba7614050391de1f5bd7"),
+            (kat!("leaf-p256.crt"), "432eddc24bfb15b49e6d8107767e9187"),
+        ] {
+            let leaf = kat_leaf(pem).unwrap();
+            assert_eq!(leaf.tenant_id, 7);
+            assert_eq!(leaf.tenant_slug, "acme");
+            assert_eq!(leaf.host_id, "01JTESTHOST0000000000000000");
+            assert_eq!(leaf.serial_hex, serial);
+        }
+    }
+
+    /// The tenant is found by the leaf's issuer bytes matching the stored CA's subject
+    /// bytes, and rcgen rebuilds the CA from its PEM on every issue. If that rebuild
+    /// re-encodes the name differently, new certificates chain but resolve to no tenant.
+    #[test]
+    fn certs_issued_by_a_stored_ca_resolve_to_its_tenant() {
+        let issued = fleet_enrollment::sign::sign_client_cert(
+            kat!("csr-p256.pem"),
+            kat!("tenant-ca.crt"),
+            kat!("tenant-ca.key"),
+            "acme",
+            "host-new",
+            90,
+        )
+        .unwrap();
+        let leaf = kat_leaf(&issued.cert_pem).unwrap();
+        assert_eq!((leaf.tenant_id, leaf.host_id.as_str()), (7, "host-new"));
+        assert_eq!(leaf.serial_hex, issued.serial_hex);
+    }
+
+    /// Agents pin the server certificate. One that a new build no longer accepts is
+    /// regenerated at startup, and every agent then has to be re-enrolled.
+    #[test]
+    fn stored_server_cert_is_still_reused() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("mtls-server.crt"), kat!("mtls-server.crt")).unwrap();
+        std::fs::write(dir.path().join("mtls-server.key"), kat!("mtls-server.key")).unwrap();
+        let (cert, key) = load_or_generate_server(dir.path(), "localhost").unwrap();
+        assert_eq!(cert, kat!("mtls-server.crt"));
+        assert_eq!(key, kat!("mtls-server.key"));
+    }
 }

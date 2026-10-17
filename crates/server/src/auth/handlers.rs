@@ -551,7 +551,7 @@ pub async fn on_prem_login(
 /// means; the two cannot both be set (startup refuses that).
 fn verify_admin_password(cfg: &crate::config::Config, offered: &str) -> Option<bool> {
     if let Some(phc) = cfg.on_prem_admin_password_hash.as_deref() {
-        use argon2::password_hash::{PasswordHash, PasswordVerifier};
+        use argon2::password_hash::{phc::PasswordHash, PasswordVerifier};
         let parsed = match PasswordHash::new(phc) {
             Ok(p) => p,
             Err(e) => {

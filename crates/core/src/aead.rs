@@ -11,11 +11,12 @@
 //! one, so a new call site has to say what it is encrypting and cannot inherit a blank.
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use chacha20poly1305::aead::{Aead, KeyInit, OsRng, Payload};
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use hkdf::Hkdf;
 use hmac::{Mac, SimpleHmac};
-use rand::RngCore;
+use rand::rngs::SysRng;
+use rand::TryRng;
 use sha2::Sha256;
 
 #[derive(Debug, thiserror::Error)]
@@ -92,13 +93,13 @@ impl MasterKey {
         if bytes.len() != 32 {
             return Err(AeadError::KeyLength(bytes.len()));
         }
-        let key = Key::clone_from_slice(&bytes);
+        let key = Key::try_from(bytes.as_slice()).expect("length checked above");
         Ok(Self(key))
     }
 
     pub fn generate_b64() -> String {
         let mut bytes = [0u8; 32];
-        OsRng.fill_bytes(&mut bytes);
+        SysRng.try_fill_bytes(&mut bytes).expect("OS RNG");
         STANDARD.encode(bytes)
     }
 
@@ -107,8 +108,8 @@ impl MasterKey {
     pub fn encrypt(&self, purpose: Purpose<'_>, plaintext: &[u8]) -> Vec<u8> {
         let cipher = ChaCha20Poly1305::new(&self.0);
         let mut nonce_bytes = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        SysRng.try_fill_bytes(&mut nonce_bytes).expect("OS RNG");
+        let nonce = &Nonce::from(nonce_bytes);
         let aad = purpose.aad();
         let ct = cipher
             .encrypt(
@@ -159,7 +160,7 @@ impl MasterKey {
     /// — a password in a host override, say — is an offline guessing oracle for anyone who
     /// can read the hash, and the hash is served to every role.
     pub fn mac(&self, info: &str, data: &[u8]) -> [u8; 32] {
-        let mut m = <SimpleHmac<Sha256> as Mac>::new_from_slice(&self.derive_subkey(info))
+        let mut m = <SimpleHmac<Sha256> as KeyInit>::new_from_slice(&self.derive_subkey(info))
             .expect("HMAC accepts a 32-byte key");
         m.update(data);
         m.finalize().into_bytes().into()
@@ -170,7 +171,7 @@ impl MasterKey {
             return Err(AeadError::Truncated);
         }
         let cipher = ChaCha20Poly1305::new(&self.0);
-        let nonce = Nonce::from_slice(&blob[..12]);
+        let nonce = &Nonce::try_from(&blob[..12]).expect("length checked above");
         cipher
             .decrypt(
                 nonce,
@@ -292,7 +293,7 @@ mod tests {
             let cipher = ChaCha20Poly1305::new(&key.0);
             let nonce_bytes = [7u8; 12];
             let ct = cipher
-                .encrypt(Nonce::from_slice(&nonce_bytes), b"old secret".as_ref())
+                .encrypt(&Nonce::from(nonce_bytes), b"old secret".as_ref())
                 .unwrap();
             let mut out = nonce_bytes.to_vec();
             out.extend_from_slice(&ct);
@@ -342,5 +343,67 @@ mod tests {
             MasterKey::from_b64(&bad),
             Err(AeadError::KeyLength(16))
         ));
+    }
+
+    // Known answers, written by the build before the crypto-crate upgrade. Every test above
+    // encrypts and decrypts in one process, so it would keep passing across a change to the
+    // wire format or the key derivation that stranded every secret already in a database.
+    // These were made once; never regenerate them to make a failing upgrade pass.
+    const KAT_MASTER_KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    const KAT_HOST: &str = "01JTESTHOST0000000000000000";
+
+    fn kat_blob(b64: &str) -> Vec<u8> {
+        STANDARD.decode(b64).unwrap()
+    }
+
+    #[test]
+    fn ciphertexts_from_earlier_builds_still_decrypt() {
+        let key = MasterKey::from_b64(KAT_MASTER_KEY).unwrap();
+        let cases: [(Purpose<'_>, &str, &[u8]); 3] = [
+            (
+                Purpose::TenantCaKey { tenant_id: 7 },
+                "Z1MGaClJBJ/Z41fHoni1eMljINqmFJSI6K78A2tGU9j5sndCF/x9Ri4=",
+                b"tenant ca key",
+            ),
+            (
+                Purpose::TenantBundleSigningKey { tenant_id: 7 },
+                "bwjYuS6SPBD4/IaWDV4dMgZHUx0hqDC1pcUb6ZAU0IUQCPHwWqHqVUIt4k49dQ==",
+                b"bundle signing key",
+            ),
+            (
+                Purpose::HostOverride {
+                    tenant_id: 7,
+                    host_id: KAT_HOST,
+                },
+                "5rSHlgvIvdGSG3kbSc+x/mKcq9LCpRqsU/elgTOyfh0T/2kWbw==",
+                b"{\"k\":\"v\"}",
+            ),
+        ];
+        for (purpose, blob, plaintext) in cases {
+            assert_eq!(
+                key.decrypt(purpose, &kat_blob(blob)).unwrap(),
+                plaintext,
+                "{purpose:?}"
+            );
+        }
+        // Written before purposes existed: empty associated data, read once by the
+        // startup rewrite.
+        let legacy = kat_blob("CQkJCQkJCQkJCQkJXRrsz0mHSHi6tnmpbxIMmiyIrMWyClIO8rlPlZA=");
+        assert_eq!(key.decrypt_unbound(&legacy).unwrap(), b"legacy secret");
+    }
+
+    /// The bootstrap-token key and the override hashes both come out of these, so a change
+    /// here invalidates every outstanding enrollment token and every stored hash at once.
+    #[test]
+    fn derived_subkeys_and_macs_do_not_move() {
+        let key = MasterKey::from_b64(KAT_MASTER_KEY).unwrap();
+        assert_eq!(
+            crate::digest::hex(&key.derive_subkey("bootstrap-jwt/v1")),
+            "3fcb13fd54513444948162f16243c9e6c237a64acf8eb9238f1f32856eb84da4"
+        );
+        assert_eq!(
+            crate::digest::hex(&key.mac("override-hash/v1", b"hello")),
+            "f8915aefa0a406492510ba96884ff1e039025c05be4882537fd52fc5fd2bcc61"
+        );
     }
 }

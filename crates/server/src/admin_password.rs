@@ -14,8 +14,7 @@
 //! after the defaults move.
 
 use anyhow::{bail, Context, Result};
-use argon2::password_hash::rand_core::OsRng;
-use argon2::password_hash::{PasswordHasher, SaltString};
+use argon2::password_hash::PasswordHasher;
 use argon2::Argon2;
 
 /// Hash `password` into a PHC string (`$argon2id$v=19$m=…,t=…,p=…$salt$hash`).
@@ -26,9 +25,8 @@ pub fn hash(password: &str) -> Result<String> {
     if password.is_empty() {
         bail!("the password is empty");
     }
-    let salt = SaltString::generate(&mut OsRng);
     Ok(Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .map_err(|e| anyhow::anyhow!("{e}"))
         .context("hashing the password")?
         .to_string())
@@ -37,7 +35,7 @@ pub fn hash(password: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use argon2::password_hash::{PasswordHash, PasswordVerifier};
+    use argon2::password_hash::{phc::PasswordHash, PasswordVerifier};
 
     /// The round trip that matters: what this produces is what the sign-in path accepts.
     /// Verification here is spelled exactly as `verify_admin_password` spells it, so a
@@ -88,5 +86,15 @@ mod tests {
         let phc = hash(password).unwrap();
         assert_eq!(phc.matches("$argon2id$").count(), 1);
         assert!(verifies(&phc, password));
+    }
+
+    /// A hash made by the build before the crypto-crate upgrade. An operator's
+    /// `ON_PREM_ADMIN_PASSWORD_HASH` was made by whatever build they had then, and must keep
+    /// signing them in.
+    #[test]
+    fn hashes_from_earlier_builds_still_verify() {
+        const PHC: &str = "$argon2id$v=19$m=19456,t=2,p=1$xxBD+RMHsBLgEaVFCBigsA$bZXJZlJKlcy89Vg2+1xWP69hYgO8TBOS4gYwerHbMtE";
+        assert!(verifies(PHC, "correct horse battery staple"));
+        assert!(!verifies(PHC, "correct horse battery stapler"));
     }
 }

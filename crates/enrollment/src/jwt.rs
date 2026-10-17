@@ -142,4 +142,16 @@ mod tests {
         let token = encode_bootstrap(secret, &c);
         assert!(decode_bootstrap(secret, &token).is_err());
     }
+
+    /// A token minted by the build before the crypto-crate upgrade, valid until 2100. An
+    /// upgrade that stops reading it would void every enrollment token handed out before it.
+    #[test]
+    fn tokens_from_earlier_builds_still_decode() {
+        const TOKEN: &str = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJob3N0X2lkIjoiMDFKVEVTVEhPU1QwMDAwMDAwMDAwMDAwMDAwIiwidGVuYW50X2lkIjo3LCJub25jZSI6Im4wbmNlIiwiZXhwIjo0MTAyNDQ0ODAwLCJpYXQiOjE3NjAwMDAwMDAsImF1ZCI6Im5zY2xpZW50LWZsZWV0L2Vucm9sbCJ9.5W0-V8ZVX3awQC8wUn4FpQSwi0T2r5cJUmtgZe6oYyY";
+        let secret: Vec<u8> = (0..32).map(|i| i as u8 ^ 0x5a).collect();
+        let claims = decode_bootstrap(&secret, TOKEN).unwrap();
+        assert_eq!(claims.host_id, "01JTESTHOST0000000000000000");
+        assert_eq!(claims.tenant_id, 7);
+        assert_eq!(claims.nonce, "n0nce");
+    }
 }
