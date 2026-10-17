@@ -1,5 +1,5 @@
 // Client-side bundle zip build/read — the browser twin of the server's compose path
-// (`build_zip` / `read_zip_entries` in crates/server/src/bundles.rs). Keep the two in sync:
+// (`build_zip` / `read_zip_entries` in crates/server/src/bundles/archive.rs). Keep the two in sync:
 // a bundle is a zip of `bundle.toml` (manifest), `config.json` (merge-patch fragment), and
 // any other entries (scripts, assets) carried between versions unchanged.
 //
