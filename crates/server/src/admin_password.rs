@@ -14,8 +14,7 @@
 //! after the defaults move.
 
 use anyhow::{bail, Context, Result};
-use argon2::password_hash::rand_core::OsRng;
-use argon2::password_hash::{PasswordHasher, SaltString};
+use argon2::password_hash::PasswordHasher;
 use argon2::Argon2;
 
 /// Hash `password` into a PHC string (`$argon2id$v=19$m=…,t=…,p=…$salt$hash`).
@@ -26,9 +25,8 @@ pub fn hash(password: &str) -> Result<String> {
     if password.is_empty() {
         bail!("the password is empty");
     }
-    let salt = SaltString::generate(&mut OsRng);
     Ok(Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .map_err(|e| anyhow::anyhow!("{e}"))
         .context("hashing the password")?
         .to_string())
@@ -37,7 +35,7 @@ pub fn hash(password: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use argon2::password_hash::{PasswordHash, PasswordVerifier};
+    use argon2::password_hash::{phc::PasswordHash, PasswordVerifier};
 
     /// The round trip that matters: what this produces is what the sign-in path accepts.
     /// Verification here is spelled exactly as `verify_admin_password` spells it, so a

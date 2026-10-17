@@ -23,10 +23,11 @@
 //! The browser implementation in `web/src/crypto.ts` mirrors this construction exactly —
 //! keep the two in sync.
 
-use aes_gcm::aead::{Aead, KeyInit, OsRng, Payload};
+use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use rand::RngCore;
+use rand::rngs::SysRng;
+use rand::TryRng;
 use sha2::{Digest, Sha256};
 
 /// First bytes of every encrypted bundle. Version the format by bumping the digit.
@@ -65,7 +66,7 @@ pub struct BundleKey([u8; 32]);
 impl BundleKey {
     pub fn generate() -> Self {
         let mut bytes = [0u8; 32];
-        OsRng.fill_bytes(&mut bytes);
+        SysRng.try_fill_bytes(&mut bytes).expect("OS RNG");
         Self(bytes)
     }
 
@@ -97,13 +98,13 @@ impl BundleKey {
     /// Encrypt a bundle zip. `name`/`version` are bound into the AAD and must match what
     /// the server later advertises for this bundle, or agents will refuse it.
     pub fn encrypt(&self, name: &str, version: &str, plaintext: &[u8]) -> Vec<u8> {
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&self.0));
+        let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(self.0));
         let mut nonce_bytes = [0u8; NONCE_LEN];
-        OsRng.fill_bytes(&mut nonce_bytes);
+        SysRng.try_fill_bytes(&mut nonce_bytes).expect("OS RNG");
         let aad = aad_for(name, version);
         let ct = cipher
             .encrypt(
-                Nonce::from_slice(&nonce_bytes),
+                &Nonce::from(nonce_bytes),
                 Payload {
                     msg: plaintext,
                     aad: &aad,
@@ -129,11 +130,11 @@ impl BundleKey {
         if header.fingerprint != self.fingerprint() {
             return Err(EncBundleError::WrongKey);
         }
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&self.0));
+        let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(self.0));
         let aad = aad_for(name, version);
         cipher
             .decrypt(
-                Nonce::from_slice(&header.nonce),
+                &Nonce::from(header.nonce),
                 Payload {
                     msg: &blob[HEADER_LEN..],
                     aad: &aad,

@@ -63,13 +63,12 @@ pub fn sign_client_cert(
     params.serial_number = Some(rcgen::SerialNumber::from_slice(&serial_bytes));
 
     let ca_key = KeyPair::from_pem(ca_key_pem).map_err(|e| SignError::CaLoad(e.to_string()))?;
-    let ca_params = CertificateParams::from_ca_cert_pem(ca_cert_pem)
+    let issuer = rcgen::Issuer::from_ca_cert_pem(ca_cert_pem, &ca_key)
         .map_err(|e| SignError::CaLoad(e.to_string()))?;
-    let ca_cert = ca_params.self_signed(&ca_key)?;
 
     let not_before_unix = params.not_before.unix_timestamp();
     let not_after_unix = params.not_after.unix_timestamp();
-    let cert = params.signed_by(&public_key, &ca_cert, &ca_key)?;
+    let cert = params.signed_by(&public_key, &issuer)?;
 
     let cert_pem = cert.pem();
     let der = cert.der();
@@ -98,7 +97,7 @@ pub fn sign_client_cert(
 /// Without the non-zero constraint this hit 1 in 128 issued certificates.
 fn random_serial() -> [u8; 16] {
     let mut bytes = [0u8; 16];
-    rand::Rng::fill(&mut rand::thread_rng(), &mut bytes);
+    rand::Rng::fill_bytes(&mut rand::rng(), &mut bytes);
     bytes[0] = (bytes[0] & 0x7f) | 0x01;
     bytes
 }

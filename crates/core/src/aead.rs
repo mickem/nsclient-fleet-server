@@ -11,11 +11,12 @@
 //! one, so a new call site has to say what it is encrypting and cannot inherit a blank.
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use chacha20poly1305::aead::{Aead, KeyInit, OsRng, Payload};
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use hkdf::Hkdf;
 use hmac::{Mac, SimpleHmac};
-use rand::RngCore;
+use rand::rngs::SysRng;
+use rand::TryRng;
 use sha2::Sha256;
 
 #[derive(Debug, thiserror::Error)]
@@ -92,13 +93,13 @@ impl MasterKey {
         if bytes.len() != 32 {
             return Err(AeadError::KeyLength(bytes.len()));
         }
-        let key = Key::clone_from_slice(&bytes);
+        let key = Key::try_from(bytes.as_slice()).expect("length checked above");
         Ok(Self(key))
     }
 
     pub fn generate_b64() -> String {
         let mut bytes = [0u8; 32];
-        OsRng.fill_bytes(&mut bytes);
+        SysRng.try_fill_bytes(&mut bytes).expect("OS RNG");
         STANDARD.encode(bytes)
     }
 
@@ -107,8 +108,8 @@ impl MasterKey {
     pub fn encrypt(&self, purpose: Purpose<'_>, plaintext: &[u8]) -> Vec<u8> {
         let cipher = ChaCha20Poly1305::new(&self.0);
         let mut nonce_bytes = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        SysRng.try_fill_bytes(&mut nonce_bytes).expect("OS RNG");
+        let nonce = &Nonce::from(nonce_bytes);
         let aad = purpose.aad();
         let ct = cipher
             .encrypt(
@@ -159,7 +160,7 @@ impl MasterKey {
     /// — a password in a host override, say — is an offline guessing oracle for anyone who
     /// can read the hash, and the hash is served to every role.
     pub fn mac(&self, info: &str, data: &[u8]) -> [u8; 32] {
-        let mut m = <SimpleHmac<Sha256> as Mac>::new_from_slice(&self.derive_subkey(info))
+        let mut m = <SimpleHmac<Sha256> as KeyInit>::new_from_slice(&self.derive_subkey(info))
             .expect("HMAC accepts a 32-byte key");
         m.update(data);
         m.finalize().into_bytes().into()
@@ -170,7 +171,7 @@ impl MasterKey {
             return Err(AeadError::Truncated);
         }
         let cipher = ChaCha20Poly1305::new(&self.0);
-        let nonce = Nonce::from_slice(&blob[..12]);
+        let nonce = &Nonce::try_from(&blob[..12]).expect("length checked above");
         cipher
             .decrypt(
                 nonce,
@@ -292,7 +293,7 @@ mod tests {
             let cipher = ChaCha20Poly1305::new(&key.0);
             let nonce_bytes = [7u8; 12];
             let ct = cipher
-                .encrypt(Nonce::from_slice(&nonce_bytes), b"old secret".as_ref())
+                .encrypt(&Nonce::from(nonce_bytes), b"old secret".as_ref())
                 .unwrap();
             let mut out = nonce_bytes.to_vec();
             out.extend_from_slice(&ct);

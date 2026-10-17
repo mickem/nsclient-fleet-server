@@ -29,17 +29,17 @@ thiserror = "2"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 ulid = "3"
 tempfile = "3"
-rand = "0.8"
-sha2 = "0.10"
+rand = "0.10"
+sha2 = "0.11"
 base64 = "0.23"
-rcgen = { version = "0.13", features = ["x509-parser"] }
-ed25519-dalek = { version = "2", features = ["rand_core", "pem"] }
-chacha20poly1305 = "0.10"
-aes-gcm = "0.10"
-jsonwebtoken = "9"
+rcgen = { version = "0.14", features = ["x509-parser"] }
+ed25519-dalek = { version = "3", features = ["rand_core", "pem"] }
+chacha20poly1305 = "0.11"
+aes-gcm = "0.11"
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 rustls = "0.23"
 tokio-rustls = "0.26"
-x509-parser = "0.16"
+x509-parser = "0.18"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 rustls-acme = { version = "0.15", default-features = false, features = ["tokio", "aws-lc-rs", "webpki-roots"] }

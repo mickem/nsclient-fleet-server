@@ -33,7 +33,7 @@ base64.workspace = true
 zip.workspace = true
 
 axum-extra = { version = "0.12", features = ["cookie"] }
-argon2 = "0.5"
+argon2 = "0.6"
 # Reading the on-prem admin password for --hash-password without echoing it, and without
 # it landing in shell history the way an argument would.
 rpassword = "7"

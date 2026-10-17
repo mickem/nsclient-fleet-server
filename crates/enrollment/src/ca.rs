@@ -1,6 +1,7 @@
 use anyhow::Result;
 use ed25519_dalek::SigningKey;
-use rand::rngs::OsRng;
+use rand::rand_core::UnwrapErr;
+use rand::rngs::SysRng;
 use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, KeyUsagePurpose};
 
 pub struct TenantCa {
@@ -38,7 +39,7 @@ pub fn generate_tenant_ca(slug: &str) -> Result<TenantSecrets> {
     let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
     let cert = params.self_signed(&key_pair)?;
 
-    let mut signing_csprng = OsRng;
+    let mut signing_csprng = UnwrapErr(SysRng);
     let bundle_key = SigningKey::generate(&mut signing_csprng);
     let bundle_key_pem = ed25519_pkcs8_pem(&bundle_key);
     let bundle_pub_pem = ed25519_spki_pem(&bundle_key);
