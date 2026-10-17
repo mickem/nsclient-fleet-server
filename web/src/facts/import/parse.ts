@@ -304,7 +304,7 @@ export function readTable(text: string, opts: ReadOptions): ReadResult {
 
 // --- mapping ---------------------------------------------------------------------------
 
-/** Longest fact path a selector stores (`MAX_FACT_PATH_LEN` in crates/core/src/selector.rs). */
+/** Longest fact path a selector stores (`MAX_FACT_PATH_LEN` in crates/core/src/selector/path.rs). */
 export const MAX_TARGET_LEN = 512;
 
 /** Why `path` cannot name a column in the stored document, or null when it can.
