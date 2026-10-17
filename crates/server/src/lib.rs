@@ -227,11 +227,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hosts/bulk-delete", post(hosts::bulk_delete))
         .route("/api/hosts/bulk-tags", post(hosts::bulk_tags))
         .route(
-            "/api/hosts/:id",
+            "/api/hosts/{id}",
             get(hosts::detail).delete(hosts::delete_host),
         )
-        .route("/api/hosts/:id/desired", get(hosts::desired))
-        .route("/api/hosts/:id/facts", get(facts::host_facts))
+        .route("/api/hosts/{id}/desired", get(hosts::desired))
+        .route("/api/hosts/{id}/facts", get(facts::host_facts))
         .route("/api/facts/catalog", get(facts::catalog))
         // An import carries up to 10 000 documents in one body: these two routes get their
         // own limit rather than raising axum's 2 MiB default for every JSON route.
@@ -248,54 +248,54 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
-            "/api/facts/sources/:source",
+            "/api/facts/sources/{source}",
             axum::routing::delete(facts_import::delete_source),
         )
         .route(
-            "/api/hosts/:id/facts/:source",
+            "/api/hosts/{id}/facts/{source}",
             axum::routing::delete(facts_import::delete_host_source),
         )
         .route(
-            "/api/hosts/:id/revoke-certs",
+            "/api/hosts/{id}/revoke-certs",
             post(hosts::revoke_host_certs),
         )
         .route(
-            "/api/hosts/:id/tags/:key",
+            "/api/hosts/{id}/tags/{key}",
             axum::routing::put(config_api::put_tag),
         )
         .route(
-            "/api/hosts/:id/tags/:key",
+            "/api/hosts/{id}/tags/{key}",
             axum::routing::delete(config_api::delete_tag),
         )
         .route(
-            "/api/hosts/:id/override",
+            "/api/hosts/{id}/override",
             axum::routing::put(config_api::put_override).get(config_api::get_override),
         )
         .route(
-            "/api/hosts/:id/override/shape",
+            "/api/hosts/{id}/override/shape",
             get(config_api::get_override_shape),
         )
         .route(
-            "/api/hosts/:id/override",
+            "/api/hosts/{id}/override",
             axum::routing::delete(config_api::delete_override),
         )
         .route("/api/groups", get(config_api::list_groups))
         .route("/api/groups", post(config_api::create_group))
         .route(
-            "/api/groups/:id",
+            "/api/groups/{id}",
             axum::routing::patch(config_api::patch_group),
         )
         .route(
-            "/api/groups/:id",
+            "/api/groups/{id}",
             axum::routing::delete(config_api::delete_group),
         )
         .route("/api/groups/preview", post(config_api::preview_selector))
         .route(
-            "/api/groups/:id/bundles",
+            "/api/groups/{id}/bundles",
             get(bundles::list_for_group).post(bundles::assign_to_group),
         )
         .route(
-            "/api/groups/:id/bundles/:bundle_id",
+            "/api/groups/{id}/bundles/{bundle_id}",
             axum::routing::delete(bundles::unassign_from_group),
         )
         // The body limit is scoped to this one route on purpose. axum's 2 MiB default
@@ -318,23 +318,26 @@ pub fn router(state: AppState) -> Router {
         // One re-sealed encrypted version per request. The handler bounds the body by the
         // size of the version it replaces; this is the ceiling no version can exceed.
         .route(
-            "/api/bundles/:id/reseal",
+            "/api/bundles/{id}/reseal",
             post(bundles::stage_reseal).layer(axum::extract::DefaultBodyLimit::max(
                 fleet_core::tier::MAX_BUNDLE_MB_ANY_TIER as usize * 1024 * 1024,
             )),
         )
         .route(
-            "/api/bundles/:id",
+            "/api/bundles/{id}",
             axum::routing::delete(bundles::delete_bundle),
         )
-        .route("/api/bundles/:id/config", get(bundles::get_config))
-        .route("/api/bundles/:id/download", get(bundles::ui_download))
+        .route("/api/bundles/{id}/config", get(bundles::get_config))
+        .route("/api/bundles/{id}/download", get(bundles::ui_download))
         .route("/api/audit", get(audit::list))
         .route("/api/keys", get(api_keys::list).post(api_keys::create))
-        .route("/api/keys/:id", axum::routing::delete(api_keys::delete_key))
+        .route(
+            "/api/keys/{id}",
+            axum::routing::delete(api_keys::delete_key),
+        )
         .route("/api/users", get(users::list).post(users::invite))
         .route(
-            "/api/users/:id",
+            "/api/users/{id}",
             axum::routing::patch(users::set_role).delete(users::delete_user),
         )
         // Anonymous: the sign-in page asks whether signup is open before it can offer it.
@@ -346,15 +349,15 @@ pub fn router(state: AppState) -> Router {
             get(platform::list_tenants).post(platform::create_tenant),
         )
         .route(
-            "/api/platform/tenants/:id/subscription",
+            "/api/platform/tenants/{id}/subscription",
             axum::routing::put(platform::put_subscription),
         )
         .route(
-            "/api/platform/tenants/:id/users",
+            "/api/platform/tenants/{id}/users",
             get(platform::list_tenant_users),
         )
         .route(
-            "/api/platform/users/:id",
+            "/api/platform/users/{id}",
             axum::routing::patch(platform::update_user).delete(platform::delete_user),
         )
         .route("/api/platform/tiers", get(platform::list_tiers))
@@ -394,7 +397,7 @@ pub fn mtls_router(state: AppState) -> Router {
         .route("/agent/v1/desired-state", get(agent_api::desired_state))
         .route("/agent/v1/state-report", post(agent_api::state_report))
         .route("/agent/v1/renew", post(agent_api::renew))
-        .route("/agent/v1/bundles/:id", get(bundles::download))
+        .route("/agent/v1/bundles/{id}", get(bundles::download))
         // The handler reads the body itself, capped at `MAX_FACTS_BODY_BYTES`: the document
         // can legitimately exceed axum's 2 MiB default, and an oversized one has to reach
         // the handler for its refusal to be recorded.

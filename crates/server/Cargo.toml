@@ -32,7 +32,7 @@ rand.workspace = true
 base64.workspace = true
 zip.workspace = true
 
-axum-extra = { version = "0.9", features = ["cookie"] }
+axum-extra = { version = "0.12", features = ["cookie"] }
 argon2 = "0.5"
 # Reading the on-prem admin password for --hash-password without echoing it, and without
 # it landing in shell history the way an argument would.
@@ -46,7 +46,7 @@ governor = "0.10"
 # itself uses, or its state-store impl would be for a different type.
 dashmap = "6"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "cookies", "multipart"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form", "cookies", "multipart"] }
 url = "2"
 time = "0.3"
 rustls.workspace = true

@@ -858,10 +858,11 @@ async fn deleting_a_host_deletes_its_facts() {
         .unwrap();
     assert!(r.status().is_success(), "{}", r.status());
     for table in ["host_facts", "host_fact_changes"] {
-        let n: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
-            .fetch_one(&s.db.read)
-            .await
-            .unwrap();
+        let n: i64 =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT COUNT(*) FROM {table}")))
+                .fetch_one(&s.db.read)
+                .await
+                .unwrap();
         assert_eq!(n, 0, "{table}");
     }
 }

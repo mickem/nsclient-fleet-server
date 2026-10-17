@@ -117,7 +117,6 @@ fn bearer_token(req: &Request<Body>) -> Option<String> {
     }
 }
 
-#[axum::async_trait]
 impl<S> axum::extract::FromRequestParts<S> for AuthedUser
 where
     S: Send + Sync,
