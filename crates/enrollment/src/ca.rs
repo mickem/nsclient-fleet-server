@@ -99,7 +99,7 @@ mod tests {
         let key =
             SigningKey::from_pkcs8_pem(include_str!("../testdata/kat/bundle-signing.key")).unwrap();
         let sig = key.sign(MESSAGE).to_bytes();
-        assert_eq!(fleet_core::digest::hex(&sig), SIGNATURE);
+        assert_eq!(fleet_core::crypto::digest::hex(&sig), SIGNATURE);
 
         let public =
             VerifyingKey::from_public_key_pem(include_str!("../testdata/kat/bundle-signing.pub"))

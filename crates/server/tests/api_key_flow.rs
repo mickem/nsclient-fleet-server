@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use fleet_core::aead::MasterKey;
+use fleet_core::crypto::aead::MasterKey;
 use fleet_core::user::Role;
 use fleet_storage::{ApiKeyRepo, Db, SessionRepo, TenantRepo, UserRepo};
 use tempfile::TempDir;
@@ -133,7 +133,7 @@ fn test_config(db_path: PathBuf) -> fleet_server::runtime::config::Config {
 }
 
 fn hash_token(token: &str) -> String {
-    fleet_core::digest::sha256_hex(token.as_bytes())
+    fleet_core::crypto::digest::sha256_hex(token.as_bytes())
 }
 
 /// A user of the given role, plus a client already holding their session cookie.

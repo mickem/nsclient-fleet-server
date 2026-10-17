@@ -7,7 +7,7 @@ mod common;
 
 use common::{signup_login, start, TestServer};
 
-use fleet_core::encbundle::BundleKey;
+use fleet_core::crypto::encbundle::BundleKey;
 
 async fn enroll_a_host(s: &TestServer) -> (fleet_agent_sim::EnrolledAgent, String) {
     let r = s
@@ -97,7 +97,7 @@ async fn encrypted_bundle_end_to_end() {
     assert_eq!(bundle["format"], "enc-v1");
     assert_eq!(bundle["key_fingerprint"], key.fingerprint_hex().as_str());
     // The sha256 the server signs is over the ciphertext.
-    let ct_sha = fleet_core::digest::sha256_hex(&blob);
+    let ct_sha = fleet_core::crypto::digest::sha256_hex(&blob);
     assert_eq!(expected_sha, ct_sha);
 
     // 4. The server cannot read it: config extraction and compose-from refuse.

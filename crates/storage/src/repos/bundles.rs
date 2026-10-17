@@ -14,7 +14,7 @@ pub struct BundleRow {
     pub size_bytes: i64,
     pub signature: String,
     pub uploaded_at: i64,
-    /// 'plain' or 'enc-v1' (see `fleet_core::encbundle`).
+    /// 'plain' or 'enc-v1' (see `fleet_core::crypto::encbundle`).
     pub format: String,
     /// Hex fingerprint of the client-held encryption key; `None` for plain bundles.
     pub key_fingerprint: Option<String>,
@@ -35,7 +35,7 @@ impl<'a> BundlesRepo<'a> {
     /// The id used to be generated here, which meant the signature could not cover it — it
     /// did not exist until after the row did. A signature that says nothing about which
     /// bundle it is for is most of the reason v1 signatures were worth so little; see
-    /// [`fleet_core::bundlesig`].
+    /// [`fleet_core::crypto::bundlesig`].
     #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,

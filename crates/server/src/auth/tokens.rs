@@ -10,7 +10,7 @@ pub fn random_token() -> String {
 
 /// SHA-256 of a token, hex-encoded for stable string storage.
 pub fn hash_token(token: &str) -> String {
-    fleet_core::digest::sha256_hex(token.as_bytes())
+    fleet_core::crypto::digest::sha256_hex(token.as_bytes())
 }
 
 #[cfg(test)]

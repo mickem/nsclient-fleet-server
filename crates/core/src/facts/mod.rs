@@ -17,11 +17,13 @@
 //! document rules require one, unique and stable) so that "this package appeared" reads as
 //! one added record rather than a list that shifted by one.
 
+pub mod import;
+
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 
-pub use crate::digest::sha256_hex;
+pub use crate::crypto::digest::sha256_hex;
 use std::collections::{BTreeSet, HashMap};
 
 use crate::selector::FactPath;

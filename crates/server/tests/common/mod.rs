@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use fleet_core::aead::MasterKey;
+use fleet_core::crypto::aead::MasterKey;
 use fleet_storage::Db;
 use tempfile::TempDir;
 
@@ -191,7 +191,7 @@ pub async fn signup_login(s: &TestServer, slug: &str, email: &str) {
     let t = tenants.get_by_slug(slug).await.unwrap().unwrap();
     let u = users.find_by_email(email).await.unwrap().unwrap();
     let token = format!("magic-{slug}-XXXXXXXX");
-    let hash = fleet_core::digest::sha256_hex(token.as_bytes());
+    let hash = fleet_core::crypto::digest::sha256_hex(token.as_bytes());
     links
         .create(&hash, t.id, u.id, fleet_core::time::now_unix() + 600)
         .await

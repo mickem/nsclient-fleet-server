@@ -408,7 +408,7 @@ pub async fn renew(
     };
 
     let ca_key_pem = match state.config.master_key.decrypt(
-        fleet_core::aead::Purpose::TenantCaKey {
+        fleet_core::crypto::aead::Purpose::TenantCaKey {
             tenant_id: ctx.tenant_id,
         },
         &secrets.ca_key_encrypted,

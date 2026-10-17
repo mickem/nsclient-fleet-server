@@ -398,11 +398,11 @@ mod tests {
     fn derived_subkeys_and_macs_do_not_move() {
         let key = MasterKey::from_b64(KAT_MASTER_KEY).unwrap();
         assert_eq!(
-            crate::digest::hex(&key.derive_subkey("bootstrap-jwt/v1")),
+            crate::crypto::digest::hex(&key.derive_subkey("bootstrap-jwt/v1")),
             "3fcb13fd54513444948162f16243c9e6c237a64acf8eb9238f1f32856eb84da4"
         );
         assert_eq!(
-            crate::digest::hex(&key.mac("override-hash/v1", b"hello")),
+            crate::crypto::digest::hex(&key.mac("override-hash/v1", b"hello")),
             "f8915aefa0a406492510ba96884ff1e039025c05be4882537fd52fc5fd2bcc61"
         );
     }

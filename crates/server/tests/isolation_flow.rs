@@ -31,7 +31,7 @@ async fn signup_and_login(s: &TestServer, c: &reqwest::Client, slug: &str, email
     let t = tenants.get_by_slug(slug).await.unwrap().unwrap();
     let u = users.find_by_email(email).await.unwrap().unwrap();
     let token = format!("magic-{slug}-XXXXXXXX");
-    let hash = fleet_core::digest::sha256_hex(token.as_bytes());
+    let hash = fleet_core::crypto::digest::sha256_hex(token.as_bytes());
     links
         .create(&hash, t.id, u.id, fleet_core::time::now_unix() + 600)
         .await

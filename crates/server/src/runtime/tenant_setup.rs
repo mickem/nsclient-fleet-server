@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use fleet_core::aead::Purpose;
+use fleet_core::crypto::aead::Purpose;
 use fleet_core::tenant::Tenant;
 use fleet_enrollment::generate_tenant_ca;
 use fleet_storage::{Db, HostOverridesRepo, TenantRepo, TenantSecretsRepo};
@@ -159,7 +159,7 @@ pub async fn resign_bundles(state: &AppState, db: &Db) -> Result<()> {
     let mut resigned = 0usize;
 
     for row in bundles.list_all().await? {
-        let descriptor = fleet_core::bundlesig::BundleDescriptor {
+        let descriptor = fleet_core::crypto::bundlesig::BundleDescriptor {
             tenant_id: row.tenant_id,
             bundle_id: &row.id,
             name: &row.name,

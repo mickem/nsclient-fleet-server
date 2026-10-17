@@ -352,7 +352,7 @@ pub async fn compute_uncached(
                 .config
                 .master_key
                 .decrypt(
-                    fleet_core::aead::Purpose::HostOverride { tenant_id, host_id },
+                    fleet_core::crypto::aead::Purpose::HostOverride { tenant_id, host_id },
                     &o.patch_encrypted,
                 )
                 .map_err(|e| anyhow!("override decrypt: {e}"))?;

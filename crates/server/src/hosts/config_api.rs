@@ -437,7 +437,7 @@ pub async fn put_override(
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid patch").into_response(),
     };
     let encrypted = state.config.master_key.encrypt(
-        fleet_core::aead::Purpose::HostOverride {
+        fleet_core::crypto::aead::Purpose::HostOverride {
             tenant_id: who.tenant_id,
             host_id: &host_id,
         },
@@ -512,7 +512,7 @@ async fn load_override(
         .config
         .master_key
         .decrypt(
-            fleet_core::aead::Purpose::HostOverride { tenant_id, host_id },
+            fleet_core::crypto::aead::Purpose::HostOverride { tenant_id, host_id },
             &stored.patch_encrypted,
         )
         .ok()

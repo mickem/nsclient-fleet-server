@@ -109,7 +109,7 @@ async fn end_to_end_tag_group_bundle_assign_and_fetch() {
 
     // ...and the download endpoint agrees, rather than relying on the poll alone to keep
     // the host away from the bytes.
-    let claimed = fleet_core::bundlesig::BundleDescriptor {
+    let claimed = fleet_core::crypto::bundlesig::BundleDescriptor {
         tenant_id: ds2.tenant_id,
         bundle_id: &bundle_id,
         name: "sql-monitoring",
@@ -621,7 +621,7 @@ async fn a_bundle_signature_does_not_transfer_to_another_identity() {
             .await
             .unwrap();
 
-    let verify = |d: fleet_core::bundlesig::BundleDescriptor<'_>| -> bool {
+    let verify = |d: fleet_core::crypto::bundlesig::BundleDescriptor<'_>| -> bool {
         use base64::{engine::general_purpose::STANDARD, Engine as _};
         use ed25519_dalek::pkcs8::DecodePublicKey;
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -630,7 +630,7 @@ async fn a_bundle_signature_does_not_transfer_to_another_identity() {
         vk.verify(&d.to_signing_bytes(), &sig).is_ok()
     };
 
-    let real = fleet_core::bundlesig::BundleDescriptor {
+    let real = fleet_core::crypto::bundlesig::BundleDescriptor {
         tenant_id: 1,
         bundle_id: &id,
         name: "checks",
@@ -645,23 +645,23 @@ async fn a_bundle_signature_does_not_transfer_to_another_identity() {
 
     // Same bytes, same signature, a different claim about what they are.
     for forged in [
-        fleet_core::bundlesig::BundleDescriptor {
+        fleet_core::crypto::bundlesig::BundleDescriptor {
             name: "secrets",
             ..real
         },
-        fleet_core::bundlesig::BundleDescriptor {
+        fleet_core::crypto::bundlesig::BundleDescriptor {
             version: "9.9.9",
             ..real
         },
-        fleet_core::bundlesig::BundleDescriptor {
+        fleet_core::crypto::bundlesig::BundleDescriptor {
             bundle_id: "01JSOMETHINGELSE",
             ..real
         },
-        fleet_core::bundlesig::BundleDescriptor {
+        fleet_core::crypto::bundlesig::BundleDescriptor {
             format: "enc-v1",
             ..real
         },
-        fleet_core::bundlesig::BundleDescriptor {
+        fleet_core::crypto::bundlesig::BundleDescriptor {
             tenant_id: 2,
             ..real
         },

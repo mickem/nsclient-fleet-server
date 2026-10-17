@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use fleet_core::aead::MasterKey;
+use fleet_core::crypto::aead::MasterKey;
 use fleet_storage::{Db, MagicLinkRepo, TenantRepo, UserRepo};
 use tempfile::TempDir;
 
@@ -170,7 +170,7 @@ fn extract_csrf(html: &str) -> String {
 }
 
 fn hash_token(token: &str) -> String {
-    fleet_core::digest::sha256_hex(token.as_bytes())
+    fleet_core::crypto::digest::sha256_hex(token.as_bytes())
 }
 
 /// Every response carries the headers, including the SPA fallback — which is served by
