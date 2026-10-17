@@ -20,7 +20,7 @@
 //!   for the bundle; a server substituting one validly-encrypted bundle for another fails
 //!   authentication.
 //!
-//! The browser implementation in `web/src/crypto.ts` mirrors this construction exactly —
+//! The browser implementation in `web/src/bundles/crypto.ts` mirrors this construction exactly —
 //! keep the two in sync.
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
@@ -278,7 +278,7 @@ mod tests {
         ));
     }
 
-    /// Interop pin: a fixed key/nonce/AAD vector that `web/src/crypto.ts` must also
+    /// Interop pin: a fixed key/nonce/AAD vector that `web/src/bundles/crypto.ts` must also
     /// produce. If this test ever needs updating, the browser side changed too.
     #[test]
     fn fixed_vector_decrypts() {

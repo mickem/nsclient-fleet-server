@@ -451,7 +451,7 @@ pub struct ComposeBody {
     pub template: Option<String>,
 }
 
-/// The bundle.toml the compose paths (server here, browser in web/src/bundlezip.ts) write.
+/// The bundle.toml the compose paths (server here, browser in web/src/bundles/bundlezip.ts) write.
 /// All values are token-validated before this is called, so the quoting cannot be broken.
 fn manifest_toml(name: &str, version: &str, template: Option<&str>) -> String {
     let mut m = format!("name = \"{name}\"\nversion = \"{version}\"\nschema_version = 1\n");

@@ -4,22 +4,22 @@ import { ThemeProvider } from "@mui/material/styles";
 import { BrowserRouter, Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { theme } from "./theme";
 import { canManageUsers, canWriteConfig, Me, PublicConfig, TRIAL_EXPIRED_EVENT } from "./api";
-import { Login } from "./Login";
-import { Signup } from "./Signup";
-import { Dashboard } from "./Dashboard";
-import { HostsPage } from "./HostsPage";
-import { HostDetailPage } from "./HostDetailPage";
-import { GroupsPage } from "./GroupsPage";
-import { BundlesPage } from "./BundlesPage";
-import { AuditPage } from "./AuditPage";
-import { UsersPage } from "./UsersPage";
-import { ApiKeysPage } from "./ApiKeysPage";
-import { PlatformPage } from "./PlatformPage";
-import { TrialExpiredPage } from "./TrialExpiredPage";
+import { Login } from "./auth/Login";
+import { Signup } from "./auth/Signup";
+import { Dashboard } from "./layout/Dashboard";
+import { HostsPage } from "./hosts/HostsPage";
+import { HostDetailPage } from "./hosts/HostDetailPage";
+import { GroupsPage } from "./groups/GroupsPage";
+import { BundlesPage } from "./bundles/BundlesPage";
+import { AuditPage } from "./admin/AuditPage";
+import { UsersPage } from "./admin/UsersPage";
+import { ApiKeysPage } from "./admin/ApiKeysPage";
+import { PlatformPage } from "./admin/PlatformPage";
+import { TrialExpiredPage } from "./auth/TrialExpiredPage";
 
 // Loaded on first use: the wizard brings a YAML parser most sessions never need.
 const ImportFactsPage = lazy(() =>
-  import("./ImportFactsPage").then((m) => ({ default: m.ImportFactsPage })),
+  import("./facts/ImportFactsPage").then((m) => ({ default: m.ImportFactsPage })),
 );
 
 /** Routes for a signed-in session. Role-gated pages are not registered at all for roles
