@@ -138,11 +138,17 @@ export function HostDetailPage({ me }: Props) {
 
   return (
     <Box>
-      <Stack direction="row" alignItems="center" spacing={2} sx={{ mb: 1 }}>
+      <Stack
+        direction="row"
+        spacing={2}
+        sx={{ alignItems: "center", mb: 1 }}>
         <Button startIcon={<ArrowBackIcon />} onClick={onBack}>
           Hosts
         </Button>
-        <Stack direction="row" alignItems="center" spacing={1} sx={{ flexGrow: 1 }}>
+        <Stack
+          direction="row"
+          spacing={1}
+          sx={{ alignItems: "center", flexGrow: 1 }}>
           <Typography variant="h4">{host.hostname ?? host.id}</Typography>
           <HostStatusChip host={host} />
         </Stack>
@@ -204,7 +210,9 @@ export function HostDetailPage({ me }: Props) {
           Refresh failed — showing the last loaded state. {error}
         </Alert>
       )}
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+      <Typography
+        variant="body2"
+        sx={{ color: "text.secondary", mb: 2 }}>
         <code>{host.id}</code> · {host.os ?? "unknown os"} · {enrollmentSummary(host)} · last seen{" "}
         {fmtAgo(host.last_seen_at)}
       </Typography>
@@ -263,14 +271,19 @@ export function HostDetailPage({ me }: Props) {
 function DesiredCard({ host, desired }: { host: HostDetail; desired: DesiredStateView | null }) {
   const localConfig =
     host.local_config_present === true ? (
-      <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 1 }}>
+      <Stack
+        direction="row"
+        spacing={1}
+        sx={{ alignItems: "center", mt: 1 }}>
         <LocalConfigChip host={host} />
-        <Typography variant="caption" color="text.secondary">
+        <Typography variant="caption" sx={{ color: "text.secondary" }}>
           Local settings on the host take precedence over what is shown here.
         </Typography>
       </Stack>
     ) : (
-      <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
+      <Typography
+        variant="caption"
+        sx={{ color: "text.secondary", display: "block", mt: 1 }}>
         {host.local_config_present === false
           ? "No local configuration — this host is entirely fleet-managed."
           : "Local configuration: not reported by this agent."}
@@ -287,19 +300,19 @@ function DesiredCard({ host, desired }: { host: HostDetail; desired: DesiredStat
           <Typography>Loading…</Typography>
         ) : (
           <>
-            <Stack direction="row" spacing={1} alignItems="center">
+            <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
               {desired.in_sync ? (
                 <Chip label="In sync" color="success" size="small" />
               ) : (
                 <Chip label="Out of sync" color="warning" size="small" />
               )}
-              <Typography variant="caption" color="text.secondary">
+              <Typography variant="caption" sx={{ color: "text.secondary" }}>
                 desired hash <code>{desired.state_hash.slice(0, 12)}…</code>
               </Typography>
             </Stack>
             <Box sx={{ mb: 2 }}>{localConfig}</Box>
             {desired.bundles.length === 0 ? (
-              <Typography variant="body2" color="text.secondary">
+              <Typography variant="body2" sx={{ color: "text.secondary" }}>
                 No bundles apply to this host — it matches no group with assignments.
               </Typography>
             ) : (
@@ -386,7 +399,7 @@ function TagsCard({
         )}
         <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap", mb: 2 }}>
           {host.tags.length === 0 && (
-            <Typography variant="body2" color="text.secondary">
+            <Typography variant="body2" sx={{ color: "text.secondary" }}>
               No tags.
             </Typography>
           )}
@@ -432,7 +445,7 @@ function TagsCard({
           </Button>
         </Stack>
         )}
-        <Typography variant="caption" color="text.secondary">
+        <Typography variant="caption" sx={{ color: "text.secondary" }}>
           Outlined chips are agent-reported (read-only); solid chips are manual.
         </Typography>
       </CardContent>

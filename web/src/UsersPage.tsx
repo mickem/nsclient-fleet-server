@@ -52,11 +52,15 @@ export function UsersPage({ me }: { me: Me }) {
 
   return (
     <Box>
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
+      <Stack
+        direction="row"
+        sx={{ justifyContent: "space-between", alignItems: "center", mb: 1 }}>
         <Typography variant="h4">Users</Typography>
         <RefreshButton refreshing={refreshing} onClick={refresh} />
       </Stack>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+      <Typography
+        variant="body2"
+        sx={{ color: "text.secondary", mb: 2 }}>
         Everyone here signs in with a magic link sent to their address. An invitation creates
         the account and emails that link — it is not shown here, so the invitee is the only
         one who can use it.
@@ -225,7 +229,11 @@ function InviteCard({ onInvited }: { onInvited: () => void }) {
             Invitation sent to {sentTo}. They'll receive an email with a sign-in link.
           </Alert>
         )}
-        <Stack direction="row" spacing={1} alignItems="center" useFlexGap sx={{ flexWrap: "wrap" }}>
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ alignItems: "center", flexWrap: "wrap" }}>
           <TextField
             size="small"
             label="Email"
@@ -251,7 +259,7 @@ function InviteCard({ onInvited }: { onInvited: () => void }) {
             {busy ? "Sending…" : "Send invitation"}
           </Button>
         </Stack>
-        <Typography variant="caption" color="text.secondary">
+        <Typography variant="caption" sx={{ color: "text.secondary" }}>
           {ROLE_DESCRIPTIONS[role]}
         </Typography>
       </CardContent>

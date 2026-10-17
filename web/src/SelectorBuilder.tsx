@@ -154,11 +154,14 @@ function TagAutocomplete({
         const { key, ...rest } = props as typeof props & { key?: string };
         return (
           <li key={key ?? option} {...rest}>
-            <Stack direction="row" spacing={1} alignItems="baseline" sx={{ width: "100%" }}>
+            <Stack
+              direction="row"
+              spacing={1}
+              sx={{ alignItems: "baseline", width: "100%" }}>
               <Typography component="span" sx={{ fontFamily: "monospace" }}>
                 {option}
               </Typography>
-              <Typography component="span" variant="caption" color="text.secondary">
+              <Typography component="span" variant="caption" sx={{ color: "text.secondary" }}>
                 {[note?.(option), hostCount(counts.get(option) ?? 0)].filter(Boolean).join(" · ")}
               </Typography>
             </Stack>
@@ -462,7 +465,11 @@ export function ExprEditor({ expr, onChange, onRemove, known, facts }: ExprProps
 
     return (
       <Stack spacing={0.5}>
-        <Stack direction="row" spacing={1} alignItems="center" useFlexGap sx={{ flexWrap: "wrap" }}>
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ alignItems: "center", flexWrap: "wrap" }}>
           <Select
             size="small"
             value={leaf.test}
@@ -562,7 +569,7 @@ export function ExprEditor({ expr, onChange, onRemove, known, facts }: ExprProps
           </Alert>
         )}
         {known?.truncated && (
-          <Typography variant="caption" color="text.secondary">
+          <Typography variant="caption" sx={{ color: "text.secondary" }}>
             The fleet&apos;s {factSourceLabel(source)} have more hosts or paths than the pickers
             list, so they show only part of them. Any path can still be typed.
           </Typography>
@@ -576,7 +583,11 @@ export function ExprEditor({ expr, onChange, onRemove, known, facts }: ExprProps
       return factEditor(expr);
     case "eq":
       return (
-        <Stack direction="row" spacing={1} alignItems="center" useFlexGap sx={{ flexWrap: "wrap" }}>
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ alignItems: "center", flexWrap: "wrap" }}>
           {opSelect}
           {keyInput(expr.key, (key) => onChange(withKey(expr, key)))}
           <Typography>=</Typography>
@@ -587,7 +598,11 @@ export function ExprEditor({ expr, onChange, onRemove, known, facts }: ExprProps
       );
     case "in":
       return (
-        <Stack direction="row" spacing={1} alignItems="center" useFlexGap sx={{ flexWrap: "wrap" }}>
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ alignItems: "center", flexWrap: "wrap" }}>
           {opSelect}
           {keyInput(expr.key, (key) => onChange(withKey(expr, key)))}
           <Typography>∈</Typography>
@@ -619,7 +634,11 @@ export function ExprEditor({ expr, onChange, onRemove, known, facts }: ExprProps
       );
     case "exists":
       return (
-        <Stack direction="row" spacing={1} alignItems="center" useFlexGap sx={{ flexWrap: "wrap" }}>
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ alignItems: "center", flexWrap: "wrap" }}>
           {opSelect}
           {keyInput(expr.key, (key) => onChange(withKey(expr, key)))}
           {sourceSelect(expr)}
@@ -628,7 +647,11 @@ export function ExprEditor({ expr, onChange, onRemove, known, facts }: ExprProps
       );
     case "not":
       return (
-        <Stack direction="row" spacing={1} alignItems="flex-start" useFlexGap sx={{ flexWrap: "wrap" }}>
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ alignItems: "flex-start", flexWrap: "wrap" }}>
           {opSelect}
           <Box sx={{ borderLeft: 3, borderColor: "error.main", pl: 1 }}>
             <ExprEditor
@@ -644,7 +667,11 @@ export function ExprEditor({ expr, onChange, onRemove, known, facts }: ExprProps
     case "and":
     case "or":
       return (
-        <Stack direction="row" spacing={1} alignItems="flex-start" useFlexGap sx={{ flexWrap: "wrap" }}>
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ alignItems: "flex-start", flexWrap: "wrap" }}>
           {opSelect}
           <Stack
             spacing={1}
@@ -695,7 +722,7 @@ type SelectorProps = {
 export function SelectorEditor({ selector, onChange, known, facts }: SelectorProps) {
   return (
     <Stack spacing={1}>
-      <Typography variant="caption" color="text.secondary">
+      <Typography variant="caption" sx={{ color: "text.secondary" }}>
         All top-level clauses must match (implicit AND). An empty selector matches every host.
         Each clause reads one thing: operator-set tags, tags the host reports about itself, or a
         facts document such as the inventory the agent uploads.

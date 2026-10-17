@@ -13,12 +13,12 @@ export function TrialExpiredPage({ me }: { me: Me }) {
         The trial for <strong>{me.tenant_name}</strong> ended
         {me.trial_expires_at ? ` on ${fmtTime(me.trial_expires_at)}` : ""}.
       </Alert>
-      <Typography paragraph>
+      <Typography sx={{ mb: 2 }}>
         Hosts, groups, bundles and the rest of the console are unavailable until the
         subscription is extended. Your configuration is kept, and enrolled agents keep running
         with the configuration they already have.
       </Typography>
-      <Typography paragraph color="text.secondary">
+      <Typography sx={{ mb: 2, color: "text.secondary" }}>
         To continue, contact us to upgrade the <code>{me.tenant_slug}</code> tenant. Once that
         is done, reload this page.
       </Typography>

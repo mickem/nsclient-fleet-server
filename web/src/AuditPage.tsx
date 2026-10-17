@@ -48,9 +48,11 @@ export function AuditPage() {
 
   return (
     <Box>
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
+      <Stack
+        direction="row"
+        sx={{ justifyContent: "space-between", alignItems: "center", mb: 2 }}>
         <Typography variant="h4">Audit log</Typography>
-        <Stack direction="row" spacing={1} alignItems="center">
+        <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
           <Select
             size="small"
             value={filter}
@@ -73,7 +75,7 @@ export function AuditPage() {
       {entries === null ? (
         <Typography>Loading…</Typography>
       ) : entries.length === 0 ? (
-        <Typography color="text.secondary">No audit entries.</Typography>
+        <Typography sx={{ color: "text.secondary" }}>No audit entries.</Typography>
       ) : (
         <TableContainer component={Card}>
           <Table size="small">

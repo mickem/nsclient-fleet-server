@@ -223,11 +223,8 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
         <Stack
           direction="row"
           spacing={2}
-          alignItems="center"
-          sx={{ mb: 2 }}
           useFlexGap
-          flexWrap="wrap"
-        >
+          sx={{ alignItems: "center", flexWrap: "wrap", mb: 2 }}>
           <TextField
             size="small"
             label="Name"
@@ -331,7 +328,7 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
             Cancel
           </Button>
         </Stack>
-        <Typography variant="caption" color="text.secondary">
+        <Typography variant="caption" sx={{ color: "text.secondary" }}>
           Saved bundles are immutable — saving creates a new (name, version) that you can then
           assign to groups. Values are written to the agent&apos;s <code>fleet.ini</code>{" "}
           exactly as typed.

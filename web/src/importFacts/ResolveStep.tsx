@@ -123,8 +123,8 @@ export function ResolveStep({
         );
       case "ambiguous":
         return (
-          <Typography variant="body2" color="text.secondary">
-            {r.host_ids.length} hosts:{" "}
+          <Typography variant="body2" sx={{ color: "text.secondary" }}>
+            {r.host_ids.length}hosts:{" "}
             {r.host_ids
               .slice(0, 5)
               .map((id) => hostsById.get(id)?.hostname ?? id)
@@ -134,21 +134,19 @@ export function ResolveStep({
         );
       case "duplicate":
         return (
-          <Typography variant="body2" color="text.secondary">
-            {hostsById.get(r.host_id)?.hostname ?? r.host_id} — same host as row {r.of + 1}
+          <Typography variant="body2" sx={{ color: "text.secondary" }}>
+            {hostsById.get(r.host_id)?.hostname ?? r.host_id}— same host as row {r.of + 1}
           </Typography>
         );
       case "unmatched":
         return (
-          <Typography variant="body2" color="text.secondary">
-            No host
-          </Typography>
+          <Typography variant="body2" sx={{ color: "text.secondary" }}>No host
+                      </Typography>
         );
       case "skipped":
         return (
-          <Typography variant="body2" color="text.secondary">
-            Not imported
-          </Typography>
+          <Typography variant="body2" sx={{ color: "text.secondary" }}>Not imported
+                      </Typography>
         );
     }
   };
@@ -170,7 +168,11 @@ export function ResolveStep({
         </Alert>
       )}
 
-      <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
+      <Stack
+        direction="row"
+        spacing={1}
+        useFlexGap
+        sx={{ alignItems: "center", flexWrap: "wrap" }}>
         {(Object.keys(STATUS_COLOR) as ImportRowStatus[]).map((s) => (
           <Chip
             key={s}
@@ -203,7 +205,7 @@ export function ResolveStep({
         {tab("all", "All", res.rows.length)}
       </Tabs>
 
-      <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+      <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
         <Button size="small" disabled={unmatchedOpen.length === 0} onClick={() => onSkip(unmatchedOpen, true)}>
           Skip all unmatched ({unmatchedOpen.length})
         </Button>
@@ -216,7 +218,7 @@ export function ResolveStep({
       </Stack>
 
       {rows.length === 0 ? (
-        <Typography color="text.secondary">
+        <Typography sx={{ color: "text.secondary" }}>
           {filter === "attention" ? "Every row is matched or skipped." : "No rows."}
         </Typography>
       ) : (
@@ -254,7 +256,9 @@ export function ResolveStep({
                       <TableCell>
                         <Chip label={r.status} color={STATUS_COLOR[r.status]} size="small" variant="outlined" />
                         {override !== undefined && (
-                          <Typography variant="caption" color="text.secondary" display="block">
+                          <Typography
+                            variant="caption"
+                            sx={{ color: "text.secondary", display: "block" }}>
                             assigned
                           </Typography>
                         )}
@@ -283,7 +287,9 @@ export function ResolveStep({
                                 <li key={key} {...rest}>
                                   <Stack>
                                     <Typography variant="body2">{hostLabel(h)}</Typography>
-                                    <Typography variant="caption" color="text.secondary" sx={{ fontFamily: "monospace" }}>
+                                    <Typography
+                                      variant="caption"
+                                      sx={{ color: "text.secondary", fontFamily: "monospace" }}>
                                       {h.id}
                                     </Typography>
                                   </Stack>
@@ -325,12 +331,12 @@ export function ResolveStep({
       <Box>
         <Typography variant="h6">Hosts not in this file</Typography>
         {res.absent_total === 0 ? (
-          <Typography variant="body2" color="text.secondary">
+          <Typography variant="body2" sx={{ color: "text.secondary" }}>
             Every host in the fleet has a row.
           </Typography>
         ) : (
           <>
-            <Typography variant="body2" color="text.secondary">
+            <Typography variant="body2" sx={{ color: "text.secondary" }}>
               {res.absent_total.toLocaleString()} host{res.absent_total === 1 ? "" : "s"} have no
               row in this file; they keep any {res.source} document they hold unless you remove it.{" "}
               <Button size="small" onClick={() => setShowAbsent((v) => !v)}>
@@ -338,7 +344,11 @@ export function ResolveStep({
               </Button>
             </Typography>
             {showAbsent && (
-              <Stack direction="row" spacing={0.5} useFlexGap flexWrap="wrap" sx={{ my: 1 }}>
+              <Stack
+                direction="row"
+                spacing={0.5}
+                useFlexGap
+                sx={{ flexWrap: "wrap", my: 1 }}>
                 {res.absent.map((a) => (
                   <Chip
                     key={a.id}
@@ -353,7 +363,7 @@ export function ResolveStep({
                   />
                 ))}
                 {res.absent_total > res.absent.length && (
-                  <Typography variant="caption" color="text.secondary">
+                  <Typography variant="caption" sx={{ color: "text.secondary" }}>
                     …and {(res.absent_total - res.absent.length).toLocaleString()} more
                   </Typography>
                 )}
@@ -368,7 +378,9 @@ export function ResolveStep({
               } not in this file`}
             />
             {!anyHolding && (
-              <Typography variant="caption" color="text.secondary" display="block">
+              <Typography
+                variant="caption"
+                sx={{ color: "text.secondary", display: "block" }}>
                 None of them holds {res.source}, so there is nothing to remove.
               </Typography>
             )}

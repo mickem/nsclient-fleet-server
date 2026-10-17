@@ -34,10 +34,12 @@ function CopyBlock({ title, help, text, label }: { title: string; help: ReactNod
   return (
     <Box sx={{ mt: 2 }}>
       <Typography variant="subtitle2">{title}</Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
+      <Typography
+        variant="body2"
+        sx={{ color: "text.secondary", mb: 0.5 }}>
         {help}
       </Typography>
-      <Stack direction="row" spacing={0.5} alignItems="flex-start">
+      <Stack direction="row" spacing={0.5} sx={{ alignItems: "flex-start" }}>
         <Box component="pre" sx={preSx}>
           {text}
         </Box>
@@ -71,16 +73,18 @@ function KeyNotice({
     onUnlocked();
   };
   return (
-    <Alert severity="warning" sx={{ mt: 2 }}>
-      This tenant seals bundles with an encryption key (fingerprint <code>{fingerprint}</code>)
-      that is not unlocked in this browser, so the commands below leave it out. The agent would
-      enroll fine but could not open encrypted bundles.{" "}
+    <Alert severity="warning" sx={{ mt: 2 }}>This tenant seals bundles with an encryption key (fingerprint <code>{fingerprint}</code>)
+            that is not unlocked in this browser, so the commands below leave it out. The agent would
+            enroll fine but could not open encrypted bundles.{" "}
       {!open ? (
         <Button size="small" onClick={() => setOpen(true)}>
           Paste the key
         </Button>
       ) : (
-        <Stack direction="row" spacing={1} sx={{ mt: 1 }} alignItems="flex-start">
+        <Stack
+          direction="row"
+          spacing={1}
+          sx={{ alignItems: "flex-start", mt: 1 }}>
           <TextField
             size="small"
             label="Bundle encryption key"
@@ -112,7 +116,9 @@ export function IssuedHostCard({ issued, onClose }: { issued: CreateHostResponse
   return (
     <Card sx={{ mb: 2 }}>
       <CardContent>
-        <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
+        <Stack
+          direction="row"
+          sx={{ justifyContent: "space-between", alignItems: "flex-start" }}>
           <Typography variant="h5" gutterBottom>
             Enroll the new host
           </Typography>
@@ -120,7 +126,7 @@ export function IssuedHostCard({ issued, onClose }: { issued: CreateHostResponse
             <CloseIcon fontSize="small" />
           </IconButton>
         </Stack>
-        <Typography variant="body2" color="text.secondary">
+        <Typography variant="body2" sx={{ color: "text.secondary" }}>
           The token expires in 1 hour and can be used once. Run either command on the host, or
           paste the token into whatever provisions it.
           {bundleKey && " Both commands include this tenant's bundle encryption key."}
@@ -155,7 +161,9 @@ export function IssuedHostCard({ issued, onClose }: { issued: CreateHostResponse
           label="Copy MSI command"
         />
 
-        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 2 }}>
+        <Typography
+          variant="caption"
+          sx={{ color: "text.secondary", display: "block", mt: 2 }}>
           host_id: <code>{issued.host_id}</code>
         </Typography>
       </CardContent>

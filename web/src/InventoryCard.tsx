@@ -204,7 +204,9 @@ function RecordsTable({ records }: { records: Obj[] }) {
         </Button>
       )}
       {needle && matching.length === 0 && (
-        <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+        <Typography
+          variant="body2"
+          sx={{ color: "text.secondary", mt: 1 }}>
           No record matches.
         </Typography>
       )}
@@ -223,13 +225,13 @@ function FactSetSection({ name, value }: { name: string; value: unknown }) {
     <Accordion disableGutters variant="outlined" defaultExpanded={records <= PAGE}>
       <AccordionSummary expandIcon={<ExpandMoreIcon />}>
         <Typography sx={{ fontFamily: "monospace", mr: 1 }}>{name}</Typography>
-        <Typography variant="body2" color="text.secondary">
+        <Typography variant="body2" sx={{ color: "text.secondary" }}>
           {summary}
         </Typography>
       </AccordionSummary>
       <AccordionDetails>
         {blocks.length === 0 && (
-          <Typography variant="body2" color="text.secondary">
+          <Typography variant="body2" sx={{ color: "text.secondary" }}>
             Empty.
           </Typography>
         )}
@@ -269,7 +271,10 @@ function ChangeLine({ c }: { c: FactChange }) {
           ? fmtValue(leaf, c.old)
           : "";
   return (
-    <Stack direction="row" spacing={1} alignItems="baseline" sx={{ py: 0.25 }}>
+    <Stack
+      direction="row"
+      spacing={1}
+      sx={{ alignItems: "baseline", py: 0.25 }}>
       <Chip
         label={c.kind}
         size="small"
@@ -281,7 +286,9 @@ function ChangeLine({ c }: { c: FactChange }) {
         {c.path || "(whole document)"}
       </Typography>
       {detail && (
-        <Typography variant="body2" color="text.secondary" sx={{ wordBreak: "break-word" }}>
+        <Typography
+          variant="body2"
+          sx={{ color: "text.secondary", wordBreak: "break-word" }}>
           {detail}
         </Typography>
       )}
@@ -297,7 +304,7 @@ function ChangeEntry({ entry }: { entry: FactsChanges }) {
   const hidden = entry.changes.length - shown.length;
   return (
     <Box sx={{ mb: 1.5 }}>
-      <Typography variant="caption" color="text.secondary">
+      <Typography variant="caption" sx={{ color: "text.secondary" }}>
         {fmtTime(entry.at)}
       </Typography>
       {entry.initial ? (
@@ -312,7 +319,9 @@ function ChangeEntry({ entry }: { entry: FactsChanges }) {
         </Button>
       )}
       {entry.truncated > 0 && (
-        <Typography variant="caption" color="text.secondary" display="block">
+        <Typography
+          variant="caption"
+          sx={{ color: "text.secondary", display: "block" }}>
           …and {entry.truncated} more change{entry.truncated === 1 ? "" : "s"} not recorded
           individually.
         </Typography>
@@ -358,7 +367,10 @@ export function InventoryCard({
   return (
     <Card variant="outlined">
       <CardContent>
-        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+        <Stack
+          direction="row"
+          spacing={1}
+          sx={{ alignItems: "center", mb: 1 }}>
           <Typography variant="h5" sx={{ flexGrow: 1 }}>
             Inventory
           </Typography>
@@ -378,7 +390,9 @@ export function InventoryCard({
         ) : (
           <>
             {facts.facts_hash && (
-              <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1.5 }}>
+              <Typography
+                variant="caption"
+                sx={{ color: "text.secondary", display: "block", mb: 1.5 }}>
                 {facts.collected_at && <>collected {fmtCollected(facts.collected_at)} · </>}
                 received {fmtAgo(facts.received_at)}
                 {facts.size_bytes !== null && <> · {fmtBytes(facts.size_bytes)}</>}
@@ -406,7 +420,7 @@ export function InventoryCard({
                 next time the host&apos;s inventory changes.
               </Alert>
             ) : sets.length === 0 ? (
-              <Typography variant="body2" color="text.secondary">
+              <Typography variant="body2" sx={{ color: "text.secondary" }}>
                 {
                   // By status, not by whether a document is stored: an empty one stored after
                   // a clear stays until the agent's new inventory arrives.
@@ -422,7 +436,7 @@ export function InventoryCard({
             )}
             {history.length > 0 && (
               <Box sx={{ mt: 2 }}>
-                <Stack direction="row" alignItems="center" spacing={1}>
+                <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
                   <Typography variant="h6">Recent changes</Typography>
                   <Button size="small" onClick={() => setShowHistory((v) => !v)}>
                     {showHistory ? "Hide" : `Show ${history.length}`}
@@ -444,7 +458,7 @@ function History({ history }: { history: FactsChanges[] }) {
   if (history.length === 0) return null;
   return (
     <Box sx={{ mt: 2 }}>
-      <Stack direction="row" alignItems="center" spacing={1}>
+      <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
         <Typography variant="h6">Recent changes</Typography>
         <Button size="small" onClick={() => setShow((v) => !v)}>
           {show ? "Hide" : `Show ${history.length}`}
@@ -472,7 +486,10 @@ export function SourceFactsCard({ doc, onDelete }: { doc: SourceFacts; onDelete?
   return (
     <Card variant="outlined">
       <CardContent>
-        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+        <Stack
+          direction="row"
+          spacing={1}
+          sx={{ alignItems: "center", mb: 1 }}>
           <Typography variant="h5" sx={{ flexGrow: 1, fontFamily: "monospace" }}>
             {doc.source}
           </Typography>
@@ -482,7 +499,9 @@ export function SourceFactsCard({ doc, onDelete }: { doc: SourceFacts; onDelete?
             </Button>
           )}
         </Stack>
-        <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1.5 }}>
+        <Typography
+          variant="caption"
+          sx={{ color: "text.secondary", display: "block", mb: 1.5 }}>
           {doc.collected_at && <>collected {fmtCollected(doc.collected_at)} · </>}
           received {fmtAgo(doc.received_at)} · {fmtBytes(doc.size_bytes)}
         </Typography>
@@ -492,7 +511,7 @@ export function SourceFactsCard({ doc, onDelete }: { doc: SourceFacts; onDelete?
             to replace it.
           </Alert>
         ) : keys.length === 0 ? (
-          <Typography variant="body2" color="text.secondary">
+          <Typography variant="body2" sx={{ color: "text.secondary" }}>
             The document is empty.
           </Typography>
         ) : (

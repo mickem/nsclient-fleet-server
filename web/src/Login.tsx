@@ -151,7 +151,7 @@ function MagicLinkLogin({
         <Typography gutterBottom>
           If an account exists for <strong>{email}</strong>, a sign-in link is on its way.
         </Typography>
-        <Typography variant="body2" color="text.secondary">
+        <Typography variant="body2" sx={{ color: "text.secondary" }}>
           The link expires in 15 minutes and can be used once.
         </Typography>
       </AuthShell>

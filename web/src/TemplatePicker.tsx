@@ -32,7 +32,9 @@ export function TemplatePicker({ onPick, onCancel, intro }: Props) {
 
   return (
     <Box>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+      <Typography
+        variant="body2"
+        sx={{ color: "text.secondary", mb: 1 }}>
         {intro ??
           "Templates each cover one concern — checks, or one delivery mechanism — so you " +
             "can assign a health bundle and a transport bundle to the same group independently."}
@@ -48,7 +50,7 @@ export function TemplatePicker({ onPick, onCancel, intro }: Props) {
           <Tab key={cat} label={cat} value={cat} />
         ))}
       </Tabs>
-      <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+      <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
         {TEMPLATES.filter((t) => t.category === category).map((t) => {
           const isSelected = selected?.id === t.id;
           return (
@@ -63,14 +65,17 @@ export function TemplatePicker({ onPick, onCancel, intro }: Props) {
             >
               <CardActionArea onClick={() => setSelected(t)} sx={{ height: "100%" }}>
                 <CardContent sx={{ py: 1.5 }}>
-                  <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
+                  <Stack
+                    direction="row"
+                    spacing={1}
+                    sx={{ alignItems: "center", mb: 0.5 }}>
                     {isSelected && <CheckCircleIcon color="primary" fontSize="small" />}
                     <Typography variant="subtitle2">{t.title}</Typography>
                     {t.sensitive && (
                       <Chip label="credentials" size="small" variant="outlined" />
                     )}
                   </Stack>
-                  <Typography variant="caption" color="text.secondary">
+                  <Typography variant="caption" sx={{ color: "text.secondary" }}>
                     {t.description}
                   </Typography>
                 </CardContent>
@@ -79,7 +84,10 @@ export function TemplatePicker({ onPick, onCancel, intro }: Props) {
           );
         })}
       </Stack>
-      <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 2 }}>
+      <Stack
+        direction="row"
+        spacing={1}
+        sx={{ alignItems: "center", mt: 2 }}>
         <Button
           variant="contained"
           disabled={selected === null}

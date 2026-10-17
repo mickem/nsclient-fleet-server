@@ -139,9 +139,9 @@ function EncryptionKeyCard({
   return (
     <Accordion sx={{ mt: 3 }} disableGutters>
       <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-        <Stack direction="row" spacing={1} alignItems="center">
+        <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
           <LockIcon fontSize="small" color={unlocked ? "success" : "disabled"} />
-          <Typography color="text.secondary">
+          <Typography sx={{ color: "text.secondary" }}>
             Encryption key{" "}
             {fingerprint
               ? unlocked
@@ -152,7 +152,9 @@ function EncryptionKeyCard({
         </Stack>
       </AccordionSummary>
       <AccordionDetails>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+        <Typography
+          variant="body2"
+          sx={{ color: "text.secondary", mb: 2 }}>
           Encrypted bundles are sealed in your browser with this key before upload; the server
           stores only the ciphertext and the key fingerprint. Generate a fresh key, or paste
           the one your agents already carry to keep working with a deployed fleet. Give the
@@ -166,7 +168,7 @@ function EncryptionKeyCard({
               Your new key — shown once. Store it in a password manager and add it to your
               agents' configuration now:
             </Typography>
-            <Stack direction="row" spacing={1} alignItems="center">
+            <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
               <Typography component="code" sx={{ wordBreak: "break-all" }}>
                 {freshKey}
               </Typography>
@@ -176,7 +178,11 @@ function EncryptionKeyCard({
             </Stack>
           </Alert>
         )}
-        <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ alignItems: "center", flexWrap: "wrap" }}>
           {fingerprint && (
             <Typography variant="body2">
               Fingerprint: <code>{fingerprint}</code>
@@ -334,9 +340,11 @@ export function BundlesPage({ me }: { me: Me }) {
 
   return (
     <Box>
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
+      <Stack
+        direction="row"
+        sx={{ justifyContent: "space-between", alignItems: "center", mb: 1 }}>
         <Typography variant="h4">Bundles</Typography>
-        <Stack direction="row" spacing={1} alignItems="center">
+        <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
           <RefreshButton refreshing={refreshing} onClick={refresh} />
           {!editorOpen && canWriteConfig(me.role) && (
             <Button
@@ -349,7 +357,9 @@ export function BundlesPage({ me }: { me: Me }) {
           )}
         </Stack>
       </Stack>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+      <Typography
+        variant="body2"
+        sx={{ color: "text.secondary", mb: 2 }}>
         A bundle is a zip (manifest + config patch + scripts) signed by your tenant key.
         Versions are immutable — to roll back, assign the older version to the group.
         Encrypted bundles are additionally sealed in your browser; the server never sees
@@ -379,7 +389,7 @@ export function BundlesPage({ me }: { me: Me }) {
       ) : bundles.length === 0 ? (
         <Card>
           <CardContent>
-            <Typography color="text.secondary">
+            <Typography sx={{ color: "text.secondary" }}>
               No bundles yet — create one with the editor, or upload a zip below.
             </Typography>
           </CardContent>
@@ -401,7 +411,7 @@ export function BundlesPage({ me }: { me: Me }) {
               {bundles.map((b) => (
                 <TableRow key={b.id} hover>
                   <TableCell>
-                    <Stack direction="row" spacing={1} alignItems="center">
+                    <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
                       <span>{b.name}</span>
                       {b.format === "enc-v1" && (
                         <Tooltip title={`Encrypted client-side (key ${b.key_fingerprint ?? "?"})`}>
@@ -506,10 +516,14 @@ export function BundlesPage({ me }: { me: Me }) {
       {canWriteConfig(me.role) && (
       <Accordion sx={{ mt: 1 }} disableGutters>
         <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-          <Typography color="text.secondary">Upload a pre-built zip</Typography>
+          <Typography sx={{ color: "text.secondary" }}>Upload a pre-built zip</Typography>
         </AccordionSummary>
         <AccordionDetails>
-          <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
+          <Stack
+            direction="row"
+            spacing={1}
+            useFlexGap
+            sx={{ alignItems: "center", flexWrap: "wrap" }}>
             <TextField
               size="small"
               label="name"
