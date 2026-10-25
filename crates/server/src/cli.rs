@@ -2,10 +2,11 @@
 //!
 //! Configuration is environment variables, and that is not changing — these are the things
 //! that cannot be one: asking the build what it is, producing the argon2 hash that an env
-//! variable then holds, pointing at the file the variables come from, and registering the
-//! Windows service that will pass that same file back on the command line.
+//! variable then holds, pointing at the file the variables come from, registering the
+//! Windows service that will pass that same file back on the command line, and moving
+//! groups and bundles into and out of a configuration directory.
 //!
-//! Hand-rolled rather than a parser crate, because the whole surface is six flags and one
+//! Hand-rolled rather than a parser crate, because the whole surface is a handful of flags and one
 //! of them is `--help`.
 
 use std::ffi::OsString;
@@ -22,6 +23,10 @@ pub enum Command {
     Version,
     Help,
     HashPassword,
+    /// Write the on-prem tenant's groups and bundles out as a configuration directory.
+    ExportConfig,
+    /// Replace the on-prem tenant's groups and bundles with a configuration directory's.
+    ImportConfig,
     #[cfg(windows)]
     ServiceInstall,
     #[cfg(windows)]
@@ -35,6 +40,10 @@ pub struct Args {
     /// `--env-file`. Read into the environment before config, and on Windows also written
     /// into the service's command line by `--service-install`.
     pub env_file: Option<PathBuf>,
+    /// The directory `--export-config` or `--import-config` names.
+    pub config_dir: Option<PathBuf>,
+    /// `--dry-run`: with `--import-config`, report what would change and change nothing.
+    pub dry_run: bool,
 }
 
 impl Args {
@@ -53,6 +62,8 @@ impl Args {
 
         let mut command = None;
         let mut env_file = None;
+        let mut config_dir = None;
+        let mut dry_run = false;
         let mut i = 0;
         while i < as_str.len() {
             let arg = as_str[i].as_str();
@@ -83,16 +94,34 @@ impl Args {
                 "--service-install" => set(Command::ServiceInstall)?,
                 #[cfg(windows)]
                 "--service-uninstall" => set(Command::ServiceUninstall)?,
-                "--env-file" => {
+                "--dry-run" => dry_run = true,
+                "--env-file" | "--export-config" | "--import-config" => {
                     i += 1;
                     let Some(path) = args.get(i) else {
-                        bail!("--env-file needs a path");
+                        bail!("{arg} needs a path");
                     };
-                    env_file = Some(PathBuf::from(path));
+                    let path = PathBuf::from(path);
+                    match arg {
+                        "--env-file" => env_file = Some(path),
+                        "--export-config" => {
+                            set(Command::ExportConfig)?;
+                            config_dir = Some(path);
+                        }
+                        _ => {
+                            set(Command::ImportConfig)?;
+                            config_dir = Some(path);
+                        }
+                    }
                 }
                 other => {
                     if let Some(path) = other.strip_prefix("--env-file=") {
                         env_file = Some(PathBuf::from(path));
+                    } else if let Some(path) = other.strip_prefix("--export-config=") {
+                        set(Command::ExportConfig)?;
+                        config_dir = Some(PathBuf::from(path));
+                    } else if let Some(path) = other.strip_prefix("--import-config=") {
+                        set(Command::ImportConfig)?;
+                        config_dir = Some(PathBuf::from(path));
                     } else {
                         bail!("unrecognised argument {other:?} — try --help");
                     }
@@ -101,9 +130,15 @@ impl Args {
             i += 1;
         }
 
+        let command = command.unwrap_or(Command::Serve);
+        if dry_run && command != Command::ImportConfig && command != Command::Help {
+            bail!("--dry-run only goes with --import-config");
+        }
         Ok(Args {
-            command: command.unwrap_or(Command::Serve),
+            command,
             env_file,
+            config_dir,
+            dry_run,
         })
     }
 }
@@ -120,6 +155,11 @@ pub fn help(version: &str) -> String {
          \x20                         Variables already set are left alone.\n\
          \x20   --hash-password       prompt for a password and print the argon2 hash\n\
          \x20                         for ON_PREM_ADMIN_PASSWORD_HASH, then exit\n\
+         \x20   --export-config <dir> write the groups and bundles out as a configuration\n\
+         \x20                         directory, then exit\n\
+         \x20   --import-config <dir> replace the groups and bundles with a configuration\n\
+         \x20                         directory's, then exit. With --dry-run, only report\n\
+         \x20                         what would change\n\
          {service}\
          \x20   --version, -V         print the version and exit\n\
          \x20   --help,    -h         print this message and exit\n",
@@ -189,6 +229,24 @@ mod tests {
     }
 
     #[test]
+    fn the_config_commands_take_a_directory_either_way() {
+        let spaced = parse(&["--export-config", "/srv/fleet-config"]).unwrap();
+        assert_eq!(spaced.command, Command::ExportConfig);
+        let equals = parse(&["--import-config=/srv/fleet-config", "--dry-run"]).unwrap();
+        assert_eq!(equals.command, Command::ImportConfig);
+        assert!(equals.dry_run);
+        assert_eq!(spaced.config_dir, equals.config_dir);
+        assert!(parse(&["--import-config"]).is_err());
+    }
+
+    #[test]
+    fn dry_run_only_goes_with_import() {
+        assert!(parse(&["--dry-run"]).is_err());
+        assert!(parse(&["--export-config", "x", "--dry-run"]).is_err());
+        assert!(parse(&["--export-config", "x", "--import-config", "y"]).is_err());
+    }
+
+    #[test]
     fn recognises_hash_password() {
         assert_eq!(
             parse(&["--hash-password"]).unwrap().command,
@@ -255,7 +313,15 @@ mod tests {
     fn help_names_every_flag_it_accepts() {
         let text = help("1.2.3");
         assert!(text.contains("nsclient-fleet 1.2.3"));
-        for flag in ["--env-file", "--hash-password", "--version", "--help"] {
+        for flag in [
+            "--env-file",
+            "--hash-password",
+            "--export-config",
+            "--import-config",
+            "--dry-run",
+            "--version",
+            "--help",
+        ] {
             assert!(text.contains(flag), "help does not mention {flag}");
         }
         #[cfg(windows)]

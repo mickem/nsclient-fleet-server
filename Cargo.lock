@@ -1111,6 +1111,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "ulid",
  "url",
  "windows-service",
  "x509-parser 0.18.1",

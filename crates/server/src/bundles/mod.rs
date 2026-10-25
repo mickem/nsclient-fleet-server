@@ -18,6 +18,9 @@ mod signing;
 mod store;
 mod upload;
 
+pub(crate) use archive::{
+    build_zip_from_entries, path_clash, read_zip_entries, MAX_INFLATED_TOTAL, MAX_ZIP_ENTRIES,
+};
 pub use assign::{
     assign_to_group, list_for_group, unassign_from_group, AssignBody, AssignmentView,
 };
@@ -26,7 +29,9 @@ pub use download::{download, ui_download};
 pub use key::{get_bundle_key, set_bundle_key, BundleKeyView, SetBundleKeyBody};
 pub use rename::{rename, RenameBody};
 pub use reseal::{stage_reseal, StagedView};
-pub(crate) use signing::{load_tenant_signing_key, sign_descriptor, sign_with_tenant_key};
+pub(crate) use signing::{
+    load_signing_key, load_tenant_signing_key, sign_descriptor, sign_with_tenant_key,
+};
 pub use store::{BundleStore, LocalBundleStore, StoredBundleFile};
 pub use upload::upload;
 

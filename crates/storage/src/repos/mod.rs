@@ -4,6 +4,7 @@
 
 mod audit;
 mod bundles;
+mod config_source;
 mod facts;
 mod groups;
 mod hosts;
@@ -14,6 +15,7 @@ pub use audit::{AuditRepo, AuditRow};
 pub use bundles::{
     BundleAssignmentsRepo, BundleRow, BundlesRepo, MovedBundle, RenameOutcome, RenamedInPlace,
 };
+pub use config_source::{ApplyOutcome, ConfigPlan, ConfigSourceRepo, PlannedBundle, PlannedGroup};
 pub use facts::{
     FactChangeRow, FactsHashes, FactsRefusal, HostFactsRepo, NewFacts, ReplaceOutcome, StoredFacts,
 };

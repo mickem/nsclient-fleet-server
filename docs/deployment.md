@@ -626,6 +626,70 @@ address is actually reachable.
 [linux-install.md](linux-install.md) walks the whole thing end to end, and
 [docker.md](docker.md) is the same deployment as a container.
 
+### Groups and bundles as files
+
+The on-prem tenant's groups, bundles and assignments can be exported as a directory of
+files — to keep in git, to review as diffs, or to load into another server — and imported
+back:
+
+```bash
+nsclient-fleet --env-file /etc/nsclient-fleet/env --export-config /srv/fleet-config
+nsclient-fleet --env-file /etc/nsclient-fleet/env --import-config /srv/fleet-config --dry-run
+nsclient-fleet --env-file /etc/nsclient-fleet/env --import-config /srv/fleet-config
+```
+
+Both read the same `DATABASE_PATH` and `BUNDLE_DIR` the server does, and are safe to run
+while it is up: an import is one transaction, and agents pick it up on their next poll.
+
+```
+fleet-config/
+  groups/
+    sql-servers.json             one file per group; the file name is not significant
+  bundles/
+    base-checks/
+      1.0/                       a plain bundle as files, zipped exactly as they stand
+        config.json
+        scripts/check_disk.ps1
+      1.1.zip                    a plain bundle kept as a zip
+    secrets/
+      1.0.nseb                   an encrypted bundle, as the sealed blob
+```
+
+A group file:
+
+```json
+{
+  "name": "SQL Servers",
+  "selector": { "clauses": [{ "op": "eq", "key": "role", "value": "db" }] },
+  "bundles": [
+    { "name": "base-checks", "version": "1.0", "priority": 10 },
+    { "name": "secrets", "version": "1.0" }
+  ]
+}
+```
+
+`priority` defaults to 100, and the selector is the same JSON the API takes. Names starting
+with `.` (`.git`, `.gitkeep`) and anything at the top level other than `groups/` and
+`bundles/` are ignored, so a README can sit alongside. Inside a version directory nothing is
+skipped, and links are refused rather than followed.
+
+**An import replaces.** Afterwards the tenant has exactly the groups and bundles in the
+directory: anything not in it is deleted. `--dry-run` reports what would change without
+changing it, and a directory with problems changes nothing — every problem is listed. A
+directory with neither `groups/` nor `bundles/` is refused outright, as a wrong path is far
+more likely than a wish to delete everything.
+
+**Bundles are matched by name and version.** One whose contents are unchanged keeps its id,
+so agents do not download it again — which is why exporting and importing the result back
+changes nothing. One whose contents changed is re-signed under a new id. Editing a version
+in place is therefore fine; the version string is yours to bump or not.
+
+**Encrypted bundles** stay sealed: export writes the `.nseb` blob and import takes it as it
+is. The bundle's name and version are bound into the envelope, so it only opens on agents
+under the exact `bundles/<name>/<version>.nseb` it was sealed for — renaming the file breaks
+it. Plain bundles are plain on disk, so anything secret in a `config.json` lands in the
+repository; use an encrypted bundle for those.
+
 ### Running it on Windows
 
 Releases include Windows x64 and ARM64 binaries, which is often what an NSClient site wants
