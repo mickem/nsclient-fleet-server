@@ -65,6 +65,9 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
   // Template this bundle was created from (kept through edits via bundle.toml metadata).
   const [template, setTemplate] = useState<string | null>(null);
   const [scripts, setScripts] = useState<BundleScript[]>([]);
+  // Whether `scripts` is the base's actual set (always, for a new bundle). Until it is —
+  // the load failed — saves leave the base's scripts as they are instead of wiping them.
+  const [scriptsLoaded, setScriptsLoaded] = useState(editBundle === null);
   const [encrypt, setEncrypt] = useState(editBundle?.format === "enc-v1");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -89,6 +92,7 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
         const opened = readBundleZip(zip);
         setIni(jsonToIni(opened.configJson as ConfigObject));
         setScripts(opened.scripts);
+        setScriptsLoaded(true);
         setTemplate(opened.template);
         setCarried(opened.carried);
       } else {
@@ -103,6 +107,7 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
           setScripts(opened.scripts);
           setCarried(opened.carried);
         }
+        setScriptsLoaded(true);
       }
       setName(editBundle.name);
       setVersion(suggestNextVersion(editBundle.version));
@@ -125,6 +130,13 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
     if (carried !== null) return carried;
     if (editBundle === null) return [];
     return readBundleZip(await apiGetBytes(`/api/bundles/${editBundle.id}/download`)).carried;
+  };
+
+  /** Scripts for a client-built zip: the edited set, or the base's own if they never
+   *  loaded into the editor. */
+  const zipScripts = async (): Promise<BundleScript[]> => {
+    if (scriptsLoaded || editBundle === null) return scripts;
+    return readBundleZip(await apiGetBytes(`/api/bundles/${editBundle.id}/download`)).scripts;
   };
 
   const save = async () => {
@@ -155,7 +167,7 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
         if (!key || !keyState.unlocked) {
           throw new Error("Unlock the encryption key first (see the Encryption key section).");
         }
-        const zip = buildBundleZip(n, v, config, await carriedEntries(), scripts, tmpl);
+        const zip = buildBundleZip(n, v, config, await carriedEntries(), await zipScripts(), tmpl);
         const sealed = await encryptBundle(key, n, v, zip);
         const form = new FormData();
         form.set("name", n);
@@ -169,7 +181,7 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
       } else if (encBase) {
         // The base was decrypted in this browser; the server cannot compose from a bundle
         // it cannot read, so the plain zip is built here too and uploaded as-is.
-        const zip = buildBundleZip(n, v, config, await carriedEntries(), scripts, tmpl);
+        const zip = buildBundleZip(n, v, config, await carriedEntries(), await zipScripts(), tmpl);
         const form = new FormData();
         form.set("name", n);
         form.set("version", v);
@@ -185,8 +197,11 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
           config_json: config,
           base_bundle_id: editBundle?.id ?? null,
           template: tmpl,
-          // The complete scripts/ set; the server replaces the base's with it.
-          scripts: scripts.map((s) => ({ path: s.path, content_b64: bytesToBase64(s.data) })),
+          // The complete scripts/ set; the server replaces the base's with it. Left out
+          // when they never loaded, so the server carries the base's over untouched.
+          scripts: scriptsLoaded
+            ? scripts.map((s) => ({ path: s.path, content_b64: bytesToBase64(s.data) }))
+            : undefined,
         });
       }
       onSaved();
@@ -320,7 +335,14 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
           </Alert>
         )}
         <ConfigEditor template={tmplInfo} ini={ini} onChange={setIni} />
-        <ScriptsEditor scripts={scripts} onChange={setScripts} ini={ini} onIniChange={setIni} />
+        {scriptsLoaded ? (
+          <ScriptsEditor scripts={scripts} onChange={setScripts} ini={ini} onIniChange={setIni} />
+        ) : (
+          <Alert severity="warning" sx={{ mt: 3 }}>
+            This bundle&apos;s scripts could not be loaded, so they cannot be edited now. A save
+            keeps them exactly as they are.
+          </Alert>
+        )}
         {error && (
           <Alert severity="error" sx={{ mt: 1 }}>
             {error}

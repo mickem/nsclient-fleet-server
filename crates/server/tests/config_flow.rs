@@ -975,14 +975,27 @@ async fn compose_writes_and_replaces_scripts() {
     signup_login(&s, "scripter", "scripter@example.com").await;
 
     // 1. A new bundle with two scripts: bytes land in the zip exactly as sent (CRLF kept).
-    let bat = b"@echo off
-echo OK
-exit /b 0
-"
-    .to_vec();
-    let lua = b"Registry():simple_query('x', f, 'x')
-"
-    .to_vec();
+    //    The 400 explains the path rule in one readable sentence.
+    let r = compose(
+        &s,
+        serde_json::json!({
+            "name": "badpath",
+            "version": "1.0.0",
+            "config_json": {},
+            "scripts": [{ "path": "scripts/a b.sh", "content_b64": "" }],
+        }),
+    )
+    .await;
+    assert_eq!(r.status(), 400);
+    assert!(
+        r.text()
+            .await
+            .unwrap()
+            .contains("letters, digits, '.', '_', '-' and '/'"),
+        "error message spells out the rule"
+    );
+    let bat = b"@echo off\r\necho OK\r\nexit /b 0\r\n".to_vec();
+    let lua = b"Registry():simple_query('x', f, 'x')\n".to_vec();
     let r = compose(
         &s,
         serde_json::json!({
@@ -1049,6 +1062,14 @@ exit /b 0
             { "path": "scripts/a.sh", "content_b64": "" },
         ]),
         serde_json::json!([{ "path": "scripts/a.sh", "content_b64": "not base64!" }]),
+        serde_json::json!([
+            { "path": "scripts/A.bat", "content_b64": "" },
+            { "path": "scripts/a.bat", "content_b64": "" },
+        ]),
+        serde_json::json!([
+            { "path": "scripts/a", "content_b64": "" },
+            { "path": "scripts/a/b.sh", "content_b64": "" },
+        ]),
     ]
     .into_iter()
     .enumerate()
@@ -1065,6 +1086,64 @@ exit /b 0
         .await;
         assert_eq!(r.status(), 400, "case {i}: {:?}", r.text().await);
     }
+}
+
+#[tokio::test]
+async fn compose_keeps_script_paths_the_base_already_had() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let s = start().await;
+    signup_login(&s, "legacy", "legacy@example.com").await;
+
+    // An uploaded zip never had the editor's path rule: a space in a script name is fine.
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        use std::io::Write;
+        let mut w = zip::ZipWriter::new(&mut cursor);
+        let opts = zip::write::SimpleFileOptions::default();
+        w.start_file("config.json", opts).unwrap();
+        w.write_all(b"{}").unwrap();
+        w.start_file("scripts/My Check.ps1", opts).unwrap();
+        w.write_all(b"Write-Output 'ok'").unwrap();
+        w.finish().unwrap();
+    }
+    let form = reqwest::multipart::Form::new()
+        .text("name", "legacy")
+        .text("version", "1.0.0")
+        .part(
+            "bundle",
+            reqwest::multipart::Part::bytes(cursor.into_inner()).file_name("legacy.zip"),
+        );
+    let r = s
+        .cookie_jar
+        .post(format!("{}/api/bundles", s.base_url))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let base: serde_json::Value = r.json().await.unwrap();
+    let base_id = base["id"].as_str().unwrap();
+
+    let compose = |version: &str, path: &str| {
+        s.cookie_jar
+            .post(format!("{}/api/bundles/compose", s.base_url))
+            .json(&serde_json::json!({
+                "name": "legacy",
+                "version": version,
+                "config_json": {},
+                "base_bundle_id": base_id,
+                "scripts": [
+                    { "path": path, "content_b64": STANDARD.encode(b"Write-Output 'edited'") },
+                ],
+            }))
+            .send()
+    };
+    // The editor sends the base's path back with edited contents: kept.
+    let r = compose("1.0.1", "scripts/My Check.ps1").await.unwrap();
+    assert_eq!(r.status(), 201, "compose: {:?}", r.text().await);
+    // A path the base did not have still has to follow the rule.
+    let r = compose("1.0.2", "scripts/Other Check.ps1").await.unwrap();
+    assert_eq!(r.status(), 400);
 }
 
 #[tokio::test]

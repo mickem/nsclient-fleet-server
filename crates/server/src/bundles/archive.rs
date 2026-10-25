@@ -49,6 +49,21 @@ pub(super) fn valid_script_path(path: &str) -> bool {
         })
 }
 
+/// Another of `paths` that `path` cannot sit beside on an agent: the same name in another
+/// case (Windows file systems ignore case), or a file where `path` needs a folder or the
+/// other way round (`scripts/a` and `scripts/a/b.sh`). Exact duplicates are not reported.
+/// Mirrors `scriptPathClash` in web/src/bundles/bundlezip.ts.
+pub(super) fn path_clash<'a>(path: &str, paths: &[&'a str]) -> Option<&'a str> {
+    let lower = path.to_ascii_lowercase();
+    paths.iter().copied().find(|other| {
+        let o = other.to_ascii_lowercase();
+        *other != path
+            && (o == lower
+                || o.strip_prefix(&lower).is_some_and(|r| r.starts_with('/'))
+                || lower.strip_prefix(&o).is_some_and(|r| r.starts_with('/')))
+    })
+}
+
 pub(super) fn build_zip(
     manifest_toml: &str,
     config_json: &str,
@@ -240,6 +255,22 @@ mod tests {
                 Err(e) => Some(e.to_string()),
             }
         }
+    }
+
+    #[test]
+    fn script_paths_clash_by_case_and_file_against_folder() {
+        let all = [
+            "scripts/A.bat",
+            "scripts/a.bat",
+            "scripts/x",
+            "scripts/x/y.sh",
+            "scripts/xy",
+        ];
+        assert_eq!(path_clash("scripts/A.bat", &all), Some("scripts/a.bat"));
+        assert_eq!(path_clash("scripts/x", &all), Some("scripts/x/y.sh"));
+        assert_eq!(path_clash("scripts/x/y.sh", &all), Some("scripts/x"));
+        assert_eq!(path_clash("scripts/xy", &all), None);
+        assert_eq!(path_clash("scripts/a", &["scripts/a", "scripts/a"]), None);
     }
 
     #[test]

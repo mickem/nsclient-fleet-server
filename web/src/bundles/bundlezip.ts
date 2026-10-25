@@ -32,6 +32,20 @@ export function validScriptPath(path: string): boolean {
   );
 }
 
+/** Another of `paths` that `path` cannot sit beside on an agent: the same name in another
+ *  case (Windows file systems ignore case), or a file where `path` needs a folder or the
+ *  other way round. Exact duplicates are not reported. Mirrors `path_clash` in
+ *  crates/server/src/bundles/archive.rs. */
+export function scriptPathClash(path: string, paths: Iterable<string>): string | undefined {
+  const lower = path.toLowerCase();
+  for (const other of paths) {
+    const o = other.toLowerCase();
+    if (other === path) continue;
+    if (o === lower || o.startsWith(`${lower}/`) || lower.startsWith(`${o}/`)) return other;
+  }
+  return undefined;
+}
+
 /** The manifest is machine-written (see buildBundleZip / the server's manifest_toml),
  *  so a line match suffices; the token charset keeps hand-built zips from smuggling
  *  anything odd into the UI. */

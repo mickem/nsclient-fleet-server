@@ -61,6 +61,8 @@ export {
   scriptLanguageById,
   scriptLanguageOf,
   registerScript,
+  registrableAt,
+  registrationsOf,
 } from "./scripts";
 
 export function templateById(id: string): BundleTemplate | undefined {

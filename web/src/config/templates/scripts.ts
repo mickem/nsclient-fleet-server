@@ -8,7 +8,7 @@
 // says `scripts\x.bat`; Python and Lua entries are searched for in scripts/python and
 // scripts/lua. Shell scripts are written without an execute bit, so they run through `sh`.
 
-import { setIniValue } from "../ini";
+import { listIniKeys, setIniValue } from "../ini";
 
 export type ScriptLanguageId = "batch" | "shell" | "python" | "lua";
 
@@ -189,6 +189,24 @@ export function scriptLanguageById(id: ScriptLanguageId): ScriptLanguage {
 export function scriptLanguageOf(path: string): ScriptLanguage | undefined {
   const lower = path.toLowerCase();
   return SCRIPT_LANGUAGES.find((l) => l.extensions.some((e) => lower.endsWith(e)));
+}
+
+/** Whether the module finds a script at `path`: Python and Lua modules only search their
+ *  own folder (scripts/python/, scripts/lua/), external scripts run from anywhere. */
+export function registrableAt(lang: ScriptLanguage, path: string): boolean {
+  return path.startsWith(lang.dir);
+}
+
+/** The INI entries that run the script at `path`, as "Add script" wrote them — so removing
+ *  the file can offer to remove them too. Compared ignoring case and slash direction. */
+export function registrationsOf(ini: string, path: string): { section: string; key: string }[] {
+  const lang = scriptLanguageOf(path);
+  if (lang === undefined) return [];
+  const norm = (v: string) => v.trim().replace(/\\/g, "/").toLowerCase();
+  const { section, value } = lang.entry("", path);
+  return listIniKeys(ini, section)
+    .filter((e) => norm(e.value) === norm(value))
+    .map((e) => ({ section, key: e.key }));
 }
 
 /** Add what makes the agent run the script at `path` as check `name`: the module, the

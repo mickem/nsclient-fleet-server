@@ -26,15 +26,18 @@ import DeleteIcon from "@mui/icons-material/Delete";
 import DownloadIcon from "@mui/icons-material/Download";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { fmtBytes } from "../api";
+import { removeIniKey } from "../config/ini";
 import {
   registerScript,
+  registrableAt,
+  registrationsOf,
   SCRIPT_LANGUAGES,
   scriptLanguageById,
   scriptLanguageOf,
   type ScriptLanguageId,
   TABLE_KEY_RE,
 } from "../config/templates";
-import { type BundleScript, validScriptPath } from "./bundlezip";
+import { type BundleScript, scriptPathClash, validScriptPath } from "./bundlezip";
 import { safeFileName, scriptBytes, scriptText } from "./scriptFiles";
 
 type Props = {
@@ -51,7 +54,8 @@ function downloadFile(s: BundleScript) {
   a.href = url;
   a.download = s.path.split("/").pop() ?? "script";
   a.click();
-  URL.revokeObjectURL(url);
+  // Revoked once the click has been handled; revoking at once can cancel the download.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 /** The files under the bundle's scripts/ folder: a tab per file with a plain-text editor,
@@ -60,6 +64,8 @@ function downloadFile(s: BundleScript) {
 export function ScriptsEditor({ scripts, onChange, ini, onIniChange }: Props) {
   const [selected, setSelected] = useState<string | null>(scripts[0]?.path ?? null);
   const [adding, setAdding] = useState(false);
+  /** Asking whether the removed file's configuration entries go too. */
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const replaceRef = useRef<HTMLInputElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
   /** Caret to restore after a Tab insertion re-renders the textarea. */
@@ -106,11 +112,17 @@ export function ScriptsEditor({ scripts, onChange, ini, onIniChange }: Props) {
     update(current.path, new Uint8Array(await file.arrayBuffer()));
   };
 
-  const remove = () => {
+  const registrations = current ? registrationsOf(ini, current.path) : [];
+
+  const remove = (withEntries: boolean) => {
     if (!current) return;
     const rest = scripts.filter((s) => s.path !== current.path);
     onChange(rest);
     setSelected(rest[0]?.path ?? null);
+    if (withEntries) {
+      onIniChange(registrations.reduce((out, r) => removeIniKey(out, r.section, r.key), ini));
+    }
+    setConfirmRemove(false);
   };
 
   return (
@@ -182,11 +194,22 @@ export function ScriptsEditor({ scripts, onChange, ini, onIniChange }: Props) {
               </IconButton>
             </Tooltip>
             <Tooltip title="Remove this file from the bundle">
-              <IconButton size="small" color="error" onClick={remove}>
+              <IconButton
+                size="small"
+                color="error"
+                onClick={() => (registrations.length > 0 ? setConfirmRemove(true) : remove(false))}
+              >
                 <DeleteIcon fontSize="small" />
               </IconButton>
             </Tooltip>
           </Stack>
+          {!validScriptPath(current.path) && (
+            <Alert severity="warning" sx={{ mb: 1 }}>
+              This path uses characters the editor does not create (only letters, digits,
+              &apos;.&apos;, &apos;_&apos;, &apos;-&apos; and &apos;/&apos;). It is kept as
+              it is, but a command line that runs it may need quoting.
+            </Alert>
+          )}
           {text === null ? (
             <Alert severity="info">
               This file is not UTF-8 text (binary, or UTF-16), so it is shipped exactly as
@@ -214,6 +237,29 @@ export function ScriptsEditor({ scripts, onChange, ini, onIniChange }: Props) {
           )}
         </>
       )}
+
+      <Dialog open={confirmRemove} onClose={() => setConfirmRemove(false)}>
+        <DialogTitle>Remove {current?.path}?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            The configuration still runs it as{" "}
+            {registrations.map((r, i) => (
+              <span key={`${r.section}/${r.key}`}>
+                {i > 0 && ", "}
+                <code>{r.key}</code>
+              </span>
+            ))}
+            . Without the file that entry fails on every agent.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmRemove(false)}>Cancel</Button>
+          <Button onClick={() => remove(false)}>Remove file only</Button>
+          <Button variant="contained" color="error" onClick={() => remove(true)}>
+            Remove file and entry
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <AddScriptDialog
         open={adding}
@@ -274,10 +320,12 @@ function AddScriptDialog({
   const pathOk = validScriptPath(path);
   const nameOk = TABLE_KEY_RE.test(name);
   const replacing = taken.has(path);
-  const canRegister = lang !== undefined;
+  const clash = scriptPathClash(path, taken);
+  const canRegister = lang !== undefined && registrableAt(lang, path);
   const runsExternally = lang?.module === "CheckExternalScripts";
   const ready =
     pathOk &&
+    clash === undefined &&
     (mode === "example" ? nameOk && !replacing : file !== null) &&
     (!register || !canRegister || nameOk);
 
@@ -386,18 +434,21 @@ function AddScriptDialog({
                   ? "The check command to register it as. Letters, digits, _ and -."
                   : "The key it is loaded under; the script registers its own commands."
             }
-            disabled={mode === "upload" && !canRegister}
+            disabled={mode === "upload" && lang === undefined}
           />
           <TextField
             size="small"
             label="Path in bundle"
             value={path}
             onChange={(e) => setPathEdit(e.target.value)}
-            error={path !== "" && !pathOk}
+            error={(path !== "" && !pathOk) || clash !== undefined}
             helperText={
               path !== "" && !pathOk
                 ? "Must be under scripts/, using letters, digits, '.', '_', '-' and '/'."
-                : replacing
+                : clash !== undefined
+                  ? `Clashes with ${clash} on the agent (same name in another case, or a ` +
+                    "file where a folder is needed)."
+                  : replacing
                   ? mode === "upload"
                     ? "A file with this path exists — it will be replaced."
                     : "A file with this path exists — pick another name."
@@ -410,8 +461,11 @@ function AddScriptDialog({
             title={
               canRegister
                 ? ""
-                : "Only batch, shell, Python and Lua files can be registered; other files " +
-                  "are shipped for the scripts to use."
+                : lang !== undefined
+                  ? `${lang.module} only loads scripts from ${lang.dir}; move it there to ` +
+                    "register it."
+                  : "Only batch, shell, Python and Lua files can be registered; other files " +
+                    "are shipped for the scripts to use."
             }
           >
             <FormControlLabel

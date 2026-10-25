@@ -8,10 +8,11 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use fleet_core::crypto::encbundle;
 use fleet_storage::BundlesRepo;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use super::archive::{
-    build_zip, manifest_toml, read_zip_entries, template_from_manifest, valid_script_path,
-    MAX_SCRIPT_FILES,
+    build_zip, manifest_toml, path_clash, read_zip_entries, template_from_manifest,
+    valid_script_path, MAX_SCRIPT_FILES,
 };
 use super::upload::persist_bundle;
 use super::valid_bundle_token;
@@ -158,26 +159,48 @@ pub async fn compose(
     }
 
     if let Some(scripts) = body.scripts {
-        if scripts.len() > MAX_SCRIPT_FILES {
+        // Paths the base already shipped are kept even when they fall outside what the
+        // editor creates: an uploaded zip never had that rule, and the editor cannot rename.
+        let grandfathered: HashSet<String> = carried
+            .iter()
+            .map(|(n, _)| n.clone())
+            .filter(|n| n.starts_with("scripts/"))
+            .collect();
+        if scripts.len() > MAX_SCRIPT_FILES.max(grandfathered.len()) {
             return (
                 StatusCode::BAD_REQUEST,
                 format!("too many script files (limit {MAX_SCRIPT_FILES})"),
             )
                 .into_response();
         }
-        carried.retain(|(n, _)| !n.starts_with("scripts/"));
-        let mut seen = std::collections::HashSet::new();
-        for script in scripts {
-            if !valid_script_path(&script.path) {
+        let new_paths: Vec<&str> = scripts
+            .iter()
+            .map(|s| s.path.as_str())
+            .filter(|p| !grandfathered.contains(*p))
+            .collect();
+        if let Some(bad) = new_paths.iter().find(|p| !valid_script_path(p)) {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "invalid script path {bad:?} (scripts/ followed by letters, digits, \
+                     '.', '_', '-' and '/')"
+                ),
+            )
+                .into_response();
+        }
+        let all: Vec<&str> = scripts.iter().map(|s| s.path.as_str()).collect();
+        for path in &new_paths {
+            if let Some(other) = path_clash(path, &all) {
                 return (
                     StatusCode::BAD_REQUEST,
-                    format!(
-                        "invalid script path {:?} (scripts/ followed by letters, digits,                          '.', '_', '-' and '/')",
-                        script.path
-                    ),
+                    format!("script path {path:?} clashes with {other:?}"),
                 )
                     .into_response();
             }
+        }
+        let mut seen = HashSet::new();
+        let mut decoded = Vec::with_capacity(scripts.len());
+        for script in scripts {
             if !seen.insert(script.path.clone()) {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -192,8 +215,10 @@ pub async fn compose(
                 )
                     .into_response();
             };
-            carried.push((script.path, data));
+            decoded.push((script.path, data));
         }
+        carried.retain(|(n, _)| !n.starts_with("scripts/"));
+        carried.extend(decoded);
     }
 
     let config_pretty =

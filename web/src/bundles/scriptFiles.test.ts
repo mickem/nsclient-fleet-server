@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { buildBundleZip, readBundleZip, validScriptPath } from "./bundlezip";
+import { buildBundleZip, readBundleZip, scriptPathClash, validScriptPath } from "./bundlezip";
 import { bytesToBase64, safeFileName, scriptBytes, scriptText } from "./scriptFiles";
-import { registerScript, scriptLanguageById, scriptLanguageOf } from "../config/templates";
+import {
+  registerScript,
+  registrableAt,
+  registrationsOf,
+  scriptLanguageById,
+  scriptLanguageOf,
+} from "../config/templates";
 import { getIniValue, iniToJson } from "../config/ini";
 import { TEMPLATES } from "../config/templates";
 
@@ -55,6 +61,14 @@ describe("script paths", () => {
     }
   });
 
+  it("clash by case and as file against folder, like the server's", () => {
+    const all = ["scripts/A.bat", "scripts/a.bat", "scripts/x", "scripts/x/y.sh", "scripts/xy"];
+    expect(scriptPathClash("scripts/A.bat", all)).toBe("scripts/a.bat");
+    expect(scriptPathClash("scripts/x", all)).toBe("scripts/x/y.sh");
+    expect(scriptPathClash("scripts/x/y.sh", all)).toBe("scripts/x");
+    expect(scriptPathClash("scripts/xy", all)).toBeUndefined();
+  });
+
   it("round-trip through the client-built zip apart from other entries", () => {
     const zip = buildBundleZip(
       "b",
@@ -86,6 +100,26 @@ describe("script registration", () => {
     expect(lua.entry("c", "scripts/c.lua").value).toBe("c.lua");
     expect(scriptLanguageOf("scripts/x.SH")?.id).toBe("shell");
     expect(scriptLanguageOf("scripts/x.ps1")).toBeUndefined();
+  });
+
+  it("finds the entries that run a script, and only those", () => {
+    let ini = registerScript("", scriptLanguageById("batch"), "check_x", "scripts/x.bat");
+    ini = registerScript(ini, scriptLanguageById("shell"), "check_y", "scripts/y.sh");
+    ini = registerScript(ini, scriptLanguageById("lua"), "check_z", "scripts/lua/z.lua");
+    expect(registrationsOf(ini, "scripts/x.bat")).toEqual([
+      { section: "/settings/external scripts/scripts", key: "check_x" },
+    ]);
+    expect(registrationsOf(ini, "scripts/y.sh").map((r) => r.key)).toEqual(["check_y"]);
+    expect(registrationsOf(ini, "scripts/lua/z.lua").map((r) => r.key)).toEqual(["check_z"]);
+    expect(registrationsOf(ini, "scripts/other.bat")).toEqual([]);
+    expect(registrationsOf(ini, "scripts/x.ps1")).toEqual([]);
+  });
+
+  it("registers Python and Lua only where their module looks", () => {
+    expect(registrableAt(scriptLanguageById("python"), "scripts/python/a.py")).toBe(true);
+    expect(registrableAt(scriptLanguageById("python"), "scripts/a.py")).toBe(false);
+    expect(registrableAt(scriptLanguageById("lua"), "scripts/a.lua")).toBe(false);
+    expect(registrableAt(scriptLanguageById("batch"), "scripts/sub/a.bat")).toBe(true);
   });
 
   it("script templates ship a valid script their INI registers", () => {
