@@ -61,6 +61,9 @@ pub async fn compose(
     if !who.role.can_write_config() {
         return crate::auth::forbidden("change configuration");
     }
+    if let Some(refused) = crate::config_source::refuse_if_managed(&state, who.tenant_id) {
+        return refused;
+    }
     let name = body.name.trim();
     let version = body.version.trim();
     if !valid_bundle_token(name) {

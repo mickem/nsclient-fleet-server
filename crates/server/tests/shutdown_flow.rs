@@ -97,6 +97,7 @@ async fn harness() -> Harness {
         )),
         desired_state_cache: Default::default(),
         facts_catalog_cache: Default::default(),
+        config_source: None,
     };
 
     Harness {

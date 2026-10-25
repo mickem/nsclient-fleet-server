@@ -52,6 +52,7 @@ import {
 import { useMatch, useNavigate, useParams } from "react-router-dom";
 import { BundleEditor } from "./BundleEditor";
 import { RefreshButton } from "../components/RefreshButton";
+import { ManagedConfigBanner } from "../components/ManagedConfigBanner";
 import { useBundleKey } from "./bundleKey";
 import { RenameBundleDialog } from "./RenameBundleDialog";
 
@@ -243,6 +244,78 @@ function EncryptionKeyCard({
   );
 }
 
+/** In file mode the server never sees an upload, but an encrypted bundle still has to be
+ *  sealed somewhere the key is: here. The sealed file is downloaded for the operator to
+ *  commit as `bundles/<name>/<version>.nseb` — name and version are bound into the
+ *  envelope, so it must be committed under exactly those. */
+function SealForDirectory({ keyState }: { keyState: ReturnType<typeof useBundleKey> }) {
+  const [name, setName] = useState("");
+  const [version, setVersion] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const seal = async () => {
+    const file = fileRef.current?.files?.[0];
+    const key = recalledKey();
+    if (!file || !key || !name.trim() || !version.trim()) return;
+    setError(null);
+    try {
+      const plain = new Uint8Array(await file.arrayBuffer());
+      const sealed = await encryptBundle(key, name.trim(), version.trim(), plain);
+      const url = URL.createObjectURL(new Blob([sealed]));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${version.trim()}.nseb`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const ready = keyState.unlocked && name.trim() && version.trim();
+  return (
+    <Accordion sx={{ mt: 1 }} disableGutters>
+      <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+        <Typography sx={{ color: "text.secondary" }}>
+          Seal a zip for the configuration directory
+        </Typography>
+      </AccordionSummary>
+      <AccordionDetails>
+        <Typography variant="body2" sx={{ color: "text.secondary", mb: 1 }}>
+          Encrypts a zip in this browser and downloads it. Commit it as{" "}
+          <code>
+            bundles/{name.trim() || "<name>"}/{version.trim() || "<version>"}.nseb
+          </code>{" "}
+          — the name and version are sealed into it, so it will not open under any other.
+        </Typography>
+        {error && (
+          <Alert severity="error" sx={{ mb: 1 }}>
+            {error}
+          </Alert>
+        )}
+        <Stack direction="row" spacing={1} useFlexGap sx={{ alignItems: "center", flexWrap: "wrap" }}>
+          <TextField size="small" label="name" value={name} onChange={(e) => setName(e.target.value)} />
+          <TextField
+            size="small"
+            label="version"
+            value={version}
+            onChange={(e) => setVersion(e.target.value)}
+          />
+          <input type="file" ref={fileRef} accept=".zip" />
+          <Tooltip title={keyState.unlocked ? "" : "Unlock the encryption key first"}>
+            <span>
+              <Button variant="contained" onClick={seal} disabled={!ready}>
+                Seal & download
+              </Button>
+            </span>
+          </Tooltip>
+        </Stack>
+      </AccordionDetails>
+    </Accordion>
+  );
+}
+
 export function BundlesPage({ me }: { me: Me }) {
   const [bundles, setBundles] = useState<BundleView[] | null>(null);
   /** Name of the bundle whose rename dialog is open. */
@@ -262,6 +335,8 @@ export function BundlesPage({ me }: { me: Me }) {
   const [refreshing, setRefreshing] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const keyState = useBundleKey();
+  // In file mode the server refuses every change, so none is offered.
+  const canWrite = canWriteConfig(me.role) && !me.config_managed;
 
   // Returns void, not the promise: `useEffect` below takes this directly, and a returned
   // promise would be mistaken for a cleanup function.
@@ -303,7 +378,7 @@ export function BundlesPage({ me }: { me: Me }) {
       navigate("/bundles", { replace: true });
     }
   }, [bundleId, bundles, editing, navigate]);
-  const editorOpen = creating || editing !== null;
+  const editorOpen = canWrite && (creating || editing !== null);
 
   const upload = async () => {
     const file = fileRef.current?.files?.[0];
@@ -346,7 +421,7 @@ export function BundlesPage({ me }: { me: Me }) {
         <Typography variant="h4">Bundles</Typography>
         <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
           <RefreshButton refreshing={refreshing} onClick={refresh} />
-          {!editorOpen && canWriteConfig(me.role) && (
+          {!editorOpen && canWrite && (
             <Button
               variant="contained"
               startIcon={<AddIcon />}
@@ -365,6 +440,7 @@ export function BundlesPage({ me }: { me: Me }) {
         Encrypted bundles are additionally sealed in your browser; the server never sees
         their contents or the key.
       </Typography>
+      <ManagedConfigBanner me={me} onReloaded={refresh} />
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
           {error}
@@ -390,7 +466,9 @@ export function BundlesPage({ me }: { me: Me }) {
         <Card>
           <CardContent>
             <Typography sx={{ color: "text.secondary" }}>
-              No bundles yet — create one with the editor, or upload a zip below.
+              {me.config_managed
+                ? "No bundles in the configuration directory."
+                : "No bundles yet — create one with the editor, or upload a zip below."}
             </Typography>
           </CardContent>
         </Card>
@@ -449,7 +527,7 @@ export function BundlesPage({ me }: { me: Me }) {
                         <DownloadIcon fontSize="small" />
                       </IconButton>
                     </Tooltip>
-                    {canWriteConfig(me.role) &&
+                    {canWrite &&
                       (b.format === "enc-v1" &&
                       !(keyState.unlocked && b.key_fingerprint === keyState.fingerprint) ? (
                         <Tooltip
@@ -476,7 +554,7 @@ export function BundlesPage({ me }: { me: Me }) {
                           Edit
                         </Button>
                       ))}
-                    {canWriteConfig(me.role) && (
+                    {canWrite && (
                       <Tooltip
                         title={
                           editing?.name === b.name
@@ -496,7 +574,7 @@ export function BundlesPage({ me }: { me: Me }) {
                         </span>
                       </Tooltip>
                     )}
-                    {canWriteConfig(me.role) && (
+                    {canWrite && (
                       <Tooltip title="Delete this bundle, and remove it from every group">
                         <IconButton size="small" color="error" onClick={() => remove(b)}>
                           <DeleteIcon fontSize="small" />
@@ -513,7 +591,9 @@ export function BundlesPage({ me }: { me: Me }) {
 
       {canWriteConfig(me.role) && <EncryptionKeyCard keyState={keyState} onError={setError} />}
 
-      {canWriteConfig(me.role) && (
+      {canWriteConfig(me.role) && me.config_managed && <SealForDirectory keyState={keyState} />}
+
+      {canWrite && (
       <Accordion sx={{ mt: 1 }} disableGutters>
         <AccordionSummary expandIcon={<ExpandMoreIcon />}>
           <Typography sx={{ color: "text.secondary" }}>Upload a pre-built zip</Typography>

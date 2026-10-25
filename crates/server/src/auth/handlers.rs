@@ -60,6 +60,8 @@ pub struct MeResponse {
     /// Drives the Platform entry in the sidebar. The routes it leads to check the flag
     /// themselves — this only decides whether the UI offers the door.
     pub is_platform_admin: bool,
+    /// Groups and bundles come from `CONFIG_SOURCE_DIR`, so the UI shows them read-only.
+    pub config_managed: bool,
 }
 
 pub async fn signup(
@@ -744,6 +746,7 @@ pub async fn me(State(state): State<AppState>, who: AuthedUser) -> Response {
         trial_expires_at: tenant.trial_expires_at,
         trial_expired,
         is_platform_admin: user.is_platform_admin,
+        config_managed: crate::config_source::is_managed(&state, tenant.id),
     })
     .into_response()
 }

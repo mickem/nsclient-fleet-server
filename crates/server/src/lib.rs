@@ -49,6 +49,9 @@ pub struct AppState {
     /// The facts catalog per tenant, rebuilt only when a tenant's facts moved. Shared across
     /// clones of `AppState`.
     pub facts_catalog_cache: Arc<crate::facts::CatalogCache>,
+    /// Set when `CONFIG_SOURCE_DIR` is: groups and bundles come from that directory, and
+    /// the API routes that would change them refuse.
+    pub config_source: Option<Arc<crate::config_source::ConfigSource>>,
 }
 
 /// Narrow a directory we own to owner-only access.
@@ -309,6 +312,8 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route("/api/bundles/rename", post(bundles::rename))
+        .route("/api/config-source", get(config_source::status))
+        .route("/api/config-source/reload", post(config_source::reload))
         // One re-sealed encrypted version per request. The handler bounds the body by the
         // size of the version it replaces; this is the ceiling no version can exceed.
         .route(

@@ -1,5 +1,6 @@
-//! Write a tenant's groups and bundles out as a configuration directory, to keep in git or
-//! to load into another server with `--import-config`.
+//! Write a tenant's groups and bundles out as a configuration directory, to keep in git,
+//! to serve from with `CONFIG_SOURCE_DIR`, or to load into another server with
+//! `--import-config`.
 //!
 //! What comes out loads back to the same thing: reconciling an export against the database
 //! it came from changes nothing, so loading it back does not make agents download anything

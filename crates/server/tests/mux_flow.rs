@@ -136,6 +136,7 @@ async fn start() -> TestServer {
         )),
         desired_state_cache: Default::default(),
         facts_catalog_cache: Default::default(),
+        config_source: None,
     };
 
     let mux_tls = Arc::new(fleet_server::transport::mux::MuxTls {

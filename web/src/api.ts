@@ -40,6 +40,9 @@ export type Me = {
   trial_expires_at: number | null;
   /** While true, every tenant route answers 402 — the UI shows the expired view instead. */
   trial_expired: boolean;
+  /** Groups and bundles come from a directory on the server (CONFIG_SOURCE_DIR): the UI
+   *  shows them read-only, and the API refuses changes. */
+  config_managed: boolean;
 };
 
 /** Fired on `window` when any API call is refused because the tenant's trial has lapsed,
@@ -406,6 +409,35 @@ export type AssignmentView = {
 };
 
 export type PreviewMatch = { id: string; hostname: string | null };
+
+/** What a reload of the configuration directory did (or, for a dry run, would do).
+ *  Bundles are `name@version`. */
+export type ReloadReport = {
+  changed: boolean;
+  dry_run: boolean;
+  bundles_added: string[];
+  bundles_replaced: string[];
+  bundles_removed: string[];
+  bundles_unchanged: number;
+  groups_added: string[];
+  groups_updated: string[];
+  groups_removed: string[];
+  groups_unchanged: number;
+  assignments_changed: boolean;
+};
+
+export type ReloadStatus = {
+  at: number;
+  ok: boolean;
+  errors: string[];
+  report: ReloadReport | null;
+};
+
+export type ConfigSourceView = {
+  managed: boolean;
+  dir: string | null;
+  last: ReloadStatus | null;
+};
 
 export type AuditView = {
   id: number;

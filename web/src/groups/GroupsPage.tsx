@@ -37,6 +37,7 @@ import {
   selectorIsHostControlled,
 } from "./SelectorBuilder";
 import { RefreshButton } from "../components/RefreshButton";
+import { ManagedConfigBanner } from "../components/ManagedConfigBanner";
 
 export function GroupsPage({ me }: { me: Me }) {
   const [groups, setGroups] = useState<GroupView[] | null>(null);
@@ -55,6 +56,8 @@ export function GroupsPage({ me }: { me: Me }) {
   const { groupId: editingId } = useParams();
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  // In file mode the server refuses every change, so none is offered.
+  const canWrite = canWriteConfig(me.role) && !me.config_managed;
 
   // Returns void, not the promise: `useEffect` below takes this directly, and a returned
   // promise would be mistaken for a cleanup function.
@@ -96,7 +99,7 @@ export function GroupsPage({ me }: { me: Me }) {
         <Typography variant="h4">Groups</Typography>
         <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
           <RefreshButton refreshing={refreshing} onClick={refresh} />
-          {!creating && canWriteConfig(me.role) && (
+          {!creating && canWrite && (
             <Button variant="contained" startIcon={<AddIcon />} onClick={() => navigate("/groups/new")}>
               New group
             </Button>
@@ -109,12 +112,13 @@ export function GroupsPage({ me }: { me: Me }) {
         A group is a saved rule over host tags and facts. Bundles assigned to a group apply to
         every host the rule matches.
       </Typography>
+      <ManagedConfigBanner me={me} onReloaded={refresh} />
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
           {error}
         </Alert>
       )}
-      {creating && (
+      {creating && canWrite && (
         <GroupEditor
           known={known}
           facts={facts}
@@ -145,8 +149,8 @@ export function GroupsPage({ me }: { me: Me }) {
               key={g.id}
               group={g}
               bundles={bundles}
-              canWrite={canWriteConfig(me.role)}
-              editing={editingId === g.id}
+              canWrite={canWrite}
+              editing={canWrite && editingId === g.id}
               onEdit={(open) => navigate(open ? `/groups/${g.id}` : "/groups")}
               onChanged={refresh}
             />
@@ -238,7 +242,7 @@ function GroupCard({
             }}
           />
         )}
-        <AssignmentsPanel groupId={group.id} bundles={bundles} />
+        <AssignmentsPanel groupId={group.id} bundles={bundles} canWrite={canWrite} />
       </CardContent>
     </Card>
   );
@@ -326,7 +330,15 @@ function GroupEditor({
   );
 }
 
-function AssignmentsPanel({ groupId, bundles }: { groupId: string; bundles: BundleView[] }) {
+function AssignmentsPanel({
+  groupId,
+  bundles,
+  canWrite,
+}: {
+  groupId: string;
+  bundles: BundleView[];
+  canWrite: boolean;
+}) {
   const [assignments, setAssignments] = useState<AssignmentView[] | null>(null);
   const [bundleId, setBundleId] = useState("");
   const [priority, setPriority] = useState("100");
@@ -388,11 +400,12 @@ function AssignmentsPanel({ groupId, bundles }: { groupId: string; bundles: Bund
               label={`${a.name}@${a.version} · p${a.priority}`}
               size="small"
               color="primary"
-              onDelete={() => unassign(a.bundle_id)}
+              onDelete={canWrite ? () => unassign(a.bundle_id) : undefined}
             />
           ))
         )}
       </Stack>
+      {canWrite && (
       <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
         <Select
           size="small"
@@ -421,6 +434,7 @@ function AssignmentsPanel({ groupId, bundles }: { groupId: string; bundles: Bund
           Assign
         </Button>
       </Stack>
+      )}
     </Box>
   );
 }

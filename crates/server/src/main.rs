@@ -110,7 +110,8 @@ fn main() -> anyhow::Result<()> {
 /// configuration directory.
 ///
 /// Safe while the server runs: every write is one transaction and bumps `config_version`,
-/// which is what a running server's caches key on.
+/// which is what a running server's caches key on. An import into a server with a
+/// directory of its own is refused, though, since its next reload would undo it.
 async fn config_command(args: &cli::Args) -> anyhow::Result<()> {
     use fleet_server::config_source;
 
@@ -132,9 +133,19 @@ async fn config_command(args: &cli::Args) -> anyhow::Result<()> {
         for note in &report.notes {
             println!("  note: {note}");
         }
+        println!(
+            "\nTo serve from it, set CONFIG_SOURCE_DIR={}",
+            dir.display()
+        );
         return Ok(());
     }
 
+    if std::env::var("CONFIG_SOURCE_DIR").is_ok_and(|v| !v.is_empty()) {
+        anyhow::bail!(
+            "CONFIG_SOURCE_DIR is set, so the server's next reload would replace whatever this \
+             imports — change the files in that directory instead, or unset it first"
+        );
+    }
     let report =
         config_source::reconcile(&db, &store, &cfg.master_key, tenant_id, &dir, args.dry_run)
             .await
@@ -375,6 +386,29 @@ async fn serve(shutdown: Shutdown, env_file_vars: &[String]) -> anyhow::Result<(
     let bundle_store: Arc<dyn fleet_server::bundles::BundleStore> =
         Arc::new(fleet_server::bundles::LocalBundleStore::new(bundle_dir));
 
+    // Groups and bundles from a directory rather than the UI. Single-tenant only: the
+    // directory has no notion of which tenant it is for, so it is the on-prem one.
+    let config_source = match std::env::var("CONFIG_SOURCE_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        Some(dir) => {
+            if !cfg.on_prem {
+                anyhow::bail!(
+                    "CONFIG_SOURCE_DIR needs ON_PREM=true: configuration files are for \
+                     single-tenant installs"
+                );
+            }
+            let tenant_id = fleet_server::config_source::resolve_tenant(&db).await?;
+            tracing::info!(%dir, "groups and bundles are managed in CONFIG_SOURCE_DIR");
+            Some(Arc::new(fleet_server::config_source::ConfigSource::new(
+                dir.into(),
+                tenant_id,
+            )))
+        }
+        None => None,
+    };
+
     let state = AppState {
         db: db.clone(),
         config: cfg.clone(),
@@ -388,6 +422,7 @@ async fn serve(shutdown: Shutdown, env_file_vars: &[String]) -> anyhow::Result<(
         bundle_store,
         desired_state_cache: Default::default(),
         facts_catalog_cache: Default::default(),
+        config_source,
     };
 
     // Both cleanups existed and neither was ever called, so these two tables only grew.
@@ -400,6 +435,8 @@ async fn serve(shutdown: Shutdown, env_file_vars: &[String]) -> anyhow::Result<(
     backfill_all(&state, &db).await?;
     fleet_server::runtime::tenant_setup::rebind_legacy_ciphertexts(&state, &db).await?;
     fleet_server::runtime::tenant_setup::resign_bundles(&state, &db).await?;
+    // After the backfill, which is what gives a new tenant the key bundles are signed with.
+    fleet_server::config_source::load_at_startup(&state).await;
     trust_store.rebuild().await?;
 
     // A dedicated agent port is bound only when LISTEN_MTLS is set (always, when ACME is

@@ -142,6 +142,9 @@ pub async fn create_group(
     if !who.role.can_write_config() {
         return crate::auth::forbidden("change configuration");
     }
+    if let Some(refused) = crate::config_source::refuse_if_managed(&state, who.tenant_id) {
+        return refused;
+    }
     if body.name.trim().is_empty() || body.name.len() > 128 {
         return (StatusCode::BAD_REQUEST, "invalid name").into_response();
     }
@@ -196,6 +199,9 @@ pub async fn patch_group(
     if !who.role.can_write_config() {
         return crate::auth::forbidden("change configuration");
     }
+    if let Some(refused) = crate::config_source::refuse_if_managed(&state, who.tenant_id) {
+        return refused;
+    }
     let selector_json = match &body.selector {
         Some(v) => match Selector::from_json(v) {
             Ok(s) => Some(serde_json::to_string(&s).unwrap_or_else(|_| "{}".to_string())),
@@ -244,6 +250,9 @@ pub async fn delete_group(
 ) -> Response {
     if !who.role.can_write_config() {
         return crate::auth::forbidden("change configuration");
+    }
+    if let Some(refused) = crate::config_source::refuse_if_managed(&state, who.tenant_id) {
+        return refused;
     }
     let groups = GroupsRepo::new(&state.db);
     match groups.delete(who.tenant_id, &group_id).await {
