@@ -7,7 +7,7 @@ use sqlx::Row;
 use crate::Db;
 
 /// A tenant's groups, bundles and assignments replaced wholesale from a configuration
-/// directory — the write side of `--import-config`.
+/// directory — the write side of `CONFIG_SOURCE_DIR` and of `--import-config`.
 ///
 /// The caller works the plan out (which rows to keep, which to replace); this applies it in
 /// one transaction, so a poll never sees a group pointing at a bundle that is half gone, and
@@ -19,7 +19,7 @@ pub struct ConfigSourceRepo<'a> {
 
 /// One group as the directory has it. `id` is the existing row's when a group of that name
 /// is already there, so its id — which appears in the audit log and the UI's URLs — survives
-/// an import.
+/// a reload.
 #[derive(Debug, Clone)]
 pub struct PlannedGroup {
     pub id: String,

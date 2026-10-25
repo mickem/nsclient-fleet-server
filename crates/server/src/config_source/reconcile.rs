@@ -1,10 +1,11 @@
 //! Make a tenant's groups, bundles and assignments match a configuration directory.
 //!
 //! The database stays what everything else reads — desired state, delivery, the UI — so
-//! nothing downstream knows or cares where configuration came from. This is the whole of
-//! `--import-config`.
+//! nothing downstream knows or cares where configuration came from. This is the one writer
+//! when a directory is in charge (`CONFIG_SOURCE_DIR`), and the whole of `--import-config`
+//! when it is not.
 //!
-//! A bundle version is kept, id and all, when its contents have not changed, so an import
+//! A bundle version is kept, id and all, when its contents have not changed, so a reload
 //! that changed one file does not make every agent download every bundle again. One whose
 //! contents did change gets a new id and a new signature: bundle rows are immutable, and
 //! the signature covers the digest.

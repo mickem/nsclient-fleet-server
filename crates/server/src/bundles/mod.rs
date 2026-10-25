@@ -102,6 +102,9 @@ pub async fn delete_bundle(
     if !who.role.can_write_config() {
         return crate::auth::forbidden("change configuration");
     }
+    if let Some(refused) = crate::config_source::refuse_if_managed(&state, who.tenant_id) {
+        return refused;
+    }
     let bundles = BundlesRepo::new(&state.db);
     let row = match bundles.get(who.tenant_id, &bundle_id).await {
         Ok(Some(r)) => r,

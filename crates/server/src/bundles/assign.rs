@@ -30,6 +30,9 @@ pub async fn assign_to_group(
     if !who.role.can_write_config() {
         return crate::auth::forbidden("change configuration");
     }
+    if let Some(refused) = crate::config_source::refuse_if_managed(&state, who.tenant_id) {
+        return refused;
+    }
     if GroupsRepo::new(&state.db)
         .get(who.tenant_id, &group_id)
         .await
@@ -133,6 +136,9 @@ pub async fn unassign_from_group(
 ) -> Response {
     if !who.role.can_write_config() {
         return crate::auth::forbidden("change configuration");
+    }
+    if let Some(refused) = crate::config_source::refuse_if_managed(&state, who.tenant_id) {
+        return refused;
     }
     match BundleAssignmentsRepo::new(&state.db)
         .unassign(who.tenant_id, &group_id, &bundle_id)

@@ -32,6 +32,9 @@ pub async fn upload(
     if !who.role.can_write_config() {
         return crate::auth::forbidden("change configuration");
     }
+    if let Some(refused) = crate::config_source::refuse_if_managed(&state, who.tenant_id) {
+        return refused;
+    }
     let mut name: Option<String> = None;
     let mut version: Option<String> = None;
     let mut format: Option<String> = None;

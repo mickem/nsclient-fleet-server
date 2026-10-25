@@ -59,6 +59,9 @@ pub async fn rename(
     if !who.role.can_write_config() {
         return crate::auth::forbidden("change configuration");
     }
+    if let Some(refused) = crate::config_source::refuse_if_managed(&state, who.tenant_id) {
+        return refused;
+    }
     // `from` is matched exactly as stored: a bundle uploaded before names were validated
     // is the one most worth renaming, and must not be refused for the name it has.
     let from = body.from;

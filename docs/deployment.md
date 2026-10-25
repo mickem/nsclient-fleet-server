@@ -282,6 +282,7 @@ platform console, so it can be closed without a redeploy. See [§14](#14-the-pla
 | `ON_PREM_ADMIN_PASSWORD` | —       | Plaintext. One of this or the hash below is required when `ON_PREM=true` |
 | `ON_PREM_ADMIN_PASSWORD_HASH` | — | An argon2 PHC string, from `nsclient-fleet --hash-password`. Preferred — the env file also lands in backups and config repos. Setting both is a startup error |
 | `BOOTSTRAP_JWT_SECRET`   | derived from `MASTER_KEY` | Base64. Set only to use an unrelated key; the default is an HKDF subkey, not `MASTER_KEY` itself |
+| `CONFIG_SOURCE_DIR`      | —       | Serve groups and bundles from this directory instead of the UI — see [§12](#serving-from-the-directory). Needs `ON_PREM=true` |
 
 Produce the hash with the binary itself — there is no ubiquitous argon2 command-line tool,
 and the one some distributions package defaults to parameters this server does not use:
@@ -689,6 +690,36 @@ is. The bundle's name and version are bound into the envelope, so it only opens 
 under the exact `bundles/<name>/<version>.nseb` it was sealed for — renaming the file breaks
 it. Plain bundles are plain on disk, so anything secret in a `config.json` lands in the
 repository; use an encrypted bundle for those.
+
+#### Serving from the directory
+
+To make the directory the source of truth rather than a copy, set `CONFIG_SOURCE_DIR` to
+it (a clone, typically). The server then loads it at startup and on every reload, and the
+groups, bundles and assignments in the UI and API are read-only — every route that would
+change them answers `409`. It is one or the other: there is no mixing files with UI edits.
+
+```bash
+nsclient-fleet --env-file /etc/nsclient-fleet/env --export-config /srv/fleet-config
+# commit it, then set CONFIG_SOURCE_DIR=/srv/fleet-config and restart
+```
+
+Loading an export changes nothing, so switching an existing install over does not make
+agents download anything again.
+
+**Reloading.** `POST /api/config-source/reload` re-reads the directory — from the Reload
+button on the Groups and Bundles pages, or from a deploy hook after `git pull` with an API
+key. A body of `{"dry_run": true}` reports what would change without changing it. A
+directory that does not load changes nothing: the response (`422`) lists every problem, the
+pages show them, and agents keep the configuration from the last load that worked. The
+same applies at startup, so a bad commit does not stop the server.
+
+**Encrypted bundles** cannot be uploaded while the directory is in charge, so the Bundles
+page offers *Seal a zip for the configuration directory* instead: it encrypts in the browser
+with the registered key and downloads the `.nseb` to commit.
+
+**Leaving.** Unset `CONFIG_SOURCE_DIR` and restart: the database already holds the last
+configuration that loaded, and the UI takes over from there. `--import-config` is refused
+while the variable is set, since the next reload would undo it.
 
 ### Running it on Windows
 
