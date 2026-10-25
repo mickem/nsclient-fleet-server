@@ -20,7 +20,15 @@ import {
   BundleConfigView,
   BundleView,
 } from "../api";
-import { buildBundleZip, CarriedEntries, readBundleZip, TOKEN_RE } from "./bundlezip";
+import {
+  buildBundleZip,
+  type BundleScript,
+  CarriedEntries,
+  readBundleZip,
+  TOKEN_RE,
+} from "./bundlezip";
+import { bytesToBase64, scriptBytes } from "./scriptFiles";
+import { ScriptsEditor } from "./ScriptsEditor";
 import { decryptBundle, encryptBundle, recalledKey } from "./crypto";
 import { ConfigObject, iniToJson, jsonToIni, suggestNextVersion } from "../config/ini";
 import { ConfigEditor } from "../config/ConfigEditor";
@@ -56,13 +64,13 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
   const [ini, setIni] = useState(NEW_BUNDLE_TEMPLATE);
   // Template this bundle was created from (kept through edits via bundle.toml metadata).
   const [template, setTemplate] = useState<string | null>(null);
-  const [scripts, setScripts] = useState<string[]>([]);
+  const [scripts, setScripts] = useState<BundleScript[]>([]);
   const [encrypt, setEncrypt] = useState(editBundle?.format === "enc-v1");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // Non-config zip entries of an encrypted base, decrypted at load. Plain bases leave this
-  // null — their entries are carried server-side by compose, or fetched lazily on an
-  // encrypting save.
+  // Zip entries of the base other than manifest, config and scripts — read at load when the
+  // base was opened in the browser (encrypted, or plain with scripts). Otherwise null: they
+  // are carried server-side by compose, or fetched lazily on an encrypting save.
   const [carried, setCarried] = useState<CarriedEntries | null>(null);
 
   const encBase = editBundle?.format === "enc-v1";
@@ -86,8 +94,15 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
       } else {
         const cfg = await apiGet<BundleConfigView>(`/api/bundles/${editBundle.id}/config`);
         setIni(jsonToIni(cfg.config_json as ConfigObject));
-        setScripts(cfg.scripts);
         setTemplate(cfg.template);
+        // The config view only lists the scripts; their contents come from the zip itself.
+        if (cfg.scripts.length > 0) {
+          const opened = readBundleZip(
+            await apiGetBytes(`/api/bundles/${editBundle.id}/download`),
+          );
+          setScripts(opened.scripts);
+          setCarried(opened.carried);
+        }
       }
       setName(editBundle.name);
       setVersion(suggestNextVersion(editBundle.version));
@@ -140,7 +155,7 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
         if (!key || !keyState.unlocked) {
           throw new Error("Unlock the encryption key first (see the Encryption key section).");
         }
-        const zip = buildBundleZip(n, v, config, await carriedEntries(), tmpl);
+        const zip = buildBundleZip(n, v, config, await carriedEntries(), scripts, tmpl);
         const sealed = await encryptBundle(key, n, v, zip);
         const form = new FormData();
         form.set("name", n);
@@ -154,7 +169,7 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
       } else if (encBase) {
         // The base was decrypted in this browser; the server cannot compose from a bundle
         // it cannot read, so the plain zip is built here too and uploaded as-is.
-        const zip = buildBundleZip(n, v, config, await carriedEntries(), tmpl);
+        const zip = buildBundleZip(n, v, config, await carriedEntries(), scripts, tmpl);
         const form = new FormData();
         form.set("name", n);
         form.set("version", v);
@@ -170,6 +185,8 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
           config_json: config,
           base_bundle_id: editBundle?.id ?? null,
           template: tmpl,
+          // The complete scripts/ set; the server replaces the base's with it.
+          scripts: scripts.map((s) => ({ path: s.path, content_b64: bytesToBase64(s.data) })),
         });
       }
       onSaved();
@@ -202,6 +219,12 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
                 setTemplate(t.id);
                 setName(t.id);
                 setIni(t.ini);
+                setScripts(
+                  (t.scripts ?? []).map((s) => ({
+                    path: s.path,
+                    data: scriptBytes(s.path, s.content),
+                  })),
+                );
               }
               setPicking(false);
             }}
@@ -296,13 +319,8 @@ export function BundleEditor({ editBundle, keyState, onSaved, onCancel }: Props)
             bundle key in their local configuration.
           </Alert>
         )}
-        {scripts.length > 0 && (
-          <Alert severity="info" sx={{ mb: 2 }}>
-            {scripts.length} script file(s) will be carried over unchanged:{" "}
-            <code>{scripts.join(", ")}</code> (script editing comes later).
-          </Alert>
-        )}
         <ConfigEditor template={tmplInfo} ini={ini} onChange={setIni} />
+        <ScriptsEditor scripts={scripts} onChange={setScripts} ini={ini} onIniChange={setIni} />
         {error && (
           <Alert severity="error" sx={{ mt: 1 }}>
             {error}

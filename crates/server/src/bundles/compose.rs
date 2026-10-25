@@ -4,11 +4,15 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use fleet_core::crypto::encbundle;
 use fleet_storage::BundlesRepo;
 use serde::{Deserialize, Serialize};
 
-use super::archive::{build_zip, manifest_toml, read_zip_entries, template_from_manifest};
+use super::archive::{
+    build_zip, manifest_toml, read_zip_entries, template_from_manifest, valid_script_path,
+    MAX_SCRIPT_FILES,
+};
 use super::upload::persist_bundle;
 use super::valid_bundle_token;
 use crate::auth::AuthedUser;
@@ -30,6 +34,19 @@ pub struct ComposeBody {
     /// ignore it.
     #[serde(default)]
     pub template: Option<String>,
+    /// The bundle's complete set of `scripts/` entries, as written by the script editor.
+    /// When present it replaces every `scripts/` entry the base carried (an empty list
+    /// removes them all); when absent the base's scripts are carried over untouched.
+    #[serde(default)]
+    pub scripts: Option<Vec<ScriptFile>>,
+}
+
+/// One file under `scripts/`. Content is base64 so uploaded scripts round-trip byte for
+/// byte — a UTF-16 PowerShell file or a CRLF batch file is not the editor's to normalise.
+#[derive(Deserialize)]
+pub struct ScriptFile {
+    pub path: String,
+    pub content_b64: String,
 }
 
 /// `POST /api/bundles/compose` — build a bundle server-side from an edited config.
@@ -140,6 +157,45 @@ pub async fn compose(
         }
     }
 
+    if let Some(scripts) = body.scripts {
+        if scripts.len() > MAX_SCRIPT_FILES {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("too many script files (limit {MAX_SCRIPT_FILES})"),
+            )
+                .into_response();
+        }
+        carried.retain(|(n, _)| !n.starts_with("scripts/"));
+        let mut seen = std::collections::HashSet::new();
+        for script in scripts {
+            if !valid_script_path(&script.path) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "invalid script path {:?} (scripts/ followed by letters, digits,                          '.', '_', '-' and '/')",
+                        script.path
+                    ),
+                )
+                    .into_response();
+            }
+            if !seen.insert(script.path.clone()) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("duplicate script path {:?}", script.path),
+                )
+                    .into_response();
+            }
+            let Ok(data) = STANDARD.decode(script.content_b64.as_bytes()) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("script {:?} is not valid base64", script.path),
+                )
+                    .into_response();
+            };
+            carried.push((script.path, data));
+        }
+    }
+
     let config_pretty =
         serde_json::to_string_pretty(&body.config_json).unwrap_or_else(|_| "{}".to_string());
     let manifest = manifest_toml(name, version, template);
@@ -175,8 +231,8 @@ pub struct BundleConfigView {
     pub name: String,
     pub version: String,
     pub config_json: serde_json::Value,
-    /// Script entries present in the zip (paths under scripts/). Read-only for now —
-    /// the editor preserves them via compose's base_bundle_id.
+    /// Script entries present in the zip (paths under scripts/). The editor fetches their
+    /// contents from the bundle download when there are any.
     pub scripts: Vec<String>,
     /// Template id recorded in bundle.toml when the bundle was created from a UI
     /// template; null for blank/uploaded bundles.

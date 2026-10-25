@@ -299,7 +299,14 @@ pub fn router(state: AppState) -> Router {
             "/api/bundle-key",
             get(bundles::get_bundle_key).put(bundles::set_bundle_key),
         )
-        .route("/api/bundles/compose", post(bundles::compose))
+        // Compose carries the bundle's script files (base64) as well as its config, so it
+        // gets the upload's ceiling; the tier limit is enforced on the built zip.
+        .route(
+            "/api/bundles/compose",
+            post(bundles::compose).layer(axum::extract::DefaultBodyLimit::max(
+                fleet_core::tier::MAX_BUNDLE_MB_ANY_TIER as usize * 1024 * 1024,
+            )),
+        )
         .route("/api/bundles/rename", post(bundles::rename))
         // One re-sealed encrypted version per request. The handler bounds the body by the
         // size of the version it replaces; this is the ceiling no version can exceed.

@@ -939,6 +939,135 @@ async fn compose_edit_next_version_preserves_scripts() {
 }
 
 #[tokio::test]
+async fn compose_writes_and_replaces_scripts() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    async fn compose(s: &common::TestServer, body: serde_json::Value) -> reqwest::Response {
+        s.cookie_jar
+            .post(format!("{}/api/bundles/compose", s.base_url))
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+    }
+    async fn entries(s: &common::TestServer, id: &str) -> BTreeMap<String, Vec<u8>> {
+        use std::io::Read;
+        let bytes = s
+            .cookie_jar
+            .get(format!("{}/api/bundles/{id}/download", s.base_url))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
+        let mut out = BTreeMap::new();
+        for i in 0..zip.len() {
+            let mut f = zip.by_index(i).unwrap();
+            let mut data = Vec::new();
+            f.read_to_end(&mut data).unwrap();
+            out.insert(f.name().unwrap().to_string(), data);
+        }
+        out
+    }
+
+    let s = start().await;
+    signup_login(&s, "scripter", "scripter@example.com").await;
+
+    // 1. A new bundle with two scripts: bytes land in the zip exactly as sent (CRLF kept).
+    let bat = b"@echo off
+echo OK
+exit /b 0
+"
+    .to_vec();
+    let lua = b"Registry():simple_query('x', f, 'x')
+"
+    .to_vec();
+    let r = compose(
+        &s,
+        serde_json::json!({
+            "name": "scripted",
+            "version": "1.0.0",
+            "config_json": {},
+            "scripts": [
+                { "path": "scripts/check.bat", "content_b64": STANDARD.encode(&bat) },
+                { "path": "scripts/lua/check.lua", "content_b64": STANDARD.encode(&lua) },
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(r.status(), 201, "compose: {:?}", r.text().await);
+    let v1: serde_json::Value = r.json().await.unwrap();
+    let v1_id = v1["id"].as_str().unwrap().to_string();
+    let files = entries(&s, &v1_id).await;
+    assert_eq!(files["scripts/check.bat"], bat);
+    assert_eq!(files["scripts/lua/check.lua"], lua);
+
+    // 2. A next version without `scripts` carries them over untouched.
+    let r = compose(
+        &s,
+        serde_json::json!({
+            "name": "scripted",
+            "version": "1.0.1",
+            "config_json": {},
+            "base_bundle_id": v1_id,
+        }),
+    )
+    .await;
+    assert_eq!(r.status(), 201);
+    let v2: serde_json::Value = r.json().await.unwrap();
+    let v2_id = v2["id"].as_str().unwrap().to_string();
+    let files = entries(&s, &v2_id).await;
+    assert!(files.contains_key("scripts/check.bat"));
+    assert!(files.contains_key("scripts/lua/check.lua"));
+
+    // 3. With `scripts`, the list is the complete set: one edited, one dropped.
+    let r = compose(
+        &s,
+        serde_json::json!({
+        "name": "scripted",
+        "version": "1.0.2",
+        "config_json": {},
+        "base_bundle_id": v2_id,
+        "scripts": [{ "path": "scripts/check.bat", "content_b64": STANDARD.encode(b"exit /b 1") }],
+    }),
+    )
+    .await;
+    assert_eq!(r.status(), 201);
+    let v3: serde_json::Value = r.json().await.unwrap();
+    let files = entries(&s, v3["id"].as_str().unwrap()).await;
+    assert_eq!(files["scripts/check.bat"], b"exit /b 1");
+    assert!(!files.contains_key("scripts/lua/check.lua"));
+
+    // 4. Paths outside scripts/, traversal, duplicates and bad base64 are refused.
+    for (i, scripts) in [
+        serde_json::json!([{ "path": "config.json", "content_b64": "" }]),
+        serde_json::json!([{ "path": "scripts/../bundle.toml", "content_b64": "" }]),
+        serde_json::json!([{ "path": "scripts/a b.sh", "content_b64": "" }]),
+        serde_json::json!([
+            { "path": "scripts/a.sh", "content_b64": "" },
+            { "path": "scripts/a.sh", "content_b64": "" },
+        ]),
+        serde_json::json!([{ "path": "scripts/a.sh", "content_b64": "not base64!" }]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let r = compose(
+            &s,
+            serde_json::json!({
+                "name": "refused",
+                "version": format!("1.0.{i}"),
+                "config_json": {},
+                "scripts": scripts,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), 400, "case {i}: {:?}", r.text().await);
+    }
+}
+
+#[tokio::test]
 async fn compose_records_template_and_round_trips_it() {
     let s = start().await;
     signup_login(&s, "templater", "templater@example.com").await;
