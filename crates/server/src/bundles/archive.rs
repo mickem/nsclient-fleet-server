@@ -53,7 +53,7 @@ pub(super) fn valid_script_path(path: &str) -> bool {
 /// case (Windows file systems ignore case), or a file where `path` needs a folder or the
 /// other way round (`scripts/a` and `scripts/a/b.sh`). Exact duplicates are not reported.
 /// Mirrors `scriptPathClash` in web/src/bundles/bundlezip.ts.
-pub(super) fn path_clash<'a>(path: &str, paths: &[&'a str]) -> Option<&'a str> {
+pub(crate) fn path_clash<'a>(path: &str, paths: &[&'a str]) -> Option<&'a str> {
     let lower = path.to_ascii_lowercase();
     paths.iter().copied().find(|other| {
         let o = other.to_ascii_lowercase();
@@ -88,15 +88,38 @@ pub(super) fn build_zip(
     Ok(cursor.into_inner())
 }
 
+/// Zip `entries` exactly as given, in the order given, with every timestamp fixed.
+///
+/// For bundles built from a configuration directory, where the same files have to make the
+/// same bytes on every reload: a zip that stamped the time would hash differently each time
+/// and every reload would look like a new bundle.
+pub(crate) fn build_zip_from_entries(entries: &[(String, Vec<u8>)]) -> Result<Vec<u8>> {
+    use std::io::Write;
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut cursor);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .last_modified_time(zip::DateTime::default())
+            .unix_permissions(0o644);
+        for (name, data) in entries {
+            writer.start_file(name.as_str(), opts)?;
+            writer.write_all(data)?;
+        }
+        writer.finish()?;
+    }
+    Ok(cursor.into_inner())
+}
+
 /// Most a bundle may expand to across all its entries.
 ///
 /// Bundles carry configuration, scripts and small assets; the largest tier allows a 250 MB
 /// upload, and nothing legitimate inflates far past that. The cap is on the *total*, so a
 /// thousand small entries cannot add up to the same attack a single large one would.
-const MAX_INFLATED_TOTAL: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_INFLATED_TOTAL: u64 = 512 * 1024 * 1024;
 
 /// Most entries we will walk. A zip can declare millions of them in a few kilobytes.
-const MAX_ZIP_ENTRIES: usize = 10_000;
+pub(crate) const MAX_ZIP_ENTRIES: usize = 10_000;
 
 /// Read a bundle zip into memory, refusing anything that would cost more than it should.
 ///
@@ -115,7 +138,7 @@ const MAX_ZIP_ENTRIES: usize = 10_000;
 ///
 /// Upload does not parse, so a crafted file is stored first and opened later by whoever
 /// reads the config — which is why this is a refusal and not a panic.
-pub(super) fn read_zip_entries(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
+pub(crate) fn read_zip_entries(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
     read_zip_entries_within(bytes, MAX_INFLATED_TOTAL)
 }
 

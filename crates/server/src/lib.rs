@@ -2,6 +2,7 @@ pub mod admin;
 pub mod agent;
 pub mod auth;
 pub mod bundles;
+pub mod config_source;
 pub mod facts;
 pub mod hosts;
 pub mod runtime;

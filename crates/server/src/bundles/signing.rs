@@ -11,11 +11,21 @@ pub(crate) async fn load_tenant_signing_key(
     state: &AppState,
     tenant_id: i64,
 ) -> Result<SigningKey> {
-    let secrets = TenantSecretsRepo::new(&state.db)
+    load_signing_key(&state.db, &state.config.master_key, tenant_id).await
+}
+
+/// [`load_tenant_signing_key`] for a caller with no [`AppState`]: the import command runs
+/// before, or instead of, a server.
+pub(crate) async fn load_signing_key(
+    db: &fleet_storage::Db,
+    master_key: &fleet_core::crypto::aead::MasterKey,
+    tenant_id: i64,
+) -> Result<SigningKey> {
+    let secrets = TenantSecretsRepo::new(db)
         .get_by_tenant(tenant_id)
         .await?
         .ok_or_else(|| anyhow!("tenant secrets missing for {tenant_id}"))?;
-    let key_bytes = state.config.master_key.decrypt(
+    let key_bytes = master_key.decrypt(
         fleet_core::crypto::aead::Purpose::TenantBundleSigningKey { tenant_id },
         &secrets.bundle_signing_key_encrypted,
     )?;

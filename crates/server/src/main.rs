@@ -57,7 +57,8 @@ fn handled_immediate_command(args: &cli::Args) -> anyhow::Result<bool> {
             service::uninstall()?;
             Ok(true)
         }
-        cli::Command::Serve => Ok(false),
+        // These read the database, so they need the environment loaded first.
+        cli::Command::Serve | cli::Command::ExportConfig | cli::Command::ImportConfig => Ok(false),
     }
 }
 
@@ -77,6 +78,13 @@ fn main() -> anyhow::Result<()> {
     // Held for the rest of the process: dropping it stops the log file being written.
     let _log_guard = init_tracing();
 
+    if matches!(
+        args.command,
+        cli::Command::ExportConfig | cli::Command::ImportConfig
+    ) {
+        return tokio::runtime::Runtime::new()?.block_on(config_command(&args));
+    }
+
     // Under the Windows service control manager this never returns until the service is
     // stopped. Anywhere else — a console, a container, systemd — it reports that there is
     // no SCM to talk to and we carry on as an ordinary foreground process.
@@ -95,6 +103,81 @@ fn main() -> anyhow::Result<()> {
         });
         serve(shutdown, &from_file).await
     })
+}
+
+/// `--export-config` and `--import-config`: open the database and bundle store the server
+/// would use, and move the on-prem tenant's groups and bundles out to, or in from, a
+/// configuration directory.
+///
+/// Safe while the server runs: every write is one transaction and bumps `config_version`,
+/// which is what a running server's caches key on.
+async fn config_command(args: &cli::Args) -> anyhow::Result<()> {
+    use fleet_server::config_source;
+
+    let dir = args.config_dir.clone().expect("the parser sets it");
+    let cfg = Config::from_env()?;
+    let db = fleet_storage::open(&cfg.database_path).await?;
+    fleet_storage::run_migrations(&db.write).await?;
+    let store = fleet_server::bundles::LocalBundleStore::new(bundle_dir());
+    let tenant_id = config_source::resolve_tenant(&db).await?;
+
+    if args.command == cli::Command::ExportConfig {
+        let report = config_source::export(&db, &store, tenant_id, &dir).await?;
+        println!("Exported to {}:", dir.display());
+        println!("  {} group(s)", report.groups);
+        println!(
+            "  {} bundle version(s) as files, {} as zip, {} encrypted",
+            report.bundles_as_files, report.bundles_as_zip, report.bundles_encrypted
+        );
+        for note in &report.notes {
+            println!("  note: {note}");
+        }
+        return Ok(());
+    }
+
+    let report =
+        config_source::reconcile(&db, &store, &cfg.master_key, tenant_id, &dir, args.dry_run)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let verb = if args.dry_run {
+        "Would change"
+    } else {
+        "Imported"
+    };
+    if !report.changed {
+        println!(
+            "Nothing to change: the database already matches {}.",
+            dir.display()
+        );
+        return Ok(());
+    }
+    println!("{verb} from {}:", dir.display());
+    let list = |label: &str, items: &[String]| {
+        if !items.is_empty() {
+            println!("  {label}: {}", items.join(", "));
+        }
+    };
+    list("bundles added", &report.bundles_added);
+    list("bundles replaced", &report.bundles_replaced);
+    list("bundles removed", &report.bundles_removed);
+    list("groups added", &report.groups_added);
+    list("groups updated", &report.groups_updated);
+    list("groups removed", &report.groups_removed);
+    if report.assignments_changed {
+        println!("  assignments changed");
+    }
+    println!(
+        "  unchanged: {} bundle version(s), {} group(s)",
+        report.bundles_unchanged, report.groups_unchanged
+    );
+    Ok(())
+}
+
+/// Where bundle bytes live, from `BUNDLE_DIR`.
+fn bundle_dir() -> std::path::PathBuf {
+    std::env::var("BUNDLE_DIR")
+        .unwrap_or_else(|_| "data/bundles".into())
+        .into()
 }
 
 /// Install the log subscriber. Called once, from `main`, before anything that logs.
@@ -283,15 +366,14 @@ async fn serve(shutdown: Shutdown, env_file_vars: &[String]) -> anyhow::Result<(
     let trust_store =
         mtls::MtlsContext::load(db.clone(), mtls_cert_pem.clone(), mtls_key_pem).await?;
 
-    let bundle_dir = std::env::var("BUNDLE_DIR").unwrap_or_else(|_| "data/bundles".into());
+    let bundle_dir = bundle_dir();
     std::fs::create_dir_all(&bundle_dir)?;
     // Bundles can carry scripts and, in the plain format, secrets. Same reasoning as the
     // ACME cache: the unit's UMask covers new files, this covers a directory that already
     // exists with a wider mode.
-    fleet_server::restrict_dir(std::path::Path::new(&bundle_dir));
-    let bundle_store: Arc<dyn fleet_server::bundles::BundleStore> = Arc::new(
-        fleet_server::bundles::LocalBundleStore::new(std::path::PathBuf::from(bundle_dir)),
-    );
+    fleet_server::restrict_dir(&bundle_dir);
+    let bundle_store: Arc<dyn fleet_server::bundles::BundleStore> =
+        Arc::new(fleet_server::bundles::LocalBundleStore::new(bundle_dir));
 
     let state = AppState {
         db: db.clone(),
