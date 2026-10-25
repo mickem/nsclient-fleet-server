@@ -20,14 +20,18 @@ type Props = {
   onCancel: () => void;
   /** Text above the templates; defaults to the bundle wording. */
   intro?: ReactNode;
+  /** Templates to offer; all by default. Categories left empty are not shown. */
+  filter?: (template: BundleTemplate) => boolean;
 };
 
 /** First step of "New bundle": pick a single-concern template (or start blank). The
  *  template's settings are then edited in the editor's visual view. One category is
  *  shown at a time (tabs) so the action buttons stay on screen; the selection is kept
  *  when switching tabs and echoed in the "Use …" button. */
-export function TemplatePicker({ onPick, onCancel, intro }: Props) {
-  const [category, setCategory] = useState(TEMPLATE_CATEGORIES[0]);
+export function TemplatePicker({ onPick, onCancel, intro, filter }: Props) {
+  const offered = filter ? TEMPLATES.filter(filter) : TEMPLATES;
+  const categories = TEMPLATE_CATEGORIES.filter((c) => offered.some((t) => t.category === c));
+  const [category, setCategory] = useState(categories[0]);
   const [selected, setSelected] = useState<BundleTemplate | null>(null);
 
   return (
@@ -46,12 +50,12 @@ export function TemplatePicker({ onPick, onCancel, intro }: Props) {
         allowScrollButtonsMobile
         sx={{ borderBottom: 1, borderColor: "divider", mb: 1.5 }}
       >
-        {TEMPLATE_CATEGORIES.map((cat) => (
+        {categories.map((cat) => (
           <Tab key={cat} label={cat} value={cat} />
         ))}
       </Tabs>
       <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
-        {TEMPLATES.filter((t) => t.category === category).map((t) => {
+        {offered.filter((t) => t.category === category).map((t) => {
           const isSelected = selected?.id === t.id;
           return (
             <Card

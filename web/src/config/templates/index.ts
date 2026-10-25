@@ -15,8 +15,9 @@
 //
 // Layout: types.ts (field and template shapes), fields.ts (reading and writing a field in
 // the INI), factSets.ts (the facts the agent collects), shared.ts (building blocks the
-// definitions share), and definitions/ (one file per category, concatenated below in the
-// order the picker shows them).
+// definitions share), scripts.ts (the script languages a bundle can ship), and
+// definitions/ (one file per category, concatenated below in the order the picker shows
+// them).
 
 import { type BundleTemplate } from "./types";
 import { SYSTEM_HEALTH } from "./definitions/systemHealth";
@@ -33,6 +34,7 @@ export {
   type TemplateField,
   type TablePreset,
   type BundleTemplate,
+  type TemplateScript,
 } from "./types";
 export {
   TABLE_KEY_RE,
@@ -52,6 +54,16 @@ export {
 } from "./fields";
 export { type FactTarget, type FactSet, FACT_SETS, factSetState, setFactSet } from "./factSets";
 export { SERVICE_NAME_RE, TAG_NAME_RE } from "./shared";
+export {
+  type ScriptLanguageId,
+  type ScriptLanguage,
+  SCRIPT_LANGUAGES,
+  scriptLanguageById,
+  scriptLanguageOf,
+  registerScript,
+  registrableAt,
+  registrationsOf,
+} from "./scripts";
 
 export function templateById(id: string): BundleTemplate | undefined {
   return TEMPLATES.find((t) => t.id === id);

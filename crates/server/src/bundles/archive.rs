@@ -25,6 +25,45 @@ pub(super) fn template_from_manifest(bytes: &[u8]) -> Option<String> {
     })
 }
 
+/// Most script files one composed bundle may carry.
+pub(super) const MAX_SCRIPT_FILES: usize = 500;
+
+/// A script entry the editor may write: `scripts/` followed by up to eight `/`-separated
+/// segments of letters, digits, `.`, `_` and `-`, none of them `.` or `..`. The agent
+/// stages these under `${fleet-folder}/scripts` and the INI names them on a command line,
+/// so the charset is kept to what needs no quoting there. Mirrors `SCRIPT_PATH_RE` in
+/// web/src/bundles/bundlezip.ts.
+pub(super) fn valid_script_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("scripts/") else {
+        return false;
+    };
+    let segments: Vec<&str> = rest.split('/').collect();
+    path.len() <= 256
+        && segments.len() <= 8
+        && segments.iter().all(|s| {
+            !s.is_empty()
+                && *s != "."
+                && *s != ".."
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        })
+}
+
+/// Another of `paths` that `path` cannot sit beside on an agent: the same name in another
+/// case (Windows file systems ignore case), or a file where `path` needs a folder or the
+/// other way round (`scripts/a` and `scripts/a/b.sh`). Exact duplicates are not reported.
+/// Mirrors `scriptPathClash` in web/src/bundles/bundlezip.ts.
+pub(super) fn path_clash<'a>(path: &str, paths: &[&'a str]) -> Option<&'a str> {
+    let lower = path.to_ascii_lowercase();
+    paths.iter().copied().find(|other| {
+        let o = other.to_ascii_lowercase();
+        *other != path
+            && (o == lower
+                || o.strip_prefix(&lower).is_some_and(|r| r.starts_with('/'))
+                || lower.strip_prefix(&o).is_some_and(|r| r.starts_with('/')))
+    })
+}
+
 pub(super) fn build_zip(
     manifest_toml: &str,
     config_json: &str,
@@ -215,6 +254,46 @@ mod tests {
                 Ok(_) => None,
                 Err(e) => Some(e.to_string()),
             }
+        }
+    }
+
+    #[test]
+    fn script_paths_clash_by_case_and_file_against_folder() {
+        let all = [
+            "scripts/A.bat",
+            "scripts/a.bat",
+            "scripts/x",
+            "scripts/x/y.sh",
+            "scripts/xy",
+        ];
+        assert_eq!(path_clash("scripts/A.bat", &all), Some("scripts/a.bat"));
+        assert_eq!(path_clash("scripts/x", &all), Some("scripts/x/y.sh"));
+        assert_eq!(path_clash("scripts/x/y.sh", &all), Some("scripts/x"));
+        assert_eq!(path_clash("scripts/xy", &all), None);
+        assert_eq!(path_clash("scripts/a", &["scripts/a", "scripts/a"]), None);
+    }
+
+    #[test]
+    fn script_paths_stay_under_scripts_and_need_no_quoting() {
+        for ok in [
+            "scripts/check.bat",
+            "scripts/python/check_thing.py",
+            "scripts/lua/lib/helper.lua",
+        ] {
+            assert!(valid_script_path(ok), "{ok} should be accepted");
+        }
+        for bad in [
+            "check.bat",
+            "scripts/",
+            "scripts//a.sh",
+            "scripts/../a.sh",
+            "scripts/./a.sh",
+            "scripts/a b.sh",
+            "scripts\\a.bat",
+            "scripts/a/b/c/d/e/f/g/h/i.sh",
+            "/scripts/a.sh",
+        ] {
+            assert!(!valid_script_path(bad), "{bad} should be refused");
         }
     }
 

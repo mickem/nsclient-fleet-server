@@ -528,6 +528,8 @@ export function HostConfigCard({ host, desired, desiredError, canWrite, onChange
           <Stack spacing={1.5}>
             <Typography variant="subtitle1">{hasOverride ? "Edit override" : "New override"}</Typography>
             <TemplatePicker
+              // An override is configuration only: it has nowhere to put a script file.
+              filter={(t) => t.scripts === undefined}
               intro={
                 "Pick what to change on this host. A template adds its settings where the " +
                 "host has none and opens its form; anything its bundles already set keeps " +

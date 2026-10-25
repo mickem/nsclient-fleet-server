@@ -140,4 +140,9 @@ export type BundleTemplate = {
   fields: TemplateField[];
   /** Base INI document; defaults here match the fields' defaults. */
   ini: string;
+  /** Files the bundle starts with, at bundle paths under scripts/. A template with scripts
+   *  is bundle-only: a host override has nowhere to put them. */
+  scripts?: TemplateScript[];
 };
+
+export type TemplateScript = { path: string; content: string };
