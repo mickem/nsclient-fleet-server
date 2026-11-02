@@ -4,7 +4,9 @@ pub mod auth;
 pub mod bundles;
 pub mod config_source;
 pub mod facts;
+pub mod failures;
 pub mod hosts;
+pub mod llm;
 pub mod runtime;
 pub mod transport;
 
@@ -329,6 +331,18 @@ pub fn router(state: AppState) -> Router {
         .route("/api/bundles/{id}/config", get(bundles::get_config))
         .route("/api/bundles/{id}/download", get(bundles::ui_download))
         .route("/api/audit", get(admin::audit::list))
+        // Failure contexts. `settings` is declared before `{id}` so the literal path is not
+        // captured by the parameter route.
+        .route("/api/failures", get(failures::list))
+        .route(
+            "/api/failures/settings",
+            get(failures::get_settings).put(failures::put_settings),
+        )
+        .route(
+            "/api/failures/{id}",
+            get(failures::get).delete(failures::delete_failure),
+        )
+        .route("/api/failures/{id}/describe", post(failures::describe))
         .route(
             "/api/keys",
             get(auth::api_keys::list).post(auth::api_keys::create),
@@ -407,6 +421,7 @@ pub fn mtls_router(state: AppState) -> Router {
         // can legitimately exceed axum's 2 MiB default, and an oversized one has to reach
         // the handler for its refusal to be recorded.
         .route("/agent/v1/facts", post(facts::upload))
+        .route("/agent/v1/failure-context", post(failures::ingest))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             agent::limits::tier_layer,
