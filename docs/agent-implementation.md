@@ -337,10 +337,11 @@ loop:
 | Enrollment server-side                              | `crates/server/src/hosts/mod.rs` (`enroll`)                                 |
 | Desired-state / state-report / renew handlers       | `crates/server/src/agent/api.rs`                                        |
 | Host facts: hash exchange, upload, operator view    | `crates/server/src/facts/` (`exchange.rs`, `upload.rs`, `view.rs`), `crates/core/src/facts/mod.rs` (wire format, diff); protocol in [agent-integration.md §3](agent-integration.md#3-host-facts-inventory) |
+| Failure context: header, ingest, enrichment         | `crates/server/src/failures/` (`exchange.rs`, `ingest.rs`, `view.rs`, `enrichment.rs`), `crates/server/src/llm/`, `crates/core/src/failures/mod.rs` (wire format, fingerprint); protocol in [agent-integration.md §4](agent-integration.md#4-failure-context) |
 | Desired-state computation (tags → groups → bundles) | `crates/server/src/agent/desired_state.rs`                                    |
 | Bundle download authz                               | `crates/server/src/bundles/download.rs` (`download`)                             |
 | Route wiring (public vs mTLS router)                | `crates/server/src/lib.rs`                                              |
-| End-to-end lifecycle tests                          | `crates/server/tests/fleet_flow.rs`, `crates/server/tests/poll_flow.rs`, `crates/server/tests/facts_flow.rs` |
+| End-to-end lifecycle tests                          | `crates/server/tests/fleet_flow.rs`, `crates/server/tests/poll_flow.rs`, `crates/server/tests/facts_flow.rs`, `crates/server/tests/failure_flow.rs` |
 
 The simulator uses `rcgen` (keys/CSRs), `rustls` + `reqwest` (mTLS),
 `ed25519-dalek` (signature verify), and `sha2` — a real Rust agent can reuse

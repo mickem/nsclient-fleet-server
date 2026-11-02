@@ -100,6 +100,10 @@ pub async fn desired_state(
     // On every answer, the 304 included: that is the point of it being a header.
     let facts_header =
         crate::facts::advertise(&state, ctx.tenant_id, &ctx.host_id, q.facts_hash.as_deref()).await;
+    // The same applies to failure reports, and more strictly: the agent posts nothing until
+    // it has seen this on a *poll* answer, and a poll answer without it switches reporting
+    // back off. So it has to ride the 304 too, or a host in sync would stop reporting.
+    let failure_header = crate::failures::advertise(&state, ctx.tenant_id).await;
 
     // No tenant row means no trustworthy cache key; fall back to computing directly rather
     // than caching against a version we invented.
@@ -126,15 +130,18 @@ pub async fn desired_state(
     };
 
     if q.current_hash.as_deref() == Some(ds.state_hash.as_str()) {
-        return crate::facts::with_header(
-            (
-                StatusCode::NOT_MODIFIED,
-                Json(NotModifiedResponse {
-                    next_poll_in_seconds: next_poll,
-                }),
-            )
-                .into_response(),
-            facts_header,
+        return crate::failures::with_header(
+            crate::facts::with_header(
+                (
+                    StatusCode::NOT_MODIFIED,
+                    Json(NotModifiedResponse {
+                        next_poll_in_seconds: next_poll,
+                    }),
+                )
+                    .into_response(),
+                facts_header,
+            ),
+            failure_header,
         );
     }
 
@@ -153,16 +160,19 @@ pub async fn desired_state(
         })
         .collect();
 
-    crate::facts::with_header(
-        Json(DesiredStateResponse {
-            tenant_id: ctx.tenant_id,
-            state_hash: ds.state_hash,
-            next_poll_in_seconds: next_poll,
-            merged_config_json: ds.merged_config,
-            bundles,
-        })
-        .into_response(),
-        facts_header,
+    crate::failures::with_header(
+        crate::facts::with_header(
+            Json(DesiredStateResponse {
+                tenant_id: ctx.tenant_id,
+                state_hash: ds.state_hash,
+                next_poll_in_seconds: next_poll,
+                merged_config_json: ds.merged_config,
+                bundles,
+            })
+            .into_response(),
+            facts_header,
+        ),
+        failure_header,
     )
 }
 
