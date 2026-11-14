@@ -4,7 +4,7 @@
 //! This server is not the monitoring system. The monitoring system raises the alert, decides
 //! how bad it is and tracks how long it has been open. What the fleet adds is context: when
 //! someone holding an error asks why, the host's latest metrics snapshot, its inventory facts
-//! and the agent's own record of the check are here to explain it against.
+//! and the agent's own record of the check are here to explain it against ([`explain`]).
 //!
 //! A failed check tells you what came back. The report tells you what the host looked like
 //! when it came back: the check and its perfdata, who ran it, and — when the agent captures
@@ -24,12 +24,15 @@
 //! - [`exchange`] advertises the header that turns reporting on.
 //! - [`ingest`] takes a report; the status codes it returns are part of the agent's contract.
 //! - [`view`] is a host's reports, the settings, and the retention sweep.
+//! - [`explain`] asks a model to explain an error against a host's evidence.
 
 mod exchange;
+mod explain;
 mod ingest;
 mod view;
 
 pub use exchange::{advertise, with_header};
+pub use explain::explain;
 pub use ingest::{ingest, MAX_FAILURES_PER_HOST, RETENTION_SECS};
 pub use view::{
     delete_context, get, get_settings, list, put_settings, sweep, ContextDetailView,

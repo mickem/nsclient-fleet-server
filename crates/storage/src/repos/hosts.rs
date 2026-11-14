@@ -63,6 +63,23 @@ impl<'a> HostRepo<'a> {
         Ok(row.map(map_host))
     }
 
+    /// Hosts whose hostname is `hostname`, ignoring ASCII case, oldest first. More than one
+    /// is possible — nothing makes a hostname unique — and the caller decides what that means.
+    pub async fn find_by_hostname(&self, tenant_id: i64, hostname: &str) -> Result<Vec<Host>> {
+        let rows = sqlx::query(
+            "SELECT id, tenant_id, hostname, os, enrolled_at, last_seen_at, current_state_hash,
+                    bootstrap_expires_at, local_config_present, host_override_last, created_at
+             FROM hosts WHERE tenant_id = ? AND hostname = ? COLLATE NOCASE
+             ORDER BY created_at, id",
+        )
+        .bind(tenant_id)
+        .bind(hostname)
+        .fetch_all(&self.db.read)
+        .await?;
+
+        Ok(rows.into_iter().map(map_host).collect())
+    }
+
     pub async fn list(&self, tenant_id: i64) -> Result<Vec<Host>> {
         let rows = sqlx::query(
             "SELECT id, tenant_id, hostname, os, enrolled_at, last_seen_at, current_state_hash,

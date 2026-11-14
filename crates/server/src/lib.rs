@@ -331,12 +331,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/bundles/{id}/config", get(bundles::get_config))
         .route("/api/bundles/{id}/download", get(bundles::ui_download))
         .route("/api/audit", get(admin::audit::list))
-        // Failure contexts: a host's reports, kept as evidence.
+        // Failure contexts: a host's reports as evidence, and explaining an error against them.
         .route("/api/hosts/{id}/contexts", get(failures::list))
         .route(
             "/api/hosts/{id}/contexts/{context_id}",
             get(failures::get).delete(failures::delete_context),
         )
+        .route("/api/explain", post(failures::explain))
         .route(
             "/api/settings/explain",
             get(failures::get_settings).put(failures::put_settings),
