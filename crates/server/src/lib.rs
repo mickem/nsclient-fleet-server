@@ -86,6 +86,13 @@ async fn healthz(State(state): State<AppState>) -> Response {
 
 async fn frontend(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
+
+    // An API path no route matched is a missing endpoint, not a page. Answering it with
+    // index.html would hand a client a 200 it then fails to parse as JSON — a stale console
+    // calling a removed route would report "Unexpected token '<'" rather than a 404.
+    if path == "api" || path.starts_with("api/") {
+        return (StatusCode::NOT_FOUND, "no such API endpoint").into_response();
+    }
     let resolved = if path.is_empty() { "index.html" } else { path };
 
     if let Some(file) = EmbeddedFrontend::get(resolved) {

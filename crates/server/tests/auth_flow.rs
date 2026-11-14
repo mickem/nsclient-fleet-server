@@ -223,6 +223,35 @@ async fn security_headers_are_set_on_api_and_on_the_spa() {
     }
 }
 
+/// An API path that no route matches is a 404, not the SPA. Served as index.html with a
+/// 200, a console calling a removed endpoint fails with "Unexpected token '<'" instead of
+/// saying what is wrong.
+#[tokio::test]
+async fn an_unknown_api_path_is_a_404_not_the_spa() {
+    let s = start().await;
+    let c = reqwest::Client::new();
+
+    for path in ["/api/no-such-endpoint", "/api/failures", "/api"] {
+        let r = c
+            .get(format!("{}{}", s.base_url, path))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404, "{path}");
+        let body = r.text().await.unwrap();
+        assert!(!body.contains("<!doctype"), "{path} served the SPA");
+    }
+
+    // A deep link into the console still reaches the fallback (the page, or "frontend not
+    // built" where web/dist is absent), not the API's 404.
+    let r = c
+        .get(format!("{}/hosts/abc/context", s.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(r.text().await.unwrap(), "no such API endpoint");
+}
+
 /// HSTS is gated on actually terminating TLS: promising a browser that this origin is
 /// HTTPS-only when it is served over plain HTTP locks the operator out for a year.
 #[tokio::test]
