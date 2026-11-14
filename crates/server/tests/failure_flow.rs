@@ -178,6 +178,10 @@ async fn signup_and_login(s: &TestServer, c: &reqwest::Client, slug: &str, email
 
 /// Enroll on a tier whose per-host request budget a whole test fits in.
 async fn setup() -> (TestServer, fleet_agent_sim::EnrolledAgent) {
+    // The stub provider listens on loopback, which a tenant may only name where the
+    // operator allows private endpoints. The refusal without it is `explain_endpoint_flow`,
+    // a binary of its own because this switch is process-wide.
+    fleet_server::llm::endpoint::set_private_endpoints_allowed(true);
     let s = start().await;
     signup_login(&s, "acme", "alice@example.com").await;
     sqlx::query("UPDATE tenants SET tier = 'enterprise'")
@@ -971,6 +975,60 @@ async fn settings_never_serve_the_api_key_back_and_refuse_a_broken_configuration
         settings["api_key_set"], true,
         "editing the model unconfigured the provider"
     );
+
+    // The stored key stays with the endpoint it was given for. It cannot be read back, so a
+    // save that kept it while naming another base URL would be how to read it anyway: the
+    // next explanation would deliver it there.
+    let elsewhere = "http://127.0.0.1:10/v1";
+    let put = |body: serde_json::Value| {
+        s.cookie_jar
+            .put(format!("{}/api/settings/explain", s.base_url))
+            .json(&body)
+            .send()
+    };
+    let r = put(serde_json::json!({
+        "explain_enabled": true, "provider": "openai", "model": "stub-model-2",
+        "base_url": elsewhere,
+    }))
+    .await
+    .unwrap();
+    assert_eq!(r.status(), 400, "the stored key followed a new base URL");
+    let r = put(serde_json::json!({
+        "explain_enabled": true, "provider": "ollama", "model": "llama3.1",
+        "base_url": base_url,
+    }))
+    .await
+    .unwrap();
+    assert_eq!(r.status(), 400, "the stored key followed a new provider");
+    // Nor in two steps: a save with explanations off does not move the endpoint, so
+    // switching them back on at the new address still finds the key bound to the old one.
+    let r = put(serde_json::json!({ "explain_enabled": false, "base_url": elsewhere }))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let r = put(serde_json::json!({
+        "explain_enabled": true, "provider": "openai", "model": "stub-model-2",
+        "base_url": elsewhere,
+    }))
+    .await
+    .unwrap();
+    assert_eq!(r.status(), 400, "the stored key moved by way of 'off'");
+    // Off and on again at the same endpoint is not a change, with or without the slash.
+    let r = put(serde_json::json!({
+        "explain_enabled": true, "provider": "openai", "model": "stub-model-2",
+        "base_url": format!("{base_url}/"), "daily_call_budget": 100,
+    }))
+    .await
+    .unwrap();
+    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+    // And entering the key again is all a real move takes.
+    let r = put(serde_json::json!({
+        "explain_enabled": true, "provider": "openai", "model": "stub-model-2",
+        "base_url": elsewhere, "api_key": "sk-other-key",
+    }))
+    .await
+    .unwrap();
+    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
 
     // Configurations that cannot work are refused up front rather than failing every
     // explanation.

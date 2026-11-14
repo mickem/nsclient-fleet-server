@@ -367,25 +367,32 @@ pub async fn put_settings(
         if model.is_empty() || model.len() > 128 {
             return (StatusCode::BAD_REQUEST, "model is required").into_response();
         }
-        if let Some(u) = base_url {
-            // Parsed rather than pattern-matched: this string becomes the host of an
-            // outbound request, and "looks like a URL" is not the same as "is one".
-            match url::Url::parse(u) {
-                Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => {}
-                _ => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        "base_url must be an http or https URL",
-                    )
-                        .into_response()
-                }
-            }
+        // Checked against the endpoint the call would really go to, the provider's default
+        // included: `ollama` with no base_url is this server's own loopback. This string
+        // becomes the host of an outbound request made on a tenant's say-so, so where it
+        // may point is the operator's decision (see `llm::endpoint`).
+        let public_only = !super::private_endpoints_allowed(&state);
+        if let Err(e) =
+            crate::llm::endpoint::check(base_url.unwrap_or(p.default_base_url()), public_only)
+        {
+            return (StatusCode::BAD_REQUEST, e).into_response();
         }
         provider = Some(p);
     }
 
     let repo = TenantFailureSettingsRepo::new(&state.db);
-    let existing = repo.get(who.tenant_id).await.ok().flatten();
+    // Not `.ok()`: whether a key is already stored, and for which endpoint, decides below
+    // whether this save may reuse it. A failed read must not look like "nothing stored".
+    let existing = match repo.get(who.tenant_id).await {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::error!(error = %e, "reading failure settings failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
+        }
+    };
+    let stored_key = existing
+        .as_ref()
+        .is_some_and(|e| e.api_key_encrypted.is_some());
 
     // `None` keeps whatever is stored, `Some("")` clears it, anything else replaces it.
     let clearing = body.api_key.as_deref().is_some_and(|k| k.trim().is_empty());
@@ -403,16 +410,29 @@ pub async fn put_settings(
             )
         });
 
-    // Refuse settings that cannot work, rather than accepting them and letting every
-    // explanation fail against a provider with no credential.
+    // A stored key was given for one endpoint, and stays with it. The key is write-only —
+    // nobody can read it back — so a save that kept it while pointing explanations somewhere
+    // else would be the way to read it after all: name your own server as the base URL and
+    // wait for the next explanation to deliver the credential. Changing where the key is
+    // sent therefore takes the key again, or an explicit decision to drop it.
     if let Some(p) = provider {
-        let will_have_key = match (&encrypted, clearing) {
-            (Some(_), _) => true,
-            (None, true) => false,
-            (None, false) => existing
+        let reusing_stored_key = stored_key && encrypted.is_none() && !clearing;
+        if reusing_stored_key
+            && existing
                 .as_ref()
-                .is_some_and(|e| e.api_key_encrypted.is_some()),
-        };
+                .is_some_and(|e| !same_endpoint(e, p, base_url))
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                "the stored API key was given for the previous provider and base URL; \
+                 enter the key again to use it with this one, or remove it",
+            )
+                .into_response();
+        }
+
+        // Refuse settings that cannot work, rather than accepting them and letting every
+        // explanation fail against a provider with no credential.
+        let will_have_key = encrypted.is_some() || reusing_stored_key;
         if p.requires_api_key() && !will_have_key {
             return (
                 StatusCode::BAD_REQUEST,
@@ -422,6 +442,17 @@ pub async fn put_settings(
         }
     }
 
+    // With explanations off, the stored provider and base URL are left as they are rather
+    // than taken from the request. Nothing validates them on this path, and they are what a
+    // stored key is bound to: a save that could rewrite them while "off" would move the key
+    // in two steps instead of one. It also means switching explanations off and on again
+    // comes back to the endpoint that was configured.
+    let (stored_provider, stored_base_url) = match (provider, &existing) {
+        (Some(p), _) => (p.as_str(), base_url),
+        (None, Some(e)) => (e.provider.as_str(), e.base_url.as_deref()),
+        (None, None) => ("", None),
+    };
+
     if let Err(e) = repo
         .set(
             who.tenant_id,
@@ -429,9 +460,9 @@ pub async fn put_settings(
                 reports_enabled: body.reports_enabled,
                 min_interval_secs: min_interval,
                 explain_enabled: body.explain_enabled,
-                provider: provider.map(|p| p.as_str()).unwrap_or_default(),
+                provider: stored_provider,
                 model,
-                base_url,
+                base_url: stored_base_url,
                 api_key_encrypted: encrypted.as_deref(),
                 daily_call_budget: budget,
                 updated_by_user: Some(who.user_id),
@@ -467,15 +498,38 @@ pub async fn put_settings(
             Some(&serde_json::json!({
                 "reports_enabled": body.reports_enabled,
                 "min_interval_secs": min_interval,
-                "provider": provider.map(|p| p.as_str()),
+                "provider": stored_provider,
                 "model": model,
-                "base_url": base_url,
+                "base_url": stored_base_url,
+                // Recorded as a fact, never a value: a replaced or removed credential is
+                // part of "where to" as much as the endpoint is.
+                "api_key": if encrypted.is_some() { "replaced" } else if clearing { "removed" } else { "kept" },
                 "daily_call_budget": budget,
             })),
         )
         .await;
 
     Json(serde_json::json!({ "saved": true })).into_response()
+}
+
+/// Whether `provider` and `base_url` send a request to the same place the stored settings do.
+///
+/// Compared as the endpoint a call would go to, so leaving the base URL empty and spelling
+/// out the provider's default are the same thing, as are a trailing slash and none.
+fn same_endpoint(
+    stored: &fleet_storage::TenantFailureSettings,
+    provider: ProviderKind,
+    base_url: Option<&str>,
+) -> bool {
+    let base = |p: ProviderKind, u: Option<&str>| {
+        u.map(|u| u.trim().trim_end_matches('/'))
+            .filter(|u| !u.is_empty())
+            .unwrap_or(p.default_base_url())
+            .to_string()
+    };
+    ProviderKind::parse(&stored.provider).is_some_and(|sp| {
+        sp == provider && base(sp, stored.base_url.as_deref()) == base(provider, base_url)
+    })
 }
 
 /// Retention sweep, called from the housekeeping loop.

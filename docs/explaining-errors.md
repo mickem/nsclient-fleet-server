@@ -88,6 +88,13 @@ settings; changing them requires a role that can change configuration.
 - `api_key` is **write-only**. `GET /api/settings/explain` reports `api_key_set: true` and
   never the key — not to an admin, not to a platform admin. Omit the field to keep the stored
   key when changing anything else; send `""` to clear it.
+- A stored key stays with the provider and base URL it was given for. Changing either
+  without sending the key again is refused: a key nobody can read back must not be one
+  somebody can have delivered to an endpoint of their choosing. Enter the key again, or
+  clear it. A trailing slash, or spelling out the provider's default URL, is not a change.
+- With `explain_enabled` false, the stored provider and base URL are kept as they are and
+  the ones in the request are ignored, so switching explanations off and on again returns
+  to the endpoint that was configured.
 - Settings that cannot work are refused when you save them, not one explanation at a time:
   an unknown provider, a `base_url` that is not an http(s) URL, an empty model, or enabling a
   key-requiring provider with no key. The provider and model are only validated when
@@ -109,9 +116,34 @@ own falls back to this.
 | `LLM_BASE_URL` | provider's default | The override that makes any compatible endpoint work. |
 | `LLM_DAILY_CALL_BUDGET` | unlimited | Per tenant, per UTC day. Unlimited on this path is deliberate — you are paying your own bill or running your own model. |
 
+| `LLM_ALLOW_PRIVATE_ENDPOINTS` | off (on with `ON_PREM`) | Lets a *tenant's* settings name an endpoint on a private address. See below. |
+
 A half-configuration (`LLM_PROVIDER` set, `LLM_API_KEY` missing) or an unrecognised provider
 **fails startup**. A typo here would otherwise show up as every explanation failing, which is
 far worse to debug than a failed boot.
+
+### Where a tenant's endpoint may point
+
+A tenant's `base_url` is a URL this server calls on that tenant's say-so, and the provider's
+answer comes back to whoever asked. On a server shared by several tenants, an address inside
+the server's own network — loopback, a private range, the cloud metadata address — would be a
+request forged from inside. So an endpoint configured **by a tenant** has to be on the public
+internet:
+
+- a literal private address is refused when the settings are saved, and again when an
+  explanation is asked for (`409`), however it is spelled (`http://2130706433/` is loopback);
+- a name is checked as it is resolved, so one that resolves to a private address is not
+  connected to;
+- `ollama` with no `base_url` is the server's own loopback and is refused the same way;
+- redirects are not followed, on any path. A model API has no reason to send one.
+
+Two things lift this, both the server operator's to decide: `ON_PREM=1`, where one
+organisation runs the server and a model on its own network is the point, and
+`LLM_ALLOW_PRIVATE_ENDPOINTS=1` for a shared install whose tenants are trusted with the
+network it sits on. The `LLM_*` default above is never restricted — whoever sets the
+environment already has a shell on the machine. Calls to a tenant-configured endpoint on a
+restricted server also ignore `HTTP(S)_PROXY`: through a proxy it is the proxy that resolves
+the name, and the check would be made against the wrong address.
 
 Air-gapped, in full:
 

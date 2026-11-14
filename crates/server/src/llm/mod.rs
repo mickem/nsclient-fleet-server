@@ -37,6 +37,7 @@
 //! outage — whichever provider they use.
 
 pub mod anthropic;
+pub mod endpoint;
 pub mod ollama;
 pub mod openai;
 pub mod prompt;
@@ -156,6 +157,9 @@ pub struct LlmConfig {
     pub api_key: Option<String>,
     /// Model calls allowed per UTC day for this tenant. 0 disables explanations outright.
     pub daily_call_budget: i64,
+    /// True when the endpoint was configured by a tenant on a server that only lets tenants
+    /// reach the public internet. See [`endpoint`].
+    pub public_only: bool,
 }
 
 impl LlmConfig {
@@ -213,6 +217,8 @@ impl LlmConfig {
                 .filter(|v| !v.trim().is_empty()),
             api_key,
             daily_call_budget: budget,
+            // The operator's own configuration: an address on their network is the point.
+            public_only: false,
         }))
     }
 
@@ -413,6 +419,7 @@ mod tests {
             base_url: None,
             api_key: None,
             daily_call_budget: 10,
+            public_only: false,
         };
         assert_eq!(cfg.base(), "https://api.openai.com/v1");
         cfg.base_url = Some("https://gw.internal/v1/".into());

@@ -38,3 +38,10 @@ pub use view::{
     delete_context, get, get_settings, list, put_settings, sweep, ContextDetailView,
     ContextSummaryView, SettingsView,
 };
+
+/// Whether a tenant may point explanations at an endpoint on a private address: on an
+/// on-prem install, or where the operator set `LLM_ALLOW_PRIVATE_ENDPOINTS`. See
+/// [`crate::llm::endpoint`].
+pub(crate) fn private_endpoints_allowed(state: &crate::AppState) -> bool {
+    state.config.on_prem || crate::llm::endpoint::private_endpoints_allowed()
+}

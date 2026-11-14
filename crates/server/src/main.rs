@@ -436,6 +436,13 @@ async fn serve(shutdown: Shutdown, env_file_vars: &[String]) -> anyhow::Result<(
     // environment rather than per tenant. Refused at startup rather than at the first
     // explanation: a typo here would otherwise show up as every explanation failing, which
     // is far worse to debug than a failed boot.
+    // Whether a tenant may point explanations at an address inside our network. Off unless
+    // asked for (ON_PREM asks for it by itself): on a shared install it is a request forged
+    // from inside.
+    fleet_server::llm::endpoint::set_private_endpoints_allowed(
+        std::env::var("LLM_ALLOW_PRIVATE_ENDPOINTS")
+            .is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes")),
+    );
     match fleet_server::llm::LlmConfig::from_env() {
         Ok(Some(c)) => {
             tracing::info!(

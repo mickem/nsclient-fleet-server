@@ -20,8 +20,6 @@
 //! **Not guessing the host.** Hostnames are not unique. A name that matches two hosts is
 //! refused with their ids rather than explained against whichever came first.
 
-use std::sync::OnceLock;
-
 use axum::{
     extract::State,
     http::StatusCode,
@@ -108,21 +106,6 @@ pub struct ExplainResponse {
     pub output_tokens: Option<i64>,
 }
 
-/// One client for the life of the process: connection reuse matters against a provider on
-/// the other side of a TLS handshake, and the timeout bounds how long a request can hang.
-fn http() -> Option<&'static reqwest::Client> {
-    static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .timeout(crate::llm::CALL_TIMEOUT)
-                .build()
-                .map_err(|e| tracing::error!(error = %e, "could not build the HTTP client"))
-                .ok()
-        })
-        .as_ref()
-}
-
 pub async fn explain(
     State(state): State<AppState>,
     who: AuthedUser,
@@ -164,6 +147,17 @@ pub async fn explain(
                 .into_response()
         }
     };
+
+    // Before the budget and before any evidence is read: an endpoint this server will not
+    // call is a misconfiguration, not an attempt. Saving the settings makes the same check,
+    // but the operator's policy can have tightened since they were saved.
+    if let Err(e) = crate::llm::endpoint::check(cfg.base(), cfg.public_only) {
+        return (
+            StatusCode::CONFLICT,
+            format!("explanations are misconfigured for this tenant: {e}"),
+        )
+            .into_response();
+    }
 
     let usage = TenantFailureSettingsRepo::new(&state.db);
     let today = utc_day(fleet_core::time::now_unix());
@@ -213,7 +207,7 @@ pub async fn explain(
         max_output_tokens: prompt::MAX_OUTPUT_TOKENS,
     };
 
-    let Some(http) = http() else {
+    let Some(http) = crate::llm::endpoint::client(cfg.public_only) else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
     };
     let result = cfg.provider_impl().complete(http, &cfg, &req).await;
@@ -478,6 +472,8 @@ async fn resolve_config(state: &AppState, tenant_id: i64) -> anyhow::Result<Opti
             base_url: s.base_url,
             api_key,
             daily_call_budget: s.daily_call_budget,
+            // A tenant chose this endpoint, so where it may point is the operator's call.
+            public_only: !super::private_endpoints_allowed(state),
         }));
     }
 
