@@ -533,6 +533,103 @@ export type CreateTenantResponse = {
   owner_invited: boolean;
 };
 
+/** Whether the agent sent its metrics snapshot with a report, and if not, why. Mirrors
+ *  `context.state` in the agent's report (docs/agent-integration.md §4.2). */
+export type ContextState = "captured" | "evicted" | "too_large" | "disabled" | "none";
+
+/** The latest report an agent sent for one check on a host, as
+ *  `GET /api/hosts/{id}/contexts` lists it. Evidence for explaining errors, not an alert:
+ *  a newer report for the same check replaces it. Mirrors `ContextSummaryView`. */
+export type ContextSummary = {
+  id: string;
+  host_id: string;
+  command: string;
+  alias: string;
+  /** Nagios status number: 1 warning, 2 critical, 3 unknown. */
+  status: number;
+  status_word: string;
+  message: string;
+  subject: string;
+  context_state: ContextState | string;
+  metrics_count: number;
+  payload_bytes: number;
+  reported_at: number;
+};
+
+export type PerfValue = number | string;
+
+export type FailureLine = {
+  message?: string;
+  perf?: Record<string, { value?: PerfValue; unit?: string; [k: string]: unknown }>;
+};
+
+export type SnapshotMeta = { type?: string; unit?: string; [k: string]: unknown };
+
+/** The agent's report as stored, verbatim. Every field but `failure.command` is optional:
+ *  older or differently-configured agents omit some. */
+export type FailureReport = {
+  sent_at?: string;
+  failure?: {
+    command?: string;
+    alias?: string;
+    date?: string;
+    result?: string;
+    message?: string;
+    lines?: FailureLine[];
+    arguments?: string[];
+    [k: string]: unknown;
+  };
+  context?: {
+    state?: string;
+    snapshot_id?: number;
+    captured_at?: string;
+    age_seconds?: number;
+    metrics?: Record<string, unknown>;
+    metadata?: Record<string, SnapshotMeta>;
+  };
+};
+
+export type ContextDetail = ContextSummary & { report: FailureReport | null };
+
+/** A model's explanation of an error. Mirrors `Explanation` in
+ *  `crates/server/src/llm/prompt.rs`. */
+export type Explanation = {
+  summary: string;
+  relevant_evidence: string[];
+  likely_causes: string[];
+  suggested_checks: string[];
+  confidence: string;
+};
+
+/** A stored report an explanation was built from. */
+export type EvidenceRef = {
+  id: string;
+  command: string;
+  alias: string;
+  status_word: string;
+  context_state: string;
+  metrics_count: number;
+  reported_at: number;
+};
+
+/** `POST /api/explain`. `host` is an id or a hostname; `check` a command or an alias. */
+export type ExplainRequest = { host: string; error: string; check?: string };
+
+export type ExplainResponse = {
+  host_id: string;
+  hostname: string | null;
+  explanation: Explanation;
+  /** The agent's latest report of the check the error was matched to. */
+  check: EvidenceRef | null;
+  /** The report carrying the host's latest metrics snapshot. */
+  snapshot: EvidenceRef | null;
+  facts_sources: string[];
+  provider: string;
+  model: string;
+  input_tokens: number | null;
+  output_tokens: number | null;
+};
+
 /** `GET /api/settings/explain`. There is no API key field: it is write-only. */
 export type ExplainSettings = {
   reports_enabled: boolean;

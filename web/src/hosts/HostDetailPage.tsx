@@ -32,11 +32,13 @@ import { HostStatusChip, LocalConfigChip } from "./HostStatusChip";
 import { HostConfigCard } from "./HostConfigCard";
 import { InventoryCard, SourceFactsCard } from "./InventoryCard";
 import { RefreshButton } from "../components/RefreshButton";
+import { ContextTab } from "./context/ContextTab";
 import {
   apiGet,
   apiSend,
   canWriteConfig,
   DesiredStateView,
+  ContextSummary,
   fmtAgo,
   fmtTime,
   HostDetail,
@@ -53,6 +55,7 @@ const TABS = [
   { id: "overview", label: "Overview" },
   { id: "configuration", label: "Configuration" },
   { id: "inventory", label: "Inventory" },
+  { id: "context", label: "Context" },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
 
@@ -85,6 +88,8 @@ export function HostDetailPage({ me }: Props) {
   const [desiredError, setDesiredError] = useState<string | null>(null);
   const [facts, setFacts] = useState<HostFacts | null>(null);
   const [factsError, setFactsError] = useState<string | null>(null);
+  const [contexts, setContexts] = useState<ContextSummary[] | null>(null);
+  const [contextsError, setContextsError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -117,6 +122,13 @@ export function HostDetailPage({ me }: Props) {
           setFactsError(null);
         },
         (e) => setFactsError(e instanceof Error ? e.message : String(e)),
+      ),
+      apiGet<ContextSummary[]>(`/api/hosts/${hostId}/contexts`).then(
+        (c) => {
+          setContexts(c);
+          setContextsError(null);
+        },
+        (e) => setContextsError(e instanceof Error ? e.message : String(e)),
       ),
     ]).finally(() => setRefreshing(false));
   };
@@ -278,6 +290,15 @@ export function HostDetailPage({ me }: Props) {
             </Grid>
           ))}
         </Grid>
+      )}
+      {current === "context" && (
+        <ContextTab
+          host={host}
+          reports={contexts}
+          reportsError={contextsError}
+          canWrite={canWriteConfig(me.role)}
+          onChanged={refresh}
+        />
       )}
       <ConfirmDeleteSourceDialog
         hostId={host.id}
