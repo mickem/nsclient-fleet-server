@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { Link as RouterLink, Navigate, useNavigate, useParams } from "react-router-dom";
 import {
   Alert,
   Box,
@@ -14,11 +14,13 @@ import {
   DialogTitle,
   Grid,
   Stack,
+  Tab,
   Table,
   TableBody,
   TableCell,
   TableHead,
   TableRow,
+  Tabs,
   TextField,
   Typography,
 } from "@mui/material";
@@ -30,11 +32,13 @@ import { HostStatusChip, LocalConfigChip } from "./HostStatusChip";
 import { HostConfigCard } from "./HostConfigCard";
 import { InventoryCard, SourceFactsCard } from "./InventoryCard";
 import { RefreshButton } from "../components/RefreshButton";
+import { ContextTab } from "./context/ContextTab";
 import {
   apiGet,
   apiSend,
   canWriteConfig,
   DesiredStateView,
+  ContextSummary,
   fmtAgo,
   fmtTime,
   HostDetail,
@@ -44,6 +48,16 @@ import {
 } from "../api";
 
 type Props = { me: Me };
+
+/** A tab id is also its URL segment: "inventory" ⇄ /hosts/:id/inventory. The first is the
+ *  default and has no segment of its own, so /hosts/:id stays the host's address. */
+const TABS = [
+  { id: "overview", label: "Overview" },
+  { id: "configuration", label: "Configuration" },
+  { id: "inventory", label: "Inventory" },
+  { id: "context", label: "Context" },
+] as const;
+type TabId = (typeof TABS)[number]["id"];
 
 /** The enrolment clause of the summary line — what happened, or what still needs to.
  *  The live states all share it: the chip beside the hostname carries what they add. */
@@ -66,7 +80,7 @@ function enrollmentSummary(host: HostDetail): string {
 export function HostDetailPage({ me }: Props) {
   // The route owns the identity of the host on screen, so a detail page can be linked
   // to, refreshed, and reached with the browser's back/forward buttons.
-  const { hostId = "" } = useParams();
+  const { hostId = "", tab = "overview" } = useParams();
   const navigate = useNavigate();
   const onBack = () => navigate("/hosts");
   const [host, setHost] = useState<HostDetail | null>(null);
@@ -74,6 +88,8 @@ export function HostDetailPage({ me }: Props) {
   const [desiredError, setDesiredError] = useState<string | null>(null);
   const [facts, setFacts] = useState<HostFacts | null>(null);
   const [factsError, setFactsError] = useState<string | null>(null);
+  const [contexts, setContexts] = useState<ContextSummary[] | null>(null);
+  const [contextsError, setContextsError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -107,9 +123,21 @@ export function HostDetailPage({ me }: Props) {
         },
         (e) => setFactsError(e instanceof Error ? e.message : String(e)),
       ),
+      apiGet<ContextSummary[]>(`/api/hosts/${hostId}/contexts`).then(
+        (c) => {
+          setContexts(c);
+          setContextsError(null);
+        },
+        (e) => setContextsError(e instanceof Error ? e.message : String(e)),
+      ),
     ]).finally(() => setRefreshing(false));
   };
   useEffect(refresh, [hostId]);
+
+  // An unknown segment (a typo, a tab since removed) lands on the overview rather than a blank
+  // page.
+  if (!TABS.some((t) => t.id === tab)) return <Navigate to={`/hosts/${hostId}`} replace />;
+  const current = tab as TabId;
 
   // Only the initial load takes over the page. Once a host is on screen a failed refresh
   // reports itself inline instead of discarding what the operator was looking at.
@@ -217,34 +245,61 @@ export function HostDetailPage({ me }: Props) {
         {fmtAgo(host.last_seen_at)}
       </Typography>
 
-      <Grid container spacing={2}>
-        <Grid size={{ xs: 12, md: 6 }}>
-          <DesiredCard host={host} desired={desired} />
-        </Grid>
-        <Grid size={{ xs: 12, md: 6 }}>
-          <TagsCard host={host} canWrite={canWriteConfig(me.role)} onChanged={refresh} />
-        </Grid>
-        <Grid size={12}>
-          <HostConfigCard
-            host={host}
-            desired={desired}
-            desiredError={desiredError}
-            canWrite={canWriteConfig(me.role)}
-            onChanged={refresh}
+      <Tabs value={current} sx={{ mb: 2, borderBottom: 1, borderColor: "divider" }}>
+        {TABS.map((t) => (
+          <Tab
+            key={t.id}
+            value={t.id}
+            label={t.label}
+            component={RouterLink}
+            to={t.id === "overview" ? `/hosts/${host.id}` : `/hosts/${host.id}/${t.id}`}
           />
-        </Grid>
-        <Grid size={12}>
-          <InventoryCard facts={facts} error={factsError} />
-        </Grid>
-        {(facts?.others ?? []).map((doc) => (
-          <Grid size={12} key={doc.source}>
-            <SourceFactsCard
-              doc={doc}
-              onDelete={canWriteConfig(me.role) ? () => setSourceToDelete(doc.source) : undefined}
-            />
-          </Grid>
         ))}
-      </Grid>
+      </Tabs>
+
+      {current === "overview" && (
+        <Grid container spacing={2}>
+          <Grid size={{ xs: 12, md: 6 }}>
+            <DesiredCard host={host} desired={desired} />
+          </Grid>
+          <Grid size={{ xs: 12, md: 6 }}>
+            <TagsCard host={host} canWrite={canWriteConfig(me.role)} onChanged={refresh} />
+          </Grid>
+        </Grid>
+      )}
+      {current === "configuration" && (
+        <HostConfigCard
+          host={host}
+          desired={desired}
+          desiredError={desiredError}
+          canWrite={canWriteConfig(me.role)}
+          onChanged={refresh}
+        />
+      )}
+      {current === "inventory" && (
+        <Grid container spacing={2}>
+          <Grid size={12}>
+            <InventoryCard facts={facts} error={factsError} />
+          </Grid>
+          {(facts?.others ?? []).map((doc) => (
+            <Grid size={12} key={doc.source}>
+              <SourceFactsCard
+                doc={doc}
+                onDelete={canWriteConfig(me.role) ? () => setSourceToDelete(doc.source) : undefined}
+              />
+            </Grid>
+          ))}
+        </Grid>
+      )}
+      {current === "context" && (
+        <ContextTab
+          host={host}
+          reports={contexts}
+          reportsError={contextsError}
+          canWrite={canWriteConfig(me.role)}
+          onChanged={refresh}
+        />
+      )}
       <ConfirmDeleteSourceDialog
         hostId={host.id}
         hostname={host.hostname}

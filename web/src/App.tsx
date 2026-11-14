@@ -9,6 +9,7 @@ import { Signup } from "./auth/Signup";
 import { Dashboard } from "./layout/Dashboard";
 import { HostsPage } from "./hosts/HostsPage";
 import { HostDetailPage } from "./hosts/HostDetailPage";
+import { SettingsPage } from "./settings/SettingsPage";
 import { GroupsPage } from "./groups/GroupsPage";
 import { BundlesPage } from "./bundles/BundlesPage";
 import { AuditPage } from "./admin/AuditPage";
@@ -52,7 +53,8 @@ function AuthedRoutes({ me, onLogout }: { me: Me; onLogout: () => void }) {
             }
           />
         )}
-        <Route path="hosts/:hostId" element={<HostDetailPage me={me} />} />
+        {/* The optional segment is the tab; /hosts/:hostId is the overview. */}
+        <Route path="hosts/:hostId/:tab?" element={<HostDetailPage me={me} />} />
         {/* Editors are URLs too (/groups/new, /bundles/:id, …): a refresh keeps them open,
             and the sidebar entry for the list is a real way back out of one. */}
         <Route path="groups" element={<GroupsPage me={me} />} />
@@ -62,6 +64,7 @@ function AuthedRoutes({ me, onLogout }: { me: Me; onLogout: () => void }) {
         <Route path="bundles/new" element={<BundlesPage me={me} />} />
         <Route path="bundles/:bundleId" element={<BundlesPage me={me} />} />
         <Route path="audit" element={<AuditPage />} />
+        <Route path="settings" element={<SettingsPage me={me} />} />
         <Route path="keys" element={<ApiKeysPage me={me} />} />
         {canManageUsers(me.role) && <Route path="users" element={<UsersPage me={me} />} />}
         {me.is_platform_admin && <Route path="platform" element={<PlatformPage me={me} />} />}

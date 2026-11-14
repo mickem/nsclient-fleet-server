@@ -52,7 +52,8 @@ Repo root is the Cargo workspace. Crates under `crates/`, frontend under `web/`.
 | [docs/docker.md](docs/docker.md) | The same server as a container — a one-line `docker run`, volumes, TLS, upgrades |
 | [docs/deployment.md](docs/deployment.md) | Running it in production: ports, certificates, every environment variable, backups, troubleshooting |
 | [docs/agent-implementation.md](docs/agent-implementation.md) | Writing an agent: enrollment, the bootstrap-token → CSR → mTLS flow |
-| [docs/agent-integration.md](docs/agent-integration.md) | The post-enrollment contract: config sync, state reporting, certificate renewal |
+| [docs/agent-integration.md](docs/agent-integration.md) | The post-enrollment contract: config sync, state reporting, host facts, failure context, certificate renewal |
+| [docs/explaining-errors.md](docs/explaining-errors.md) | Explaining an error from your monitoring system against a host's latest snapshot and facts, with a language model: providers, cost bounds, privacy and prompt-injection posture, API |
 | [docs/ca-rotation-playbook.md](docs/ca-rotation-playbook.md) | Rotating a tenant CA or bundle-signing key, planned or after compromise |
 
 ## Users and roles
@@ -196,6 +197,12 @@ All other env vars have working dev defaults. Useful overrides:
 | `SMTP_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_FROM` |                         | Magic-link delivery; falls back to stdout when unset. Port 465 uses implicit TLS, any other port (default 587) uses STARTTLS                              |
 | `TURNSTILE_SECRET`                                      |                         | Cloudflare Turnstile siteverify secret (signup gate)                                                                                                      |
 | `DAILY_EMAIL_BUDGET`                                    | `5000`                  | Global cap; exceeded sends are silently dropped                                                                                                           |
+| `LLM_PROVIDER`                                          |                         | `anthropic`, `openai` or `ollama` — the server-wide default for explaining errors. Unset means off unless a tenant configures its own. See [explaining-errors](docs/explaining-errors.md) |
+| `LLM_MODEL`                                             | provider's default      | e.g. `claude-haiku-5-5`                                                                                                                                      |
+| `LLM_API_KEY`                                           |                         | Required unless `LLM_PROVIDER=ollama`. A half-configuration fails startup                                                                                 |
+| `LLM_BASE_URL`                                          | provider's default      | Points `openai` at any Chat-Completions-compatible endpoint (Azure, vLLM, a gateway), or `ollama` at another host                                          |
+| `LLM_DAILY_CALL_BUDGET`                                 | unlimited               | Model calls per tenant per UTC day on this path; the per-tenant setting defaults to 200                                                                   |
+| `LLM_ALLOW_PRIVATE_ENDPOINTS`                           | `false` (on with `ON_PREM`) | Let a tenant's own settings point explanations at a private address (loopback, RFC 1918, link-local). Off, a tenant's endpoint must be on the public internet |
 | `ACME_DOMAINS`                                          |                         | Comma-separated list — enables Let's Encrypt when set                                                                                                     |
 | `ACME_CONTACT`                                          |                         | Email registered with the ACME account                                                                                                                    |
 | `ACME_CACHE_DIR`                                        | `data/acme`             | Persistent cache so restarts don't re-issue certs                                                                                                         |

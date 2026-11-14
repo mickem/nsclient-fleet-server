@@ -4,7 +4,9 @@ pub mod auth;
 pub mod bundles;
 pub mod config_source;
 pub mod facts;
+pub mod failures;
 pub mod hosts;
+pub mod llm;
 pub mod runtime;
 pub mod transport;
 
@@ -84,6 +86,13 @@ async fn healthz(State(state): State<AppState>) -> Response {
 
 async fn frontend(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
+
+    // An API path no route matched is a missing endpoint, not a page. Answering it with
+    // index.html would hand a client a 200 it then fails to parse as JSON — a stale console
+    // calling a removed route would report "Unexpected token '<'" rather than a 404.
+    if path == "api" || path.starts_with("api/") {
+        return (StatusCode::NOT_FOUND, "no such API endpoint").into_response();
+    }
     let resolved = if path.is_empty() { "index.html" } else { path };
 
     if let Some(file) = EmbeddedFrontend::get(resolved) {
@@ -329,6 +338,17 @@ pub fn router(state: AppState) -> Router {
         .route("/api/bundles/{id}/config", get(bundles::get_config))
         .route("/api/bundles/{id}/download", get(bundles::ui_download))
         .route("/api/audit", get(admin::audit::list))
+        // Failure contexts: a host's reports as evidence, and explaining an error against them.
+        .route("/api/hosts/{id}/contexts", get(failures::list))
+        .route(
+            "/api/hosts/{id}/contexts/{context_id}",
+            get(failures::get).delete(failures::delete_context),
+        )
+        .route("/api/explain", post(failures::explain))
+        .route(
+            "/api/settings/explain",
+            get(failures::get_settings).put(failures::put_settings),
+        )
         .route(
             "/api/keys",
             get(auth::api_keys::list).post(auth::api_keys::create),
@@ -407,6 +427,7 @@ pub fn mtls_router(state: AppState) -> Router {
         // can legitimately exceed axum's 2 MiB default, and an oversized one has to reach
         // the handler for its refusal to be recorded.
         .route("/agent/v1/facts", post(facts::upload))
+        .route("/agent/v1/failure-context", post(failures::ingest))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             agent::limits::tier_layer,

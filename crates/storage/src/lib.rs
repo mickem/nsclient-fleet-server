@@ -5,11 +5,13 @@ pub mod repos;
 pub use migrate::run_migrations;
 pub use pool::{open, Db};
 pub use repos::{
-    ApiKeyRepo, ApplyOutcome, AuditRepo, AuditRow, BundleAssignmentsRepo, BundleRow, BundlesRepo,
-    CaSummary, CertStanding, ConfigPlan, ConfigSourceRepo, EnrolledCert, FactChangeRow,
-    FactsHashes, FactsRefusal, GroupRow, GroupsRepo, HostCertRepo, HostFactsRepo,
-    HostOverridesRepo, HostRepo, HostTagsRepo, MagicLinkRepo, MovedBundle, NewFacts, PlannedBundle,
+    utc_day, ApiKeyRepo, ApplyOutcome, AuditRepo, AuditRow, BundleAssignmentsRepo, BundleRow,
+    BundlesRepo, CaSummary, CertStanding, ConfigPlan, ConfigSourceRepo, EnrolledCert,
+    FactChangeRow, FactsHashes, FactsRefusal, FailureContextRepo, FailureContextRow, GroupRow,
+    GroupsRepo, HostCertRepo, HostFactsRepo, HostOverridesRepo, HostRepo, HostTagsRepo, LlmUsage,
+    MagicLinkRepo, MovedBundle, NewFacts, NewFailureContext, NewFailureSettings, PlannedBundle,
     PlannedGroup, PlatformSettingsRepo, RenameOutcome, RenamedInPlace, ReplaceOutcome, SessionRepo,
-    StoredFacts, StoredHostOverride, StoredTenantSecrets, TenantBundleKeysRepo, TenantRepo,
-    TenantSecretsRepo, TenantSummary, UserRepo,
+    StoredFacts, StoredHostOverride, StoredTenantSecrets, TenantBundleKeysRepo,
+    TenantFailureSettings, TenantFailureSettingsRepo, TenantRepo, TenantSecretsRepo, TenantSummary,
+    UserRepo,
 };
