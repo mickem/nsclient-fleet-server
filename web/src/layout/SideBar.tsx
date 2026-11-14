@@ -6,6 +6,7 @@ import { Toolbar } from "@mui/material";
 import Divider from "@mui/material/Divider";
 import { List, ListItem, ListItemButton, ListItemIcon, ListItemText } from "@mui/material";
 import DnsIcon from "@mui/icons-material/Dns";
+import SettingsIcon from "@mui/icons-material/Settings";
 import WorkspacesIcon from "@mui/icons-material/Workspaces";
 import Inventory2Icon from "@mui/icons-material/Inventory2";
 import HistoryIcon from "@mui/icons-material/History";
@@ -16,7 +17,7 @@ import { Link as RouterLink, useLocation } from "react-router-dom";
 import { canManageUsers, Me } from "../api";
 
 /** A page id is also its URL segment: "bundles" ⇄ /bundles. */
-export type Page = "hosts" | "groups" | "bundles" | "audit" | "users" | "keys" | "platform";
+export type Page = "hosts" | "groups" | "bundles" | "audit" | "settings" | "users" | "keys" | "platform";
 
 /** Whether `pathname` is this page or one of its sub-pages (/hosts/:id keeps Hosts lit).
  *  Compared segment-wise so "/keys" never matches a hypothetical "/keys-of-something". */
@@ -56,7 +57,11 @@ function menuFor(me: Me): MenuItemDef[][] {
       { id: "groups", label: "Groups", icon: <WorkspacesIcon /> },
       { id: "bundles", label: "Bundles", icon: <Inventory2Icon /> },
     ],
-    [{ id: "audit", label: "Audit log", icon: <HistoryIcon /> }],
+    [
+      { id: "audit", label: "Audit log", icon: <HistoryIcon /> },
+      // Tenant-wide settings. Every role sees them; only config-writers can change them.
+      { id: "settings", label: "Settings", icon: <SettingsIcon /> },
+    ],
     // Own-account settings: any role has keys, because a read-only key is a legitimate
     // thing to want.
     [{ id: "keys", label: "API keys", icon: <KeyIcon /> }],

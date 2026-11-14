@@ -533,6 +533,38 @@ export type CreateTenantResponse = {
   owner_invited: boolean;
 };
 
+/** `GET /api/settings/explain`. There is no API key field: it is write-only. */
+export type ExplainSettings = {
+  reports_enabled: boolean;
+  min_interval_secs: number;
+  explain_enabled: boolean;
+  provider: string;
+  model: string;
+  base_url: string | null;
+  api_key_set: boolean;
+  daily_call_budget: number;
+  inherits_server_default: boolean;
+  calls_today: number;
+  failures_today: number;
+  updated_at: number | null;
+  available_providers: string[];
+  /** Models to offer per provider, the default first. Suggestions only: any name is accepted.
+   *  Absent from servers older than this console. */
+  suggested_models?: Record<string, string[]>;
+};
+
+/** `PUT /api/settings/explain`. `api_key` omitted keeps the stored key; "" clears it. */
+export type ExplainSettingsUpdate = {
+  reports_enabled: boolean;
+  min_interval_secs: number;
+  explain_enabled: boolean;
+  provider: string;
+  model: string;
+  base_url: string | null;
+  api_key?: string;
+  daily_call_budget: number;
+};
+
 /** `onprem` sets max_hosts to u32::MAX, which is a limit in name only. */
 export const UNLIMITED = 4294967295;
 export const fmtLimit = (n: number) => (n >= UNLIMITED ? "unlimited" : n.toLocaleString());
