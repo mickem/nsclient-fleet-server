@@ -29,7 +29,6 @@ impl<'a> BundlesRepo<'a> {
         Self { db }
     }
 
-    #[allow(clippy::too_many_arguments)]
     /// Insert a bundle under an id the caller has already chosen.
     ///
     /// The id used to be generated here, which meant the signature could not cover it — it
