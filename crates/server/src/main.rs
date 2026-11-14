@@ -432,6 +432,23 @@ async fn serve(shutdown: Shutdown, env_file_vars: &[String]) -> anyhow::Result<(
         state.bundle_store.clone(),
     ));
 
+    // The process-wide model-provider default, for installs that configure it in the
+    // environment rather than per tenant. Refused at startup rather than at the first
+    // explanation: a typo here would otherwise show up as every explanation failing, which
+    // is far worse to debug than a failed boot.
+    match fleet_server::llm::LlmConfig::from_env() {
+        Ok(Some(c)) => {
+            tracing::info!(
+                provider = c.provider.as_str(),
+                model = %c.model,
+                "error explanations are enabled by default for tenants without their own settings"
+            );
+            fleet_server::llm::init_server_default(Some(c));
+        }
+        Ok(None) => fleet_server::llm::init_server_default(None),
+        Err(e) => anyhow::bail!("LLM configuration: {e}"),
+    }
+
     backfill_all(&state, &db).await?;
     fleet_server::runtime::tenant_setup::rebind_legacy_ciphertexts(&state, &db).await?;
     fleet_server::runtime::tenant_setup::resign_bundles(&state, &db).await?;

@@ -5,6 +5,7 @@ pub mod bundles;
 pub mod config_source;
 pub mod facts;
 pub mod hosts;
+pub mod llm;
 pub mod runtime;
 pub mod transport;
 
