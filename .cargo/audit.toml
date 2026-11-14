@@ -8,4 +8,15 @@
 # Re-check this list whenever it is touched: an advisory that gains a fix should leave.
 
 [advisories]
-ignore = []
+ignore = [
+    # libsqlite3-sys 0.30.1 bundles SQLite < 3.54.0 (CVE-2026-119375): a database opened
+    # together with a crafted `-wal` file can return uninitialised page-cache memory.
+    #
+    # Nothing to upgrade to: the fix is libsqlite3-sys >= 0.39.0, and sqlx-sqlite 0.9.0 — the
+    # newest sqlx — only accepts < 0.38.0. Remove this entry as soon as an sqlx release does.
+    #
+    # Not exploitable here: the advisory exposes only "a process that opens a database file,
+    # with its `-wal`, that a less trusted party could have written". The server opens only
+    # its own database in its own data directory.
+    "RUSTSEC-2026-0459",
+]
