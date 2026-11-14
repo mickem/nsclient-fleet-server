@@ -6,6 +6,7 @@ mod audit;
 mod bundles;
 mod config_source;
 mod facts;
+mod failures;
 mod groups;
 mod hosts;
 mod tenants;
@@ -18,6 +19,10 @@ pub use bundles::{
 pub use config_source::{ApplyOutcome, ConfigPlan, ConfigSourceRepo, PlannedBundle, PlannedGroup};
 pub use facts::{
     FactChangeRow, FactsHashes, FactsRefusal, HostFactsRepo, NewFacts, ReplaceOutcome, StoredFacts,
+};
+pub use failures::{
+    utc_day, FailureContextRepo, FailureContextRow, LlmUsage, NewFailureContext,
+    NewFailureSettings, TenantFailureSettings, TenantFailureSettingsRepo,
 };
 pub use groups::{GroupRow, GroupsRepo};
 pub use hosts::{
