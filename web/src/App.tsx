@@ -52,7 +52,8 @@ function AuthedRoutes({ me, onLogout }: { me: Me; onLogout: () => void }) {
             }
           />
         )}
-        <Route path="hosts/:hostId" element={<HostDetailPage me={me} />} />
+        {/* The optional segment is the tab; /hosts/:hostId is the overview. */}
+        <Route path="hosts/:hostId/:tab?" element={<HostDetailPage me={me} />} />
         {/* Editors are URLs too (/groups/new, /bundles/:id, …): a refresh keeps them open,
             and the sidebar entry for the list is a real way back out of one. */}
         <Route path="groups" element={<GroupsPage me={me} />} />
