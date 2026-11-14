@@ -157,6 +157,16 @@ fn facts_header(res: &reqwest::Response) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The `X-Failure-Context` answer: `Some("accept")` or `Some("accept; min-interval=N")`
+/// when the server takes failure reports, `None` when it does not. The agent posts nothing
+/// until it has seen this on a poll answer.
+fn failure_context_header(res: &reqwest::Response) -> Option<String> {
+    res.headers()
+        .get("x-failure-context")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+}
+
 /// A `/agent/v1/facts` body the way the agent builds it: the document spliced in verbatim
 /// and hashed as those exact bytes, members in sorted order.
 pub fn facts_upload_body(facts_json: &str, collected_at: &str) -> String {
@@ -245,12 +255,33 @@ impl EnrolledAgent {
         self.poll(current_hash, Some(facts_hash)).await
     }
 
+    /// Poll and read back only whether the server takes failure reports — the header a
+    /// failure-reporting agent gates on. Returns the desired state (`None` on 304) and the
+    /// `X-Failure-Context` answer.
+    pub async fn poll_for_failure_context(
+        &self,
+        current_hash: Option<&str>,
+    ) -> Result<(Option<DesiredState>, Option<String>)> {
+        let (state, _facts, failure) = self.poll_all(current_hash, None).await?;
+        Ok((state, failure))
+    }
+
     /// The one desired-state request: `facts_hash` omitted is an agent without facts.
     async fn poll(
         &self,
         current_hash: Option<&str>,
         facts_hash: Option<&str>,
     ) -> Result<(Option<DesiredState>, Option<String>)> {
+        let (state, facts, _failure) = self.poll_all(current_hash, facts_hash).await?;
+        Ok((state, facts))
+    }
+
+    /// The request itself, returning both advertised headers.
+    async fn poll_all(
+        &self,
+        current_hash: Option<&str>,
+        facts_hash: Option<&str>,
+    ) -> Result<(Option<DesiredState>, Option<String>, Option<String>)> {
         let client = self.mtls_client()?;
         let mut url = format!(
             "{}/agent/v1/desired-state",
@@ -266,9 +297,14 @@ impl EnrolledAgent {
         }
         let res = client.get(&url).send().await?;
         let held = facts_header(&res);
+        let takes_failures = failure_context_header(&res);
         match res.status().as_u16() {
-            200 => Ok((Some(res.json::<DesiredState>().await?), held)),
-            304 => Ok((None, held)),
+            200 => Ok((
+                Some(res.json::<DesiredState>().await?),
+                held,
+                takes_failures,
+            )),
+            304 => Ok((None, held, takes_failures)),
             429 => Err(anyhow!(
                 "rate limited (retry-after {})",
                 res.headers()
@@ -298,6 +334,28 @@ impl EnrolledAgent {
             Some(facts_hash),
         )
         .await
+    }
+
+    /// POST a raw `/agent/v1/failure-context` body, the way the agent does once its
+    /// pacer says a report is due.
+    ///
+    /// Returns the status and the body. A refusal is a status, not an error: every rejection
+    /// path means something specific to the agent (404 stops reporting, 413 drops the
+    /// report, 429 quiets the next turn), so a test has to be able to assert on it.
+    pub async fn post_failure_context(&self, body: &str) -> Result<(u16, String)> {
+        let client = self.mtls_client()?;
+        let url = format!(
+            "{}/agent/v1/failure-context",
+            self.mtls_url.trim_end_matches('/')
+        );
+        let res = client
+            .post(&url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.to_string())
+            .send()
+            .await?;
+        let status = res.status().as_u16();
+        Ok((status, res.text().await.unwrap_or_default()))
     }
 
     /// POST a raw `/agent/v1/facts` body. Returns the status and the `X-Facts-Hash` answer;
