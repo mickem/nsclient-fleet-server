@@ -19,6 +19,8 @@ loop:
           POST /agent/v1/state-report { applied_state_hash, reported_tags, errors,
                                         local_config_present, facts_hash }
   X-Facts-Hash on either answer ≠ <f> → POST /agent/v1/facts   (see §3)
+  X-Failure-Context: accept on a poll answer, a check has failed, and the agent's
+    reporting interval has passed → POST /agent/v1/failure-context   (see §4)
   POST /agent/v1/renew   (when cert has < 14 days left)
 ```
 
@@ -303,7 +305,155 @@ one, matching list records by their `id`, and the differences are kept as a boun
 the last 100 entries per host and source, one per stored document, each listing up to 200
 changes and counting any beyond that.
 
-## 4. Certificate lifecycle
+## 4. Failure context
+
+Optional, and negotiated: the agent can report a failed check together with the metrics
+snapshot it was holding when the check failed. A check result says what came back; the
+snapshot says what the host looked like at that moment, which is the difference between
+restating an alert and explaining it.
+
+This is the agent's contract (NSClient++ `service/failure_report.hpp`,
+`include/onboarding/failure_context_pacer.hpp`); what follows is what this server does with
+it.
+
+### 4.1 The server has to ask
+
+Every desired-state answer this server sends carries:
+
+```
+X-Failure-Context: accept
+```
+
+or, when the tenant has asked for a longer floor:
+
+```
+X-Failure-Context: accept; min-interval=7200
+```
+
+Rules the agent applies, and which therefore constrain us:
+
+- **An agent that has never seen the header on a poll answer posts nothing.** It is read from
+  the *poll* only — the header on a report's own answer proves nothing, so this server does
+  not bother setting it there.
+- **A poll answer without it switches reporting back off.** So the header must ride the
+  `304` a host in sync gets on nearly every poll, not just the `200`. It does.
+- `min-interval` is a **floor** on the agent's own interval, never a ceiling: an agent
+  configured for a day keeps its day. It is how a large fleet is paced, not how more traffic
+  is requested.
+- A `404` or `410` on the report route is read as "this server does not have it after all",
+  and reporting stops until a poll advertises again.
+
+A tenant turns the whole thing off from **Settings** (`reports_enabled: false`),
+which stops the header and so stops the traffic — without touching a host.
+
+### 4.2 The report
+
+```
+POST {mtls_url}/agent/v1/failure-context
+{
+  "sent_at": "2026-10-31T09:12:44Z",
+  "failure": {
+    "index": 42, "timestamp": 1793437964, "date": "2026-10-31T09:12:44Z",
+    "subject": "Scheduler", "depth": 0, "command": "check_cpu", "alias": "cpu",
+    "status": 2, "result": "CRITICAL", "message": "CRITICAL: 5m: 97%",
+    "lines": [{ "message": "CRITICAL: 5m: 97%",
+                "perf": { "total 5m": { "value": 97, "unit": "%" } } }]
+  },
+  "context": {
+    "state": "captured", "snapshot_id": 310,
+    "captured_at": "2026-10-31T09:12:39Z", "age_seconds": 5,
+    "metrics": { "system.cpu.total.idle": 3, "system.mem.physical.used": 15032385536 },
+    "metadata": { "system.cpu.total.idle": { "type": "gauge", "unit": "percent" } }
+  },
+  "suppressed": {
+    "since": "2026-10-31T08:12:40Z", "count": 37, "evicted": 0,
+    "by_check": [
+      { "command": "check_cpu", "status": 2, "count": 30,
+        "first": "2026-10-31T08:13:02Z", "last": "2026-10-31T09:11:40Z" }
+    ]
+  }
+}
+```
+
+Only `failure.command` and the envelope are required; every other field has a default,
+because an older or differently-configured agent omits some of them.
+
+- `failure` is the entry as the agent's own `/api/v2/failures` renders it, plus `date`. Its
+  `arguments` key is **absent** unless the agent records arguments (it does not by default) —
+  which is not the same as an empty list, and this server keeps the two apart.
+- `context.state` is `captured`, `evicted`, `too_large`, `disabled` or `none`.
+  `metrics`/`metadata` are present only for `captured`, in the shape
+  `/api/v2/metrics?meta=1` serves. A state that is not `captured` arriving *with* a document
+  has the document dropped, so what is stored can never contradict its own state.
+- `suppressed` is every other failure in the window, grouped by command and status. It is
+  what makes one report per interval honest: a check that flapped thirty times arrives as a
+  count rather than thirty reports. `evicted` is the failures the agent's own log cap dropped
+  before they could be reported — nothing else would tell us they happened.
+- Perfdata values and thresholds are numbers **or strings**: a Nagios range such as `"4:5"`
+  is a string, and so is a string-valued sample. This server stores them as sent.
+
+### 4.3 What the status code means
+
+The agent reads the answer as policy, so each class is chosen deliberately:
+
+| answer | what the agent does | when this server sends it |
+|---|---|---|
+| `202` | records the report as sent; persists the time so a restart does not re-send | stored |
+| `400` | drops this failure | the body is not JSON, or names no command |
+| `413` | **drops the report permanently — never retried** | the body is over 1 MiB |
+| `429`/`503` | stays quiet for the next turn; a `Retry-After` holds every report | the host is over its request budget |
+| other `4xx`/`5xx` | retries after 1 min, doubling to an hour | an internal error |
+
+A refusal costs the agent a failure outright, so everything that *can* be clamped is clamped
+instead: an over-long message, too many arguments, more metrics than the cap. Only a report
+with no command in it is refused, because there is nothing to file it under.
+
+The `413` limit is 1 MiB against a snapshot that measures ~120 KB rendered — a wide margin on
+purpose, because the agent treats that refusal as permanent.
+
+### 4.4 What the server stores
+
+Evidence, not alert history. The server keeps the **latest report per check per host**,
+keyed by `(command, alias)`: a new report for the same check replaces the previous one,
+status included. A disk that stays full for a week is one row, holding the newest report.
+There is no occurrence count or first-seen time — tracking an alert over time is the
+monitoring system's job, not this server's.
+
+With the agent's own pacing, that gives two independent bounds: the arrival rate is set by
+the fleet size and the interval, and the row count by how many distinct checks have failed.
+Neither grows with how long they stay failed.
+
+Note that the agent's `failure.index` restarts at 1 with its process, so it is never used as
+an identity here.
+
+### 4.5 Limits
+
+| field | limit |
+|---|---|
+| request body | 1 MiB (`413` past it) |
+| `arguments` | 32, 512 chars each |
+| `lines` | 20, 2048 chars each |
+| `perf` per line | 64 |
+| `metrics` / `metadata` keys | 4096 |
+| `suppressed.by_check` | 64 groups |
+| checks retained per host | 200 (oldest dropped) |
+| retention | 30 days since the check last reported |
+
+### 4.6 What happens to it afterwards
+
+The report is encrypted at rest under the server's master key, bound to the tenant and host
+that sent it — the same treatment host configuration overrides get, and deserved more, since
+a snapshot names hosts, services, interfaces and addresses.
+
+Nothing is done with it until someone asks for an error on the host to be explained —
+from the host's Context tab, `POST /api/explain`, or `check_nsclient fleet explain`. Then the
+host's latest snapshot, together with its facts and the matching check's latest report, is
+rendered into a prompt — with obvious credentials stripped and the evidence fenced and
+labelled as untrusted data — and a model explains the error against it. See
+[Explaining errors](explaining-errors.md). An agent needs to know none of this; it is the same
+POST either way.
+
+## 5. Certificate lifecycle
 
 Client certs live 90 days. When the current cert is within **14 days** of expiry:
 
@@ -330,7 +480,7 @@ bootstrap token ("Add host") and the agent re-enrolls.
 refreshes `last_seen_at`, and returns `403` if the cert was revoked) — useful at
 startup before entering the loop.
 
-## 5. Error handling summary
+## 6. Error handling summary
 
 | Response | Meaning | Agent behavior |
 |---|---|---|
