@@ -1,6 +1,7 @@
 pub mod api_key;
 pub mod crypto;
 pub mod facts;
+pub mod failures;
 pub mod host;
 pub mod merge;
 pub mod selector;
