@@ -30,8 +30,8 @@ const MAX_LIST_LIMIT: i64 = 200;
 const MAX_MIN_INTERVAL_SECS: i64 = 7 * 86_400;
 
 /// One report as a list shows it. The report itself is not included — a list of fifty would
-/// mean fifty decrypts, each of a document holding a few hundred metrics, for data no row
-/// renders.
+/// mean fifty decrypts, each of a document holding a few hundred metrics and a handful of
+/// tables, for data no row renders.
 #[derive(Serialize)]
 pub struct ContextSummaryView {
     pub id: String,
@@ -45,6 +45,11 @@ pub struct ContextSummaryView {
     /// `captured` | `evicted` | `too_large` | `disabled` | `none`.
     pub context_state: String,
     pub metrics_count: i64,
+    /// What became of the diagnostics tables: the agent's `captured` | `evicted` |
+    /// `too_large` | `disabled` | `none`, or `not_sent` when the report had no diagnostics
+    /// in it at all (an agent that predates them).
+    pub diagnostics_state: String,
+    pub diagnostics_tables: i64,
     pub payload_bytes: i64,
     pub reported_at: i64,
 }
@@ -62,6 +67,8 @@ impl From<&FailureContextRow> for ContextSummaryView {
             subject: row.subject.clone(),
             context_state: row.context_state.clone(),
             metrics_count: row.metrics_count,
+            diagnostics_state: row.diagnostics_state.clone(),
+            diagnostics_tables: row.diagnostics_tables,
             payload_bytes: row.payload_bytes,
             reported_at: row.reported_at,
         }

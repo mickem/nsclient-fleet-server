@@ -1,5 +1,5 @@
-//! Failure context: one failed check, with the metrics snapshot the agent held when it
-//! failed.
+//! Failure context: one failed check, with the metrics snapshot and the diagnostics tables
+//! the agent held when it failed.
 //!
 //! The wire contract is the agent's (NSClient++ `service/failure_report.hpp`,
 //! `include/onboarding/failure_context_pacer.hpp`), and this module is the server's side of
@@ -67,6 +67,19 @@ pub const MAX_METRIC_KEY_LEN: usize = 256;
 pub const MAX_METRIC_VALUE_LEN: usize = 512;
 /// Groups kept in the suppressed summary.
 pub const MAX_SUPPRESSED_GROUPS: usize = 64;
+/// Diagnostics tables kept from a snapshot, and the columns and rows kept from each.
+///
+/// The agent's own caps are 16 tables and 50 rows (`diagnostics rows`), and its widest table
+/// has seven columns. These are the agent's numbers with room in the column count, so a
+/// well-behaved agent never loses anything here and a hostile one cannot store more than a
+/// well-behaved one could.
+pub const MAX_DIAGNOSTICS_SECTIONS: usize = 16;
+pub const MAX_DIAGNOSTICS_COLUMNS: usize = 32;
+pub const MAX_DIAGNOSTICS_ROWS: usize = 50;
+/// Characters kept from a table cell: the agent's own cell cap, in characters.
+pub const MAX_DIAGNOSTICS_CELL_LEN: usize = 1024;
+/// Characters kept from a table's or a column's description, and from a table's error.
+pub const MAX_DIAGNOSTICS_TEXT_LEN: usize = 512;
 
 /// What became of the metrics snapshot a failure was recorded with, as the agent spells it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,6 +203,69 @@ pub struct MetricsContext {
     pub metadata: BTreeMap<String, serde_json::Value>,
 }
 
+/// One column of a diagnostics table.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct DiagnosticsColumn {
+    #[serde(default)]
+    pub name: String,
+    /// `string`, `int`, `float`, `timestamp` or `bool`, as the agent spells it. Kept as text:
+    /// it is the agent's vocabulary, and a type added later should render as a plain value
+    /// rather than cost the table.
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    /// `bytes`, `percent`; absent when the column has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// One diagnostics table: rows and columns that name things (the processes using the most
+/// CPU, the services in trouble, the last errors in the system logs) in the shape the
+/// agent's `/api/v2/diagnostics/{section}` serves.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct DiagnosticsSection {
+    /// The module that produced it, or `core`.
+    #[serde(default)]
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// When this table was last refreshed, which can be older than the snapshot it is in: a
+    /// table measured on a slow cadence is handed over as it last was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_at: Option<String>,
+    /// A cap cut the table: "10 rows" means "at least 10".
+    #[serde(default)]
+    pub truncated: bool,
+    /// Why the table could not be collected. Does not rule out rows: a table read from two
+    /// logs names the one that failed here and still carries the other's rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub columns: Vec<DiagnosticsColumn>,
+    /// Each row keyed by column name. A missing value is null.
+    #[serde(default)]
+    pub rows: Vec<BTreeMap<String, serde_json::Value>>,
+}
+
+/// The diagnostics snapshot, and what became of it. The same reference a [`MetricsContext`]
+/// is, with tables where that has metrics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiagnosticsContext {
+    pub state: ContextState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_at: Option<String>,
+    /// How stale the snapshot was when the check failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub age_seconds: Option<i64>,
+    /// Every table of the snapshot, keyed by name (`processes.top_cpu`). Present only when
+    /// the state is `captured`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sections: BTreeMap<String, DiagnosticsSection>,
+}
+
 /// One group in the suppressed summary: a command and status that failed `count` times.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SuppressedGroup {
@@ -233,6 +309,10 @@ pub struct FailureReport {
     pub sent_at: Option<String>,
     pub failure: FailedCheck,
     pub context: MetricsContext,
+    /// Absent from an agent that predates diagnostics, which is not the same as one that
+    /// has them switched off (`state: disabled`), so this stays an `Option`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<DiagnosticsContext>,
     #[serde(default)]
     pub suppressed: Suppressed,
 }
@@ -349,6 +429,10 @@ impl FailureReport {
             .filter(|(k, _)| kept.contains(k))
             .collect();
 
+        if let Some(d) = self.diagnostics.as_mut() {
+            d.normalize();
+        }
+
         let s = &mut self.suppressed;
         s.since = s
             .since
@@ -374,6 +458,105 @@ impl FailureReport {
         }
 
         Ok(())
+    }
+}
+
+/// The diagnostics state of a report whose agent sent no `diagnostics` key: a build that
+/// predates them. Ours rather than the agent's, which has no word for a key it does not send.
+pub const DIAGNOSTICS_NOT_SENT: &str = "not_sent";
+
+impl FailureReport {
+    /// What became of the diagnostics snapshot, as stored and listed: the agent's state, or
+    /// [`DIAGNOSTICS_NOT_SENT`] for a report with no `diagnostics` key at all.
+    pub fn diagnostics_state(&self) -> &'static str {
+        self.diagnostics
+            .as_ref()
+            .map_or(DIAGNOSTICS_NOT_SENT, |d| d.state.as_str())
+    }
+
+    /// Tables in the report, 0 when it carries none.
+    pub fn diagnostics_tables(&self) -> usize {
+        self.diagnostics.as_ref().map_or(0, |d| d.sections.len())
+    }
+}
+
+impl DiagnosticsContext {
+    /// Bring the tables inside every bound in this module. Clamping, never refusing, for the
+    /// reason [`FailureReport::normalize`] gives.
+    fn normalize(&mut self) {
+        self.captured_at = self
+            .captured_at
+            .take()
+            .map(|d| clamp(&d, 64))
+            .filter(|d| !d.is_empty());
+        if self.age_seconds.is_some_and(|a| a < 0) {
+            self.age_seconds = None;
+        }
+        // As with the metrics: the stored state and the stored tables must never disagree.
+        if self.state != ContextState::Captured {
+            self.sections.clear();
+        }
+        trim_map(&mut self.sections, MAX_DIAGNOSTICS_SECTIONS);
+        self.sections = std::mem::take(&mut self.sections)
+            .into_iter()
+            .map(|(name, mut section)| {
+                section.normalize();
+                (clamp(name.trim(), MAX_COMMAND_LEN), section)
+            })
+            .filter(|(name, _)| !name.is_empty())
+            .collect();
+    }
+}
+
+impl DiagnosticsSection {
+    fn normalize(&mut self) {
+        let text = |t: Option<String>| {
+            t.map(|t| clamp(t.trim(), MAX_DIAGNOSTICS_TEXT_LEN))
+                .filter(|t| !t.is_empty())
+        };
+        self.source = clamp(self.source.trim(), MAX_COMMAND_LEN);
+        self.description = text(self.description.take());
+        self.error = text(self.error.take());
+        self.captured_at = self
+            .captured_at
+            .take()
+            .map(|d| clamp(&d, 64))
+            .filter(|d| !d.is_empty());
+
+        self.columns.truncate(MAX_DIAGNOSTICS_COLUMNS);
+        for c in &mut self.columns {
+            c.name = clamp(c.name.trim(), MAX_COMMAND_LEN);
+            c.kind = clamp(c.kind.trim(), 32);
+            c.unit = c
+                .unit
+                .take()
+                .map(|u| clamp(u.trim(), 32))
+                .filter(|u| !u.is_empty());
+            c.description = text(c.description.take());
+        }
+        // A column needs a name to key a cell, and one name can key only one.
+        let mut seen = std::collections::BTreeSet::new();
+        self.columns
+            .retain(|c| !c.name.is_empty() && seen.insert(c.name.clone()));
+
+        // More rows than the cap means the table was cut here, and a reader must be able to
+        // tell "50 rows" from "at least 50" exactly as it can for the agent's own cap.
+        if self.rows.len() > MAX_DIAGNOSTICS_ROWS {
+            self.rows.truncate(MAX_DIAGNOSTICS_ROWS);
+            self.truncated = true;
+        }
+        // A row is its columns' cells and nothing else: the columns bound its width, and a
+        // key no column names is a cell nothing would render.
+        for row in &mut self.rows {
+            *row = self
+                .columns
+                .iter()
+                .map(|c| {
+                    let cell = row.remove(&c.name).unwrap_or(serde_json::Value::Null);
+                    (c.name.clone(), clamp_cell(cell))
+                })
+                .collect();
+        }
     }
 }
 
@@ -442,6 +625,19 @@ fn clamp_metric_value(v: serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Bound a table cell. Strings are clamped; numbers and booleans are kept as they are;
+/// anything else is not a cell and becomes null, which is also how the agent spells a
+/// missing value.
+fn clamp_cell(v: serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::String(s) => {
+            serde_json::Value::String(clamp(&s, MAX_DIAGNOSTICS_CELL_LEN))
+        }
+        v @ (serde_json::Value::Number(_) | serde_json::Value::Bool(_)) => v,
+        _ => serde_json::Value::Null,
+    }
+}
+
 /// Truncate to `max` *characters*, never splitting one. `&str[..n]` panics on a byte index
 /// inside a multi-byte character, and check output is full of them — a Windows path, a
 /// service name, a log line in any language but English.
@@ -493,8 +689,23 @@ mod tests {
                 .into_iter()
                 .collect(),
             },
+            diagnostics: None,
             suppressed: Suppressed::default(),
         }
+    }
+
+    /// A report whose diagnostics were captured, with `sections` as the agent's JSON.
+    fn report_with_tables(sections: serde_json::Value) -> FailureReport {
+        let mut r = report(check("check_x", "a", 2));
+        r.diagnostics = Some(
+            serde_json::from_value(serde_json::json!({
+                "state": "captured", "snapshot_id": 310,
+                "captured_at": "2026-10-31T09:12:39Z", "age_seconds": 5,
+                "sections": sections,
+            }))
+            .expect("the agent's shape"),
+        );
+        r
     }
 
     /// The example from the agent's own documentation (`docs/docs/setup/fleet.md`) must
@@ -515,6 +726,17 @@ mod tests {
             "state": "captured", "snapshot_id": 310, "captured_at": "2026-10-31T09:12:39Z", "age_seconds": 5,
             "metrics": { "system.cpu.total.idle": 3, "system.mem.physical.used": 15032385536 },
             "metadata": { "system.cpu.total.idle": { "type": "gauge", "unit": "percent" } }
+          },
+          "diagnostics": {
+            "state": "captured", "snapshot_id": 310, "captured_at": "2026-10-31T09:12:39Z", "age_seconds": 5,
+            "sections": {
+              "processes.top_cpu": {
+                "source": "CheckSystem", "captured_at": "2026-10-31T09:12:38Z", "truncated": true,
+                "columns": [{ "name": "name", "type": "string" }, { "name": "pid", "type": "int" },
+                            { "name": "cpu", "type": "float", "unit": "percent" }],
+                "rows": [{ "name": "acme-indexer.exe", "pid": 4242, "cpu": 87.5 }]
+              }
+            }
           },
           "suppressed": {
             "since": "2026-10-31T08:12:40Z", "count": 37, "evicted": 0,
@@ -548,6 +770,20 @@ mod tests {
             r.context.metadata["system.cpu.total.idle"]["unit"],
             "percent"
         );
+        let d = r.diagnostics.as_ref().expect("the tables came with it");
+        assert_eq!(d.state, ContextState::Captured);
+        assert_eq!(d.age_seconds, Some(5));
+        let top = &d.sections["processes.top_cpu"];
+        assert_eq!(top.source, "CheckSystem");
+        assert!(top.truncated);
+        assert_eq!(top.columns[2].name, "cpu");
+        assert_eq!(top.columns[2].kind, "float");
+        assert_eq!(top.columns[2].unit.as_deref(), Some("percent"));
+        assert_eq!(top.rows[0]["name"], "acme-indexer.exe");
+        assert_eq!(top.rows[0]["pid"], 4242);
+        assert_eq!(top.rows[0]["cpu"], 87.5);
+        assert_eq!(r.diagnostics_state(), "captured");
+        assert_eq!(r.diagnostics_tables(), 1);
         assert_eq!(r.suppressed.count, 37);
         assert_eq!(r.suppressed.by_check.len(), 2);
         assert_eq!(r.suppressed.by_check[0].command, "check_cpu");
@@ -575,6 +811,129 @@ mod tests {
             "OK",
             "status defaults to 0, so does the word"
         );
+    }
+
+    #[test]
+    fn a_report_without_diagnostics_is_told_from_one_with_them_switched_off() {
+        // An agent that predates diagnostics sends no key; one with `capture diagnostics`
+        // off sends `disabled`. The fix differs (upgrade, or flip a setting), so the two
+        // must not be stored as the same thing.
+        let old: FailureReport =
+            serde_json::from_str(r#"{"failure":{"command":"c"},"context":{"state":"none"}}"#)
+                .unwrap();
+        assert_eq!(old.diagnostics_state(), DIAGNOSTICS_NOT_SENT);
+        assert!(
+            !serde_json::to_string(&old).unwrap().contains("diagnostics"),
+            "and stays absent when stored"
+        );
+
+        let off: FailureReport = serde_json::from_str(
+            r#"{"failure":{"command":"c"},"context":{"state":"none"},"diagnostics":{"state":"disabled"}}"#,
+        )
+        .unwrap();
+        assert_eq!(off.diagnostics_state(), "disabled");
+        assert_eq!(off.diagnostics_tables(), 0);
+    }
+
+    #[test]
+    fn a_table_keeps_its_error_beside_its_rows_and_its_nulls() {
+        // `eventlog.errors` reads two logs: when one cannot be read the table names it in
+        // `error` and still carries the other's rows. A missing value is null.
+        let mut r = report_with_tables(serde_json::json!({
+            "disk.growth_spots": {
+                "source": "CheckDisk", "truncated": false,
+                "error": "shadow storage: access denied",
+                "columns": [{ "name": "path", "type": "string" },
+                            { "name": "size", "type": "int", "unit": "bytes", "description": "In use" }],
+                "rows": [{ "path": "C:\\Windows\\Temp", "size": null },
+                         { "path": "C:\\pagefile.sys", "size": 36507222016u64 }]
+            }
+        }));
+        r.normalize().unwrap();
+        let t = &r.diagnostics.as_ref().unwrap().sections["disk.growth_spots"];
+        assert_eq!(t.error.as_deref(), Some("shadow storage: access denied"));
+        assert_eq!(t.rows.len(), 2);
+        assert!(t.rows[0]["size"].is_null());
+        assert_eq!(t.rows[1]["size"], 36_507_222_016u64);
+        assert_eq!(t.columns[1].description.as_deref(), Some("In use"));
+    }
+
+    #[test]
+    fn oversized_tables_are_clamped_rather_than_refused() {
+        let columns: Vec<_> = (0..MAX_DIAGNOSTICS_COLUMNS + 5)
+            .map(|i| serde_json::json!({ "name": format!("c{i:03}"), "type": "string" }))
+            .collect();
+        let rows: Vec<_> = (0..MAX_DIAGNOSTICS_ROWS + 5)
+            .map(|_| serde_json::json!({ "c000": "x".repeat(MAX_DIAGNOSTICS_CELL_LEN + 50) }))
+            .collect();
+        let sections: serde_json::Map<_, _> = (0..MAX_DIAGNOSTICS_SECTIONS + 4)
+            .map(|i| {
+                (
+                    format!("t{i:03}"),
+                    serde_json::json!({ "source": "m", "columns": columns, "rows": rows }),
+                )
+            })
+            .collect();
+        let mut r = report_with_tables(serde_json::Value::Object(sections));
+
+        r.normalize().expect("clamping, not refusal");
+        let d = r.diagnostics.as_ref().unwrap();
+        assert_eq!(d.sections.len(), MAX_DIAGNOSTICS_SECTIONS);
+        let t = &d.sections["t000"];
+        assert_eq!(t.columns.len(), MAX_DIAGNOSTICS_COLUMNS);
+        assert_eq!(t.rows.len(), MAX_DIAGNOSTICS_ROWS);
+        assert!(
+            t.truncated,
+            "rows cut here must read as 'at least', as rows cut by the agent do"
+        );
+        assert_eq!(
+            t.rows[0]["c000"].as_str().unwrap().chars().count(),
+            MAX_DIAGNOSTICS_CELL_LEN
+        );
+    }
+
+    #[test]
+    fn a_row_is_its_columns_cells_and_nothing_else() {
+        let mut r = report_with_tables(serde_json::json!({
+            "t": {
+                "source": "m",
+                "columns": [{ "name": "name", "type": "string" }, { "name": "pid", "type": "int" },
+                            { "name": "name", "type": "string" }, { "name": " ", "type": "string" }],
+                "rows": [{ "name": "a", "stray": "not a column", "pid": { "nested": 1 } }, {}]
+            }
+        }));
+        r.normalize().unwrap();
+        let t = &r.diagnostics.as_ref().unwrap().sections["t"];
+        assert_eq!(
+            t.columns
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            ["name", "pid"],
+            "a repeated or unnamed column cannot key a cell"
+        );
+        assert_eq!(t.rows[0].len(), 2, "a key no column names is dropped");
+        assert_eq!(t.rows[0]["name"], "a");
+        assert!(t.rows[0]["pid"].is_null(), "an object is not a cell");
+        assert!(
+            t.rows[1]["name"].is_null() && t.rows[1]["pid"].is_null(),
+            "a cell the row left out reads as null"
+        );
+    }
+
+    #[test]
+    fn diagnostics_that_were_not_captured_cannot_smuggle_tables() {
+        let mut r = report_with_tables(serde_json::json!({
+            "t": { "source": "m", "columns": [{ "name": "a", "type": "string" }], "rows": [{ "a": "x" }] }
+        }));
+        let d = r.diagnostics.as_mut().unwrap();
+        d.state = ContextState::Evicted;
+        d.age_seconds = Some(-3);
+        r.normalize().unwrap();
+        let d = r.diagnostics.as_ref().unwrap();
+        assert!(d.sections.is_empty());
+        assert_eq!(d.age_seconds, None, "a stepped clock is not an age");
+        assert_eq!(r.diagnostics_state(), "evicted");
     }
 
     #[test]

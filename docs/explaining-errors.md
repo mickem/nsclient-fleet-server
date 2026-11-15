@@ -3,7 +3,8 @@
 This server is not a monitoring system. Your monitoring system raises the alert, decides how
 serious it is and tracks how long it stays open. What the fleet adds is **context**: when
 someone holding an error asks *why*, the fleet has the host's latest metrics snapshot, its
-inventory facts, and the agent's own record of the check that failed. This page is about
+latest diagnostics tables, its inventory facts, and the agent's own record of the check that
+failed. This page is about
 handing an error and that evidence to a language model and getting an explanation back.
 
 There are two ways to ask:
@@ -19,8 +20,12 @@ model would only be noise.
 The evidence comes from two places:
 
 - **Failure reports.** When a check fails, the agent can report it with the metrics snapshot
-  it held at that moment (see [agent-integration.md §4](agent-integration.md#4-failure-context)).
-  The server keeps the latest report per check per host.
+  and the diagnostics tables it held at that moment (see
+  [agent-integration.md §4](agent-integration.md#4-failure-context)). The server keeps the
+  latest report per check per host. The metrics say how much; the tables say what, by name:
+  the processes using the most CPU and memory, the services in trouble, the last errors in
+  the system logs, the places that usually fill a disk, the checks that failed before. They
+  are what lets an explanation name a culprit rather than describe a number.
 - **Facts.** The host's inventory — OS, hardware, volumes, interfaces, software — as the agent
   uploads it, plus any imported facts sources (see
   [agent-integration.md §3](agent-integration.md#3-host-facts-inventory)).
@@ -172,9 +177,12 @@ reports `calls_today` and `failures_today` — the second is what a misconfigura
 from outside.
 
 **The evidence is bounded in the prompt.** A snapshot is several hundred keys; the prompt
-takes them up to ~12 KB of rendered text, and facts up to ~8 KB across every source (the
-agent's own first), and then says how much it left out — so a model that saw a subset can
-qualify its answer instead of speaking as though it saw everything.
+takes them up to ~12 KB of rendered text, the diagnostics tables up to ~10 KB, and facts up
+to ~8 KB across every source (the agent's own first), and then says how much it left out —
+so a model that saw a subset can qualify its answer instead of speaking as though it saw
+everything. The tables' budget is shared out a row at a time across the tables, and a cell is
+cut at 240 characters, so a table of long event log messages loses its tail rather than
+pushing out the table that names the process.
 
 **No retries.** A failed call is reported to whoever asked (`502`, with the provider's reason)
 and counted. Asking again is their decision: a revoked key or an unknown model fails the same
@@ -197,8 +205,14 @@ network" is a configuration rather than a reason to do without the feature.
 
 **A snapshot and an inventory are more than numbers.** The snapshot carries the string
 metrics modules publish — host names, OS and version strings, interface names and addresses,
-service names — and the facts carry the machine's whole inventory. Worth knowing before
-sending them to a third party; it is also why reports are encrypted at rest.
+service names — and the facts carry the machine's whole inventory. The diagnostics tables
+carry more still: the names of the processes that were running, the services in trouble with
+the path of their executable and the account they run as, directory paths, and the text of
+recent errors from the system logs, which applications fill with whatever they like. The
+agent never sends a command line, and cuts a service's arguments off its path, because those
+carry credentials. Worth knowing before sending any of it to a third party; it is also why
+reports are encrypted at rest. To keep a table on the host, leave it switched off in the
+module that produces it, or name it in the agent's `prune pattern`.
 
 **Obvious credentials are stripped before the prompt is built.** Check arguments carry
 `--password=`, output lines carry tokens, and a service name can carry anything.
@@ -210,7 +224,7 @@ like one gets through.
 **The error and the evidence are data, never instruction.** The error was pasted by a person
 or a script, everything in a report was written by software on a machine we do not control,
 and anyone who can name a service on a monitored host can write text into a metrics
-snapshot. So:
+snapshot — or, by writing an event to its log, into a diagnostics table. So:
 
 - the task is in the system prompt; the error and the evidence are in the user message,
   fenced and introduced as untrusted data;
@@ -255,6 +269,9 @@ The evidence:
 - **the snapshot** — the host's latest metrics snapshot: the newest report carrying one,
   whichever check it came with. Its age is given to the model, which is told to take it into
   account;
+- **the tables** — the host's latest diagnostics tables, picked the same way: the newest
+  report carrying any. That is usually the report the snapshot came with, since the agent
+  sends both with one failure;
 - **the facts** — the agent's inventory and every imported source;
 - the host's name and fleet tags.
 
@@ -273,8 +290,9 @@ assume it saw them.
     "suggested_checks": ["Check the age of files under C:\\inetpub\\logs"],
     "confidence": "high"
   },
-  "check":    { "id": "01JC…", "command": "check_drivesize", "alias": "disk_c", "status_word": "CRITICAL", "context_state": "captured", "metrics_count": 521, "reported_at": 1793437964 },
-  "snapshot": { "id": "01JC…", "command": "check_drivesize", "alias": "disk_c", "status_word": "CRITICAL", "context_state": "captured", "metrics_count": 521, "reported_at": 1793437964 },
+  "check":       { "id": "01JC…", "command": "check_drivesize", "alias": "disk_c", "status_word": "CRITICAL", "context_state": "captured", "metrics_count": 521, "diagnostics_state": "captured", "diagnostics_tables": 7, "reported_at": 1793437964 },
+  "snapshot":    { "id": "01JC…", "command": "check_drivesize", "alias": "disk_c", "status_word": "CRITICAL", "context_state": "captured", "metrics_count": 521, "diagnostics_state": "captured", "diagnostics_tables": 7, "reported_at": 1793437964 },
+  "diagnostics": { "id": "01JC…", "command": "check_drivesize", "alias": "disk_c", "status_word": "CRITICAL", "context_state": "captured", "metrics_count": 521, "diagnostics_state": "captured", "diagnostics_tables": 7, "reported_at": 1793437964 },
   "facts_sources": ["agent", "import:cmdb"],
   "provider": "anthropic",
   "model": "claude-haiku-5-5",
@@ -285,7 +303,11 @@ assume it saw them.
 
 `confidence` is how well the evidence supports the explanation, and is worth showing next to
 it. A `low` usually means the host had no snapshot; the fix is on the agent side
-(`capture metrics = true` under `[/settings/core/failed checks]`).
+(`capture metrics = true` under `[/settings/core/failed checks]`). An explanation that
+describes the reading without naming what caused it usually means the host had no tables:
+set `capture diagnostics = true` in the same section, and switch on the tables in the modules
+that produce them (`processes`, `services`, `errors`, `growth spots`; see the agent's
+Diagnostics reference).
 
 | answer | when |
 |---|---|
@@ -301,8 +323,13 @@ Any role may ask: explaining is reading, and the budget bounds what it costs.
 ### The evidence itself
 
 - `GET /api/hosts/{id}/contexts` — the host's stored reports, newest first: one per check,
-  with `context_state` (whether a snapshot came with it, and if not why) and `metrics_count`.
-- `GET /api/hosts/{id}/contexts/{context_id}` — one report, with the report verbatim.
+  with `context_state` (whether a snapshot came with it, and if not why) and `metrics_count`,
+  and `diagnostics_state` and `diagnostics_tables`, which say the same of the tables.
+  `diagnostics_state` is the agent's `captured`, `evicted`, `too_large`, `disabled` or `none`,
+  or `not_sent` for a report with no diagnostics in it at all: an agent that predates them, or
+  a report stored before this server kept them.
+- `GET /api/hosts/{id}/contexts/{context_id}` — one report, with the report verbatim: the
+  tables are under `report.diagnostics.sections`, keyed by name.
 - `DELETE /api/hosts/{id}/contexts/{context_id}` — remove one. Requires a role that can
   change configuration.
 

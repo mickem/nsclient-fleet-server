@@ -30,6 +30,9 @@ pub struct FailureContextRow {
     pub subject: String,
     pub context_state: String,
     pub metrics_count: i64,
+    /// What became of the diagnostics snapshot: the agent's state, or `not_sent`.
+    pub diagnostics_state: String,
+    pub diagnostics_tables: i64,
     pub payload_encrypted: Vec<u8>,
     pub payload_bytes: i64,
     pub reported_at: i64,
@@ -49,6 +52,8 @@ pub struct NewFailureContext<'a> {
     pub subject: &'a str,
     pub context_state: &'a str,
     pub metrics_count: i64,
+    pub diagnostics_state: &'a str,
+    pub diagnostics_tables: i64,
     pub payload_encrypted: &'a [u8],
     pub payload_bytes: i64,
 }
@@ -56,7 +61,8 @@ pub struct NewFailureContext<'a> {
 /// Columns every read of this table selects. One constant so a column added later cannot be
 /// picked up by three of five queries.
 const COLUMNS: &str = "id, tenant_id, host_id, command, alias, status, status_word, message,
-     subject, context_state, metrics_count, payload_encrypted, payload_bytes, reported_at";
+     subject, context_state, metrics_count, diagnostics_state, diagnostics_tables,
+     payload_encrypted, payload_bytes, reported_at";
 
 fn row_from(r: &sqlx::sqlite::SqliteRow) -> FailureContextRow {
     FailureContextRow {
@@ -71,6 +77,8 @@ fn row_from(r: &sqlx::sqlite::SqliteRow) -> FailureContextRow {
         subject: r.get("subject"),
         context_state: r.get("context_state"),
         metrics_count: r.get("metrics_count"),
+        diagnostics_state: r.get("diagnostics_state"),
+        diagnostics_tables: r.get("diagnostics_tables"),
         payload_encrypted: r.get("payload_encrypted"),
         payload_bytes: r.get("payload_bytes"),
         reported_at: r.get("reported_at"),
@@ -95,8 +103,9 @@ impl<'a> FailureContextRepo<'a> {
         let row = sqlx::query(
             "INSERT INTO failure_contexts
                (id, tenant_id, host_id, command, alias, status, status_word, message, subject,
-                context_state, metrics_count, payload_encrypted, payload_bytes, reported_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                context_state, metrics_count, diagnostics_state, diagnostics_tables,
+                payload_encrypted, payload_bytes, reported_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(tenant_id, host_id, command, alias) DO UPDATE SET
                status = excluded.status,
                status_word = excluded.status_word,
@@ -104,6 +113,8 @@ impl<'a> FailureContextRepo<'a> {
                subject = excluded.subject,
                context_state = excluded.context_state,
                metrics_count = excluded.metrics_count,
+               diagnostics_state = excluded.diagnostics_state,
+               diagnostics_tables = excluded.diagnostics_tables,
                payload_encrypted = excluded.payload_encrypted,
                payload_bytes = excluded.payload_bytes,
                reported_at = excluded.reported_at
@@ -120,6 +131,8 @@ impl<'a> FailureContextRepo<'a> {
         .bind(new.subject)
         .bind(new.context_state)
         .bind(new.metrics_count)
+        .bind(new.diagnostics_state)
+        .bind(new.diagnostics_tables)
         .bind(new.payload_encrypted)
         .bind(new.payload_bytes)
         .bind(now_unix())
@@ -450,6 +463,8 @@ mod tests {
             subject: "Scheduler",
             context_state: "captured",
             metrics_count: 521,
+            diagnostics_state: "captured",
+            diagnostics_tables: 4,
             payload_encrypted: payload,
             payload_bytes: payload.len() as i64,
         }
@@ -484,6 +499,8 @@ mod tests {
         warn.status_word = "WARNING";
         warn.context_state = "disabled";
         warn.metrics_count = 0;
+        warn.diagnostics_state = "evicted";
+        warn.diagnostics_tables = 0;
         assert_eq!(
             repo.upsert(warn).await.unwrap(),
             "a1",
@@ -503,6 +520,11 @@ mod tests {
         );
         assert_eq!(r.context_state, "disabled");
         assert_eq!(r.metrics_count, 0);
+        assert_eq!(
+            r.diagnostics_state, "evicted",
+            "the tables are replaced with the report they came in"
+        );
+        assert_eq!(r.diagnostics_tables, 0);
     }
 
     #[tokio::test]
