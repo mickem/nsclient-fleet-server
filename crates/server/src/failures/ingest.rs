@@ -75,7 +75,8 @@ pub async fn ingest(
             StatusCode::PAYLOAD_TOO_LARGE,
             format!(
                 "a failure report may be at most {MAX_REPORT_BYTES} bytes; \
-                 lower what the metrics snapshot holds or turn `capture metrics` off"
+                 lower what the metrics snapshot and the diagnostics tables hold, or turn \
+                 `capture metrics` or `capture diagnostics` off"
             ),
         )
             .into_response();
@@ -130,6 +131,8 @@ pub async fn ingest(
             subject: &f.subject,
             context_state: report.context.state.as_str(),
             metrics_count: report.context.metrics.len() as i64,
+            diagnostics_state: report.diagnostics_state(),
+            diagnostics_tables: report.diagnostics_tables() as i64,
             payload_encrypted: &ciphertext,
             payload_bytes: payload.len() as i64,
         })

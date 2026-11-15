@@ -53,7 +53,7 @@ Repo root is the Cargo workspace. Crates under `crates/`, frontend under `web/`.
 | [docs/deployment.md](docs/deployment.md) | Running it in production: ports, certificates, every environment variable, backups, troubleshooting |
 | [docs/agent-implementation.md](docs/agent-implementation.md) | Writing an agent: enrollment, the bootstrap-token → CSR → mTLS flow |
 | [docs/agent-integration.md](docs/agent-integration.md) | The post-enrollment contract: config sync, state reporting, host facts, failure context, certificate renewal |
-| [docs/explaining-errors.md](docs/explaining-errors.md) | Explaining an error from your monitoring system against a host's latest snapshot and facts, with a language model: providers, cost bounds, privacy and prompt-injection posture, API |
+| [docs/explaining-errors.md](docs/explaining-errors.md) | Explaining an error from your monitoring system against a host's latest snapshot, diagnostics tables and facts, with a language model: providers, cost bounds, privacy and prompt-injection posture, API |
 | [docs/ca-rotation-playbook.md](docs/ca-rotation-playbook.md) | Rotating a tenant CA or bundle-signing key, planned or after compromise |
 
 ## Users and roles

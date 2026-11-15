@@ -32,7 +32,7 @@ import {
   fmtTime,
   HostDetail,
 } from "../../api";
-import { ContextStateChip, ReportStatusChip } from "./ContextChips";
+import { ContextStateChip, DiagnosticsStateChip, ReportStatusChip } from "./ContextChips";
 import { ReportDialog } from "./ReportDialog";
 
 /** The check selector's value for "work it out from the error text". */
@@ -48,7 +48,8 @@ type Props = {
 
 /**
  * Context for errors on this host: paste an error from the monitoring system and have it
- * explained against the host's latest snapshot and facts, and see the reports the agent sent.
+ * explained against the host's latest snapshot, diagnostics tables and facts, and see the
+ * reports the agent sent.
  *
  * Not an alert list. The monitoring system owns the alert; this tab only holds the evidence.
  */
@@ -114,8 +115,8 @@ function ExplainCard({
         </Typography>
         <Typography variant="body2" sx={{ color: "text.secondary", mb: 2 }}>
           Paste an error your monitoring system raised for this host. It is explained using the
-          host's latest metrics snapshot, its inventory facts and, when the error names a check
-          the agent has reported, that check's latest result.
+          host's latest metrics snapshot and diagnostics tables, its inventory facts and, when
+          the error names a check the agent has reported, that check's latest result.
         </Typography>
         <TextField
           multiline
@@ -226,6 +227,18 @@ function ExplanationView({
         </li>
         <li>
           <Typography variant="body2">
+            {result.diagnostics ? (
+              <>
+                The latest diagnostics tables ({result.diagnostics.diagnostics_tables}), which
+                came with <EvidenceLink r={result.diagnostics} onOpen={onOpenReport} />
+              </>
+            ) : (
+              "No diagnostics tables — this host has not reported any."
+            )}
+          </Typography>
+        </li>
+        <li>
+          <Typography variant="body2">
             {result.facts_sources.length > 0
               ? `Facts from ${result.facts_sources.join(", ")}`
               : "No inventory facts — this host has none on file."}
@@ -304,7 +317,8 @@ function ReportsCard({
         </Typography>
         <Typography variant="body2" sx={{ color: "text.secondary", mb: 2 }}>
           The latest report the agent sent for each check that failed, with the metrics snapshot
-          it held at the time. A newer report for the same check replaces the older one.
+          and the diagnostics tables it held at the time. A newer report for the same check
+          replaces the older one.
         </Typography>
         {(error || deleteError) && (
           <Alert severity="error" sx={{ mb: 2 }}>
@@ -328,6 +342,7 @@ function ReportsCard({
                 <TableCell>Message</TableCell>
                 <TableCell>Reported</TableCell>
                 <TableCell>Snapshot</TableCell>
+                <TableCell>Diagnostics</TableCell>
                 {canWrite && <TableCell />}
               </TableRow>
             </TableHead>
@@ -360,12 +375,15 @@ function ReportsCard({
                   <TableCell>
                     <ContextStateChip r={r} />
                   </TableCell>
+                  <TableCell>
+                    <DiagnosticsStateChip r={r} />
+                  </TableCell>
                   {canWrite && (
                     <TableCell>
                       <IconButton
                         size="small"
                         aria-label="Delete report"
-                        title="Delete this report and its snapshot"
+                        title="Delete this report, its snapshot and its tables"
                         onClick={(e) => {
                           e.stopPropagation();
                           void remove(r.id);

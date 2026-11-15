@@ -308,9 +308,11 @@ changes and counting any beyond that.
 ## 4. Failure context
 
 Optional, and negotiated: the agent can report a failed check together with the metrics
-snapshot it was holding when the check failed. A check result says what came back; the
-snapshot says what the host looked like at that moment, which is the difference between
-restating an alert and explaining it.
+snapshot and the diagnostics tables it was holding when the check failed. A check result
+says what came back; the snapshot says what the host looked like at that moment, and the
+tables name what was running and what went wrong — the processes using the most CPU and
+memory, the services in trouble, the last errors in the system logs. That is the difference
+between restating an alert and explaining it.
 
 This is the agent's contract (NSClient++ `service/failure_report.hpp`,
 `include/onboarding/failure_context_pacer.hpp`); what follows is what this server does with
@@ -365,6 +367,18 @@ POST {mtls_url}/agent/v1/failure-context
     "metrics": { "system.cpu.total.idle": 3, "system.mem.physical.used": 15032385536 },
     "metadata": { "system.cpu.total.idle": { "type": "gauge", "unit": "percent" } }
   },
+  "diagnostics": {
+    "state": "captured", "snapshot_id": 310,
+    "captured_at": "2026-10-31T09:12:39Z", "age_seconds": 5,
+    "sections": {
+      "processes.top_cpu": {
+        "source": "CheckSystem", "captured_at": "2026-10-31T09:12:38Z", "truncated": true,
+        "columns": [{ "name": "name", "type": "string" }, { "name": "pid", "type": "int" },
+                    { "name": "cpu", "type": "float", "unit": "percent" }],
+        "rows": [{ "name": "acme-indexer.exe", "pid": 4242, "cpu": 87.5 }]
+      }
+    }
+  },
   "suppressed": {
     "since": "2026-10-31T08:12:40Z", "count": 37, "evicted": 0,
     "by_check": [
@@ -385,6 +399,18 @@ because an older or differently-configured agent omits some of them.
   `metrics`/`metadata` are present only for `captured`, in the shape
   `/api/v2/metrics?meta=1` serves. A state that is not `captured` arriving *with* a document
   has the document dropped, so what is stored can never contradict its own state.
+- `diagnostics` is built the same way: the same five states and, for `captured`, every
+  table of the snapshot in `sections`, keyed by name, each in the shape the agent's
+  `/api/v2/diagnostics/{section}` serves. A table has `columns` (`name`, `type`, and `unit`
+  and `description` when set) and `rows`, each row an object keyed by column name; a missing
+  value is `null` and a timestamp is an ISO 8601 UTC string. `truncated` says a cap cut the
+  table, so "10 rows" reads as "at least 10". `error` says the table could not be collected
+  in full and does not rule out rows. It rides on the same `X-Failure-Context: accept`, with
+  no second opt-in: the agent sends it when `capture diagnostics` is on, and says `disabled`
+  when it is not.
+- An agent that predates diagnostics sends **no `diagnostics` key**. This server keeps that
+  apart from `disabled` and lists it as `not_sent`: the first is fixed by upgrading the
+  agent, the second by a setting.
 - `suppressed` is every other failure in the window, grouped by command and status. It is
   what makes one report per interval honest: a check that flapped thirty times arrives as a
   count rather than thirty reports. `evicted` is the failures the agent's own log cap dropped
@@ -405,11 +431,14 @@ The agent reads the answer as policy, so each class is chosen deliberately:
 | other `4xx`/`5xx` | retries after 1 min, doubling to an hour | an internal error |
 
 A refusal costs the agent a failure outright, so everything that *can* be clamped is clamped
-instead: an over-long message, too many arguments, more metrics than the cap. Only a report
-with no command in it is refused, because there is nothing to file it under.
+instead: an over-long message, too many arguments, more metrics than the cap, more tables or
+rows than the cap. Only a report with no command in it is refused, because there is nothing
+to file it under.
 
-The `413` limit is 1 MiB against a snapshot that measures ~120 KB rendered — a wide margin on
-purpose, because the agent treats that refusal as permanent.
+The `413` limit is 1 MiB against a snapshot that measures ~120 KB rendered and tables that
+add a few KB (ten rows a table by default; a table of fifty event log messages at the
+agent's 1024-byte cell cap is ~50 KB) — a wide margin on purpose, because the agent treats
+that refusal as permanent.
 
 ### 4.4 What the server stores
 
@@ -435,6 +464,11 @@ an identity here.
 | `lines` | 20, 2048 chars each |
 | `perf` per line | 64 |
 | `metrics` / `metadata` keys | 4096 |
+| `diagnostics.sections` | 16 tables |
+| columns per table | 32 |
+| rows per table | 50 (the table is then marked `truncated`) |
+| table cell | 1024 chars; a cell that is not a string, number or boolean becomes `null` |
+| table and column `description`, table `error` | 512 chars |
 | `suppressed.by_check` | 64 groups |
 | checks retained per host | 200 (oldest dropped) |
 | retention | 30 days since the check last reported |
@@ -443,11 +477,13 @@ an identity here.
 
 The report is encrypted at rest under the server's master key, bound to the tenant and host
 that sent it — the same treatment host configuration overrides get, and deserved more, since
-a snapshot names hosts, services, interfaces and addresses.
+a snapshot names hosts, services, interfaces and addresses, and the tables name the
+processes running on the host and quote its system logs.
 
 Nothing is done with it until someone asks for an error on the host to be explained —
 from the host's Context tab, `POST /api/explain`, or `check_nsclient fleet explain`. Then the
-host's latest snapshot, together with its facts and the matching check's latest report, is
+host's latest snapshot and latest tables, together with its facts and the matching check's
+latest report, are
 rendered into a prompt — with obvious credentials stripped and the evidence fenced and
 labelled as untrusted data — and a model explains the error against it. See
 [Explaining errors](explaining-errors.md). An agent needs to know none of this; it is the same

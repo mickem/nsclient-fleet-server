@@ -106,8 +106,8 @@ function ExplainSettingsCard({ canWrite }: { canWrite: boolean }) {
           Failure context and explanations
         </Typography>
         <Typography variant="body2" sx={{ color: "text.secondary", mb: 2 }}>
-          When a check fails, agents can report it together with the metrics they held at that
-          moment. Those reports, with each host's inventory facts, are the evidence an error
+          When a check fails, agents can report it together with the metrics and the
+          diagnostics tables they held at that moment. Those reports, with each host's inventory facts, are the evidence an error
           from your monitoring system is explained against on the host's Context tab, or with{" "}
           <code>check_nsclient fleet explain</code>.
         </Typography>
@@ -143,7 +143,7 @@ function ExplainSettingsCard({ canWrite }: { canWrite: boolean }) {
                   onChange={(e) => set("reports_enabled", e.target.checked)}
                 />
               }
-              label="Agents report failed checks with their metrics snapshot"
+              label="Agents report failed checks with their metrics snapshot and diagnostics tables"
             />
             <TextField
               size="small"
@@ -167,9 +167,10 @@ function ExplainSettingsCard({ canWrite }: { canWrite: boolean }) {
             {form.explain_enabled && (
               <>
                 <Alert severity="warning">
-                  Each explanation sends the error, the host's latest metrics snapshot and its
-                  inventory facts to the provider below. These include host, service, interface
-                  and address names.
+                  Each explanation sends the error, the host's latest metrics snapshot, its
+                  latest diagnostics tables and its inventory facts to the provider below. These
+                  include host, service, process, interface and address names, and the text of
+                  recent errors from the host's system logs.
                 </Alert>
                 <TextField
                   select

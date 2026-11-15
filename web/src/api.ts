@@ -537,6 +537,11 @@ export type CreateTenantResponse = {
  *  `context.state` in the agent's report (docs/agent-integration.md §4.2). */
 export type ContextState = "captured" | "evicted" | "too_large" | "disabled" | "none";
 
+/** Whether the agent sent its diagnostics tables with a report, and if not, why. The agent's
+ *  `diagnostics.state`, or `not_sent` for a report with no diagnostics in it at all: an agent
+ *  that predates them. */
+export type DiagnosticsState = ContextState | "not_sent";
+
 /** The latest report an agent sent for one check on a host, as
  *  `GET /api/hosts/{id}/contexts` lists it. Evidence for explaining errors, not an alert:
  *  a newer report for the same check replaces it. Mirrors `ContextSummaryView`. */
@@ -552,6 +557,9 @@ export type ContextSummary = {
   subject: string;
   context_state: ContextState | string;
   metrics_count: number;
+  diagnostics_state: DiagnosticsState | string;
+  /** Tables in the report, 0 when it carries none. */
+  diagnostics_tables: number;
   payload_bytes: number;
   reported_at: number;
 };
@@ -564,6 +572,34 @@ export type FailureLine = {
 };
 
 export type SnapshotMeta = { type?: string; unit?: string; [k: string]: unknown };
+
+/** One column of a diagnostics table. `type` is `string`, `int`, `float`, `timestamp` or
+ *  `bool`; `unit` is `bytes` or `percent` when the column has one. */
+export type DiagnosticsColumn = {
+  name: string;
+  type?: string;
+  unit?: string;
+  description?: string;
+};
+
+/** A table cell: a missing value is null, and a timestamp is an ISO 8601 UTC string. */
+export type DiagnosticsCell = string | number | boolean | null;
+
+/** One diagnostics table, as the agent's `/api/v2/diagnostics/{section}` serves it. */
+export type DiagnosticsSection = {
+  /** The module that produced it, or `core`. */
+  source?: string;
+  description?: string;
+  /** When this table was last refreshed, which can be older than the snapshot it is in. */
+  captured_at?: string;
+  /** A cap cut the table: "10 rows" means "at least 10". */
+  truncated?: boolean;
+  /** Why the table could not be collected. Does not rule out rows. */
+  error?: string;
+  columns?: DiagnosticsColumn[];
+  /** Each row keyed by column name. */
+  rows?: Record<string, DiagnosticsCell>[];
+};
 
 /** The agent's report as stored, verbatim. Every field but `failure.command` is optional:
  *  older or differently-configured agents omit some. */
@@ -587,6 +623,15 @@ export type FailureReport = {
     metrics?: Record<string, unknown>;
     metadata?: Record<string, SnapshotMeta>;
   };
+  /** Absent from an agent that predates diagnostics. `sections` is keyed by table name
+   *  (`processes.top_cpu`) and present only when the state is `captured`. */
+  diagnostics?: {
+    state?: string;
+    snapshot_id?: number;
+    captured_at?: string;
+    age_seconds?: number;
+    sections?: Record<string, DiagnosticsSection>;
+  };
 };
 
 export type ContextDetail = ContextSummary & { report: FailureReport | null };
@@ -609,6 +654,8 @@ export type EvidenceRef = {
   status_word: string;
   context_state: string;
   metrics_count: number;
+  diagnostics_state: string;
+  diagnostics_tables: number;
   reported_at: number;
 };
 
@@ -623,6 +670,8 @@ export type ExplainResponse = {
   check: EvidenceRef | null;
   /** The report carrying the host's latest metrics snapshot. */
   snapshot: EvidenceRef | null;
+  /** The report carrying the host's latest diagnostics tables: usually the same one. */
+  diagnostics: EvidenceRef | null;
   facts_sources: string[];
   provider: string;
   model: string;

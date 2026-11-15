@@ -3,7 +3,8 @@
 //! The caller holds an error from their monitoring system: pasted into the console, or passed
 //! by a script or `check_nsclient`. They name the host it is about, and optionally the check.
 //! This gathers what the fleet knows about that host — the agent's latest report of the
-//! check, the host's latest metrics snapshot, its inventory facts and tags — and asks the
+//! check, the host's latest metrics snapshot and diagnostics tables, its inventory facts and
+//! tags — and asks the
 //! tenant's model to explain the error against it. The answer is returned, not stored: it is
 //! an answer to one person's question, and the next person may paste a different error.
 //!
@@ -74,6 +75,8 @@ pub struct EvidenceRef {
     pub status_word: String,
     pub context_state: String,
     pub metrics_count: i64,
+    pub diagnostics_state: String,
+    pub diagnostics_tables: i64,
     pub reported_at: i64,
 }
 
@@ -86,6 +89,8 @@ impl From<&FailureContextRow> for EvidenceRef {
             status_word: r.status_word.clone(),
             context_state: r.context_state.clone(),
             metrics_count: r.metrics_count,
+            diagnostics_state: r.diagnostics_state.clone(),
+            diagnostics_tables: r.diagnostics_tables,
             reported_at: r.reported_at,
         }
     }
@@ -100,6 +105,9 @@ pub struct ExplainResponse {
     pub check: Option<EvidenceRef>,
     /// The report whose metrics snapshot was used — the host's latest — if there is one.
     pub snapshot: Option<EvidenceRef>,
+    /// The report whose diagnostics tables were used — the host's latest — if there is one.
+    /// Usually the same report as `snapshot`: the agent sends both with one failure.
+    pub diagnostics: Option<EvidenceRef>,
     /// The facts sources that were included, the agent's own first.
     pub facts_sources: Vec<String>,
     pub provider: String,
@@ -204,6 +212,10 @@ pub async fn explain(
             report: r,
             reported_at: row.reported_at,
         }),
+        diagnostics: evidence.diagnostics.as_ref().map(|(row, r)| StoredReport {
+            report: r,
+            reported_at: row.reported_at,
+        }),
         facts: &evidence.facts,
     };
     let req = LlmRequest {
@@ -262,6 +274,7 @@ pub async fn explain(
         explanation,
         check: evidence.check.as_ref().map(|(row, _)| row.into()),
         snapshot: evidence.snapshot.as_ref().map(|(row, _)| row.into()),
+        diagnostics: evidence.diagnostics.as_ref().map(|(row, _)| row.into()),
         facts_sources: evidence.facts.iter().map(|f| f.source.clone()).collect(),
         provider: cfg.provider.as_str().to_string(),
         model: cfg.model.clone(),
@@ -314,6 +327,7 @@ struct Evidence {
     host: HostContext,
     check: Option<(FailureContextRow, FailureReport)>,
     snapshot: Option<(FailureContextRow, FailureReport)>,
+    diagnostics: Option<(FailureContextRow, FailureReport)>,
     facts: Vec<FactsDocument>,
 }
 
@@ -358,6 +372,21 @@ async fn gather(
         Some(r) => decrypt(r),
         None => None,
     };
+    // The latest tables are picked the same way, and independently: the agent may hold one
+    // kind of snapshot and not the other (a budget released it, or only one is switched on),
+    // so the newest report with metrics is not always the newest with tables. Usually it is,
+    // and then it is that report rather than another decrypt of it.
+    let same = |held: &Option<(FailureContextRow, FailureReport)>, id: &str| {
+        held.as_ref().filter(|(row, _)| row.id == id).cloned()
+    };
+    let diagnostics = rows
+        .iter()
+        .find(|r| r.diagnostics_state == "captured" && r.diagnostics_tables > 0)
+        .and_then(|r| {
+            same(&snapshot, &r.id)
+                .or_else(|| same(&check, &r.id))
+                .or_else(|| decrypt(r))
+        });
 
     let tags = HostTagsRepo::new(&state.db)
         .list_for_host(tenant_id, &host.id)
@@ -373,6 +402,7 @@ async fn gather(
         },
         check,
         snapshot,
+        diagnostics,
         facts: load_facts(state, tenant_id, &host.id).await,
     })
 }
@@ -502,6 +532,8 @@ mod tests {
             subject: String::new(),
             context_state: "captured".into(),
             metrics_count: 0,
+            diagnostics_state: "not_sent".into(),
+            diagnostics_tables: 0,
             payload_encrypted: vec![],
             payload_bytes: 0,
             reported_at: 0,
