@@ -41,7 +41,7 @@ use crate::auth::AuthedUser;
 use crate::llm::prompt::{
     self, ExplainInput, Explanation, FactsDocument, HostContext, StoredReport, MAX_ERROR_CHARS,
 };
-use crate::llm::{LlmConfig, LlmRequest, ProviderKind};
+use crate::llm::{LlmConfig, LlmError, LlmRequest, ProviderKind};
 use crate::AppState;
 
 /// Reports considered when matching an error to a check. The per-host cap is 200; the
@@ -51,6 +51,10 @@ const MATCH_WINDOW: i64 = 200;
 /// Shortest alias or command that may be matched by appearing in the error text. A one- or
 /// two-letter alias (`c`, `db`) appears inside every other word.
 const MIN_MATCH_LEN: usize = 3;
+
+/// Model calls one explanation may make: the first, and one more when the answer came back
+/// unusable. Bounded at two because each is billed and counted against the daily budget.
+const MAX_ATTEMPTS: u32 = 2;
 
 #[derive(Deserialize)]
 pub struct ExplainRequest {
@@ -222,30 +226,57 @@ pub async fn explain(
     let Some(http) = crate::llm::endpoint::client(cfg.public_only) else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "internal").into_response();
     };
-    let result = cfg.provider_impl().complete(http, &cfg, &req).await;
+    // An answer that arrives but cannot be used — a schema-valid object with an empty
+    // summary is the one seen in practice — is the model's sampling, not the request: the
+    // same prompt asked again usually answers properly. So that one failure is retried,
+    // once. Everything else (transport, credentials, a refusal) would fail the same way
+    // again and is reported as it is.
+    let mut attempt = 1;
+    let (explanation, in_tok, out_tok) = loop {
+        // `in_tok`/`out_tok` are what is counted and logged; the response keeps the
+        // provider's own `Option`, so "not reported" does not turn into a zero.
+        let result = cfg.provider_impl().complete(http, &cfg, &req).await;
 
-    // Counted before the result is inspected: the request was made, and a provider that read
-    // the prompt before failing has usually billed for it.
-    let (in_tok, out_tok) = match &result {
-        Ok(r) => (r.input_tokens.unwrap_or(0), r.output_tokens.unwrap_or(0)),
-        Err(_) => (0, 0),
-    };
-    if let Err(e) = usage
-        .record_call(who.tenant_id, today, result.is_err(), in_tok, out_tok)
-        .await
-    {
-        tracing::error!(error = %e, "recording a model call failed");
-    }
+        // Counted before the result is inspected: the request was made, and a provider that
+        // read the prompt before failing has usually billed for it. Each attempt is a call.
+        let (in_tok, out_tok) = match &result {
+            Ok(r) => (r.input_tokens.unwrap_or(0), r.output_tokens.unwrap_or(0)),
+            Err(_) => (0, 0),
+        };
+        let parsed = result.and_then(|r| {
+            crate::llm::extract_json(&r.text)
+                .and_then(|v| Explanation::from_json(&v))
+                .map_err(|e| (e, r.text.chars().count()))
+                .map(|x| (x, r.input_tokens, r.output_tokens))
+                .map_err(|(e, reply_chars)| {
+                    // The size of the reply, never its text: it tells an empty answer from
+                    // a garbled one without putting a customer's evidence in the journal.
+                    tracing::info!(
+                        tenant_id = who.tenant_id,
+                        attempt,
+                        reply_chars,
+                        input_tokens = in_tok,
+                        output_tokens = out_tok,
+                        error = %e,
+                        "a model's answer was unusable"
+                    );
+                    e
+                })
+        });
+        if let Err(e) = usage
+            .record_call(who.tenant_id, today, parsed.is_err(), in_tok, out_tok)
+            .await
+        {
+            tracing::error!(error = %e, "recording a model call failed");
+        }
 
-    let explanation = match result.and_then(|r| {
-        crate::llm::extract_json(&r.text)
-            .and_then(|v| Explanation::from_json(&v))
-            .map(|x| (x, r.input_tokens, r.output_tokens))
-    }) {
-        Ok(x) => x,
-        Err(e) => {
-            tracing::info!(tenant_id = who.tenant_id, error = %e, "an explanation failed");
-            return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+        match parsed {
+            Ok(x) => break (x, in_tok, out_tok),
+            Err(LlmError::Malformed(_)) if attempt < MAX_ATTEMPTS => attempt += 1,
+            Err(e) => {
+                tracing::info!(tenant_id = who.tenant_id, error = %e, "an explanation failed");
+                return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+            }
         }
     };
 

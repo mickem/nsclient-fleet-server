@@ -38,9 +38,11 @@ impl LlmProvider for AnthropicProvider {
                 "format": { "type": "json_schema", "schema": req.schema },
                 // Explaining one error against a page of evidence is a short,
                 // well-specified task — the kind that does not repay deep reasoning. Effort
-                // is the lever for that whichever model the operator chose: it keeps that
-                // model's judgement at a fraction of the thinking spend.
-                "effort": "low"
+                // is the lever for that whichever model the operator chose. Medium rather
+                // than low: at low, a small model intermittently under-answered — a
+                // schema-valid object with an empty summary — on a prompt it answered
+                // properly seconds later.
+                "effort": "medium"
             }
         });
 
