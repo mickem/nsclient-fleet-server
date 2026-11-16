@@ -141,7 +141,9 @@ likely causes: each must be a distinct reason the condition arose, not a restate
 reading, a remark about the measurement, or a description of the host. If the evidence names \
 a process, service or file responsible, name it first. Give at most four suggested checks, \
 the most telling first, each a specific action on this host that would confirm or rule out a \
-cause. Fewer items are better than padded ones.";
+cause. Fewer items are better than padded ones, and the lists may be empty, but the summary \
+is always written: when there is little to go on, it says what the error means and that the \
+evidence does not show more.";
 
 /// The JSON schema the answer must satisfy.
 ///
@@ -154,7 +156,7 @@ pub fn answer_schema() -> serde_json::Value {
         "properties": {
             "summary": {
                 "type": "string",
-                "description": "Two or three sentences: what this error most likely means on this host, given the evidence."
+                "description": "Two or three sentences: what this error most likely means on this host, given the evidence. Never empty: when the evidence is not enough to tell, say that here."
             },
             "relevant_evidence": {
                 "type": "array",
