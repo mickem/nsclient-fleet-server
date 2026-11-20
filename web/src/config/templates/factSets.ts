@@ -16,6 +16,9 @@ export type FactTarget = {
 export type FactSet = {
   /** The set id, which is also the settings key: `network.interfaces`. */
   id: string;
+  /** The settings key when it is not the id: a diagnostics switch is named after what it
+   *  turns on (`services`), not after the table it produces (`services.problems`). */
+  key?: string;
   label: string;
   description: string;
   /** What collecting it costs the host, as the agent documents it. */
@@ -176,7 +179,8 @@ const isTrue = (v: string | undefined) =>
 /** How many of a set's switches the document turns on, out of how many there are. A set
  *  switched on for one platform only (hand-edited) reads as partial. */
 export function factSetState(ini: string, set: FactSet): "on" | "off" | "partial" {
-  const on = set.targets.filter((t) => isTrue(getIniValue(ini, t.section, set.id))).length;
+  const key = set.key ?? set.id;
+  const on = set.targets.filter((t) => isTrue(getIniValue(ini, t.section, key))).length;
   if (on === 0) return "off";
   return on === set.targets.length ? "on" : "partial";
 }
@@ -184,9 +188,10 @@ export function factSetState(ini: string, set: FactSet): "on" | "off" | "partial
 /** Switch a set on (every platform's key, plus the producing modules) or off (the keys
  *  removed, the modules left alone — other bundles may need them). */
 export function setFactSet(ini: string, set: FactSet, on: boolean): string {
+  const key = set.key ?? set.id;
   let next = ini;
   for (const t of set.targets) {
-    next = on ? setIniValue(next, t.section, set.id, "true") : removeIniKey(next, t.section, set.id);
+    next = on ? setIniValue(next, t.section, key, "true") : removeIniKey(next, t.section, key);
   }
   if (on) {
     for (const m of new Set(set.targets.flatMap((t) => (t.module ? [t.module] : [])))) {
