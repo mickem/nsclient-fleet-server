@@ -14,7 +14,8 @@
 // so switching between the form and the raw INI is lossless and comments survive.
 //
 // Layout: types.ts (field and template shapes), fields.ts (reading and writing a field in
-// the INI), factSets.ts (the facts the agent collects), shared.ts (building blocks the
+// the INI), factSets.ts (the facts the agent collects), diagnosticSets.ts (the diagnostics
+// tables it keeps with a failed check), shared.ts (building blocks the
 // definitions share), scripts.ts (the script languages a bundle can ship), and
 // definitions/ (one file per category, concatenated below in the order the picker shows
 // them).
@@ -53,6 +54,7 @@ export {
   tableRemoveRow,
 } from "./fields";
 export { type FactTarget, type FactSet, FACT_SETS, factSetState, setFactSet } from "./factSets";
+export { DIAGNOSTIC_SETS } from "./diagnosticSets";
 export { SERVICE_NAME_RE, TAG_NAME_RE } from "./shared";
 export {
   type ScriptLanguageId,

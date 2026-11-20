@@ -75,7 +75,8 @@ export type TemplateField =
       /** A checklist of host fact sets. Each set is one bool key, named after the set, in
        *  the settings section of every module that can produce it: checking a set writes
        *  `<id> = true` into all of them (and enables the modules); unchecking removes the
-       *  keys rather than writing false, so another bundle can still turn the set on. */
+       *  keys rather than writing false, so another bundle can still turn the set on.
+       *  Diagnostics tables are switched on the same way and use the same checklist. */
       kind: "facts";
       id: string;
       label: string;
