@@ -19,4 +19,13 @@ ignore = [
     # with its `-wal`, that a less trusted party could have written". The server opens only
     # its own database in its own data directory.
     "RUSTSEC-2026-0459",
+
+    # chrono 0.4.45 is unmaintained. An informational advisory, not a vulnerability; it
+    # fails the build because CI runs `cargo audit --deny warnings`.
+    #
+    # Nothing to upgrade to: there is no maintained chrono release, and it is not our
+    # dependency to replace. It comes in through rustls-acme alone, whose newest release
+    # (0.15.4) requires it unconditionally. Remove this entry as soon as a rustls-acme
+    # release drops chrono, or chrono gains a maintainer and the advisory is withdrawn.
+    "RUSTSEC-2026-0543",
 ]
