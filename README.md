@@ -4,6 +4,20 @@ Fleet management control plane for NSClient. One statically-linked binary — em
 SQLite, and TLS termination in-process — that runs either as a multi-tenant hosted service or
 single-tenant on your own hardware.
 
+## Status
+
+NSClient Fleet is in **preview**. It is usable today, but it is not feature complete and
+things may still change between releases.
+
+Not there yet:
+
+- **Variables in templates.** A template cannot yet take a value that is derived from a
+  host's facts or set as a per-host override.
+- **Upgrading NSClient++ itself.** The server manages an agent's configuration, not the
+  agent's version; NSClient++ is still upgraded by other means.
+- **Easier deployment.** An improved installer or script for getting the server running
+  with less manual setup.
+
 ## Bootstrap
 
 Prereqs:
